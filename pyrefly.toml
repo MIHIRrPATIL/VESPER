@@ -1,0 +1,23 @@
+# Pyrefly configuration for VESPER
+# Docs: https://pyrefly.org/en/docs/configuration/
+
+# Which directories to type-check
+project-includes = ["backend"]
+
+# Import resolution roots — "." lets `from backend.x import y` resolve
+search-path = ["."]
+
+# Python version
+python-version = "3.14"
+
+# Point pyrefly at the venv interpreter
+python-interpreter-path = "/home/mihir/Codes/VESPER/.venv/bin/python3.14"
+
+# Explicitly tell pyrefly where third-party packages live.
+# Pyrefly's default project-excludes pattern (**/.[!/.]*/**) hides .venv,
+# and the symlinked interpreter resolves to /usr/bin/python3.14 which
+# reports system site-packages instead of the venv's. This overrides that.
+site-package-path = ["/home/mihir/Codes/VESPER/.venv/lib/python3.14/site-packages"]
+
+# Suppress errors for third-party packages that don't ship type stubs
+ignore-missing-imports = true

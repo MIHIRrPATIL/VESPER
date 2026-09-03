@@ -1,0 +1,31 @@
+# Core API Gateway & Async Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+pydantic>=2.10.0
+python-dotenv>=1.0.0
+websockets>=14.0
+python-multipart>=0.0.20
+
+# Database & Async I/O
+aiosqlite>=0.21.0
+
+# Agent Orchestrator & AI
+langgraph>=0.2.70
+langchain-core>=0.3.40
+litellm>=1.60.0
+
+# Audio & Speech (Lightweight Production Stack)
+webrtcvad-wheels>=2.0.14
+groq>=0.18.0
+google-cloud-texttospeech>=2.30.0
+
+
+# Vision (Phase 2/3 - Isolated)
+# ultralytics
+# paddleocr
+# opencv-python
+
+# Utilities & Testing
+httpx>=0.28.0
+pytest>=8.3.0
+pytest-asyncio>=0.25.0
