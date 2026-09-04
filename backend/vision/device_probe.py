@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
+# Silence OpenCV internal C++ stderr warnings on Linux metadata device nodes
+os.environ.setdefault("OPENCV_LOG_LEVEL", "OFF")
+os.environ.setdefault("OPENCV_VIDEOIO_DEBUG", "0")
+
 logger = logging.getLogger("vesper.vision.device_probe")
 
 
@@ -36,11 +40,18 @@ class DeviceCapabilities(BaseModel):
     has_camera: bool = False
     available_cameras: List[int] = Field(default_factory=list)
     has_microphone: bool = True
+    has_speaker: bool = True
+    cpu_cores_logical: int = 1
+    cpu_cores_physical: int = 1
+    cpu_usage_pct: float = 0.0
+    ram_total_gb: float = 1.0
+    ram_available_gb: float = 0.5
+    ram_used_pct: float = 0.0
     probed_at: float = 0.0
 
 
 class DeviceProbe:
-    """Probes and caches host hardware and sensory equipment."""
+    """Probes and caches host hardware, compute vitals, and sensory equipment."""
 
     _cached_caps: Optional[DeviceCapabilities] = None
 
@@ -56,6 +67,8 @@ class DeviceProbe:
         has_display, is_headless = cls._detect_display()
         has_camera, available_cameras = cls._detect_cameras()
         has_microphone = cls._detect_microphone()
+        has_speaker = cls._detect_speaker()
+        compute = cls._detect_compute_metrics()
 
         caps = DeviceCapabilities(
             device_type=device_type,
@@ -69,11 +82,20 @@ class DeviceProbe:
             has_camera=has_camera,
             available_cameras=available_cameras,
             has_microphone=has_microphone,
+            has_speaker=has_speaker,
+            cpu_cores_logical=compute["cpu_cores_logical"],
+            cpu_cores_physical=compute["cpu_cores_physical"],
+            cpu_usage_pct=compute["cpu_usage_pct"],
+            ram_total_gb=compute["ram_total_gb"],
+            ram_available_gb=compute["ram_available_gb"],
+            ram_used_pct=compute["ram_used_pct"],
             probed_at=time.time(),
         )
         cls._cached_caps = caps
         logger.info(
             f"[DeviceProbe] Detected {caps.device_type} ({caps.device_model}) | "
+            f"CPU: {caps.cpu_cores_logical} cores ({caps.cpu_usage_pct:.1f}% load) | "
+            f"RAM: {caps.ram_available_gb:.1f}/{caps.ram_total_gb:.1f} GB avail | "
             f"Camera: {'Available ' + str(available_cameras) if has_camera else 'None'} | "
             f"Display: {'Active' if has_display else 'Headless'}"
         )
@@ -181,6 +203,50 @@ class DeviceProbe:
             pass
 
         return len(available_indices) > 0, available_indices
+
+    @classmethod
+    def _detect_compute_metrics(cls) -> Dict[str, Any]:
+        """Reads CPU cores, current load %, and RAM metrics via psutil."""
+        try:
+            import psutil
+
+            cpu_logical = psutil.cpu_count(logical=True) or 1
+            cpu_physical = psutil.cpu_count(logical=False) or cpu_logical
+            cpu_usage = psutil.cpu_percent(interval=0.05)
+            vmem = psutil.virtual_memory()
+            ram_total = round(vmem.total / (1024 ** 3), 2)
+            ram_avail = round(vmem.available / (1024 ** 3), 2)
+            ram_used_pct = vmem.percent
+            return {
+                "cpu_cores_logical": cpu_logical,
+                "cpu_cores_physical": cpu_physical,
+                "cpu_usage_pct": cpu_usage,
+                "ram_total_gb": ram_total,
+                "ram_available_gb": ram_avail,
+                "ram_used_pct": ram_used_pct,
+            }
+        except Exception as e:
+            logger.debug(f"[DeviceProbe] Error probing psutil metrics: {e}")
+            return {
+                "cpu_cores_logical": 1,
+                "cpu_cores_physical": 1,
+                "cpu_usage_pct": 0.0,
+                "ram_total_gb": 1.0,
+                "ram_available_gb": 0.5,
+                "ram_used_pct": 50.0,
+            }
+
+    @classmethod
+    def _detect_speaker(cls) -> bool:
+        """Detects whether audio playback / speaker hardware is present."""
+        try:
+            if Path("/proc/asound/cards").exists():
+                text = Path("/proc/asound/cards").read_text()
+                if "--- no soundcards ---" not in text:
+                    return True
+        except Exception:
+            pass
+        return True
 
     @classmethod
     def _detect_microphone(cls) -> bool:

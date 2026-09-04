@@ -102,10 +102,36 @@ class MessageRouter:
         if event_type == EventType.INTERRUPT:
             target_uuid = payload.get("target_uuid")
             reason = payload.get("reason", "USER_BARGE_IN")
+            priority = int(payload.get("priority", 10 if "USER" in str(reason).upper() else 1))
             logger.info(
                 f"[ROUTER] INTERRUPT received from '{session.client_id}' "
-                f"(target={target_uuid}, reason={reason})"
+                f"(target={target_uuid}, reason={reason}, priority={priority})"
             )
+
+            # Precedence Arbitration:
+            # - User Barge-In (priority >= 10): ALWAYS wins and aborts ongoing pipelines immediately.
+            # - Proactive / Triage Alerts (priority < 10): If user has active tasks/speech in session,
+            #   do not cancel or disrupt active pipeline; queue alert silently.
+            is_proactive = priority < 10 or "PROACTIVE" in str(reason).upper() or "TRIAGE" in str(reason).upper()
+            if is_proactive and self.tasks.has_active_session_tasks(session.session_id):
+                logger.info(
+                    f"[ROUTER] Proactive alert interrupt (reason={reason}, priority={priority}) deferred: "
+                    f"user voice pipeline is actively processing in session '{session.session_id}'."
+                )
+                ack = ServerEnvelope(
+                    uuid=envelope.uuid,
+                    channel=Channel.SYSTEM,
+                    type=EventType.INTERRUPT_ACK,
+                    status="deferred",
+                    payload={
+                        "target_uuid": target_uuid,
+                        "cancelled": False,
+                        "reason": reason,
+                        "queued": True,
+                    },
+                )
+                await self.manager.send_envelope(session.session_id, ack)
+                return
 
             cancelled = False
             if target_uuid:
@@ -173,7 +199,7 @@ class MessageRouter:
                 latency_ms = 0.0
 
                 try:
-                    async with httpx.AsyncClient(timeout=10.0) as http_client:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=2.0, read=45.0, write=5.0, pool=5.0)) as http_client:
                         agent_res = await http_client.post(
                             f"{AGENT_SERVICE_URL}/query",
                             json={
@@ -217,31 +243,147 @@ class MessageRouter:
         self.tasks.register(envelope.uuid, pipeline_task, session.session_id)
 
     async def _handle_gesture(self, session: ClientSession, envelope: ClientEnvelope) -> None:
-        """Handles discrete gesture shortcuts emitted by the client Web Worker."""
-        gesture = envelope.payload.get("gesture", "")
+        """Handles discrete gesture shortcuts emitted by the client Web Worker or backend GestureWorker."""
+        gesture = str(envelope.payload.get("gesture", "")).strip().upper()
         logger.info(f"[GESTURE] Received gesture '{gesture}' from '{session.client_id}'")
 
-        if gesture == "TOGGLE_ZEN":
+        if gesture in ("TOGGLE_ZEN", "PEACE_SIGN"):
+            current_zen = sync_manager.get_snapshot().zen_mode
+            new_zen = not current_zen
+            await sync_manager.update_state({"zen_mode": new_zen}, source_device_id=session.client_id)
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.SYSTEM,
                 type=EventType.ZEN_MODE_STATE,
-                payload={"toggle": True},
+                payload={"toggle": True, "zen_mode": new_zen},
             )
             await self.manager.broadcast(broadcast_envelope)
 
-        elif gesture.startswith("VOLUME_DIAL:"):
+        elif gesture in ("CLOSED_FIST", "MUTE", "PAUSE"):
+            # Instant Mute / Pause playback
+            cur_state = sync_manager.get_snapshot()
+            media_copy = dict(cur_state.current_media)
+            media_copy["is_playing"] = False
+            await sync_manager.update_state({"master_volume": 0, "current_media": media_copy}, source_device_id=session.client_id)
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.SYSTEM,
+                type=EventType.SET_VOLUME,
+                payload={"volume": 0, "muted": True, "media_action": "pause"},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+
+        elif gesture in ("OPEN_PALM", "RESUME", "PLAY", "UNMUTE"):
+            # Resume playback / Unmute to default level
+            current_vol = sync_manager.get_snapshot().master_volume
+            restore_vol = current_vol if current_vol > 0 else 50
+            cur_state = sync_manager.get_snapshot()
+            media_copy = dict(cur_state.current_media)
+            media_copy["is_playing"] = True
+            await sync_manager.update_state({"master_volume": restore_vol, "current_media": media_copy}, source_device_id=session.client_id)
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.SYSTEM,
+                type=EventType.SET_VOLUME,
+                payload={"volume": restore_vol, "muted": False, "media_action": "play"},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+
+        elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT"):
+            # Next Track playback control
+            logger.info(f"[GESTURE] Triggered NEXT_TRACK media control from '{session.client_id}'")
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.SYSTEM,
+                type=EventType.MEDIA_CONTROL,
+                payload={"action": "next_track", "source": "GESTURE"},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+
+        elif gesture in ("PREV_TRACK", "PREVIOUS_TRACK", "SWIPE_LEFT"):
+            # Previous Track playback control
+            logger.info(f"[GESTURE] Triggered PREV_TRACK media control from '{session.client_id}'")
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.SYSTEM,
+                type=EventType.MEDIA_CONTROL,
+                payload={"action": "previous_track", "source": "GESTURE"},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+
+        elif gesture in ("THUMB_UP", "VOLUME_UP"):
+            # Step Volume Up (+10%)
+            current_vol = sync_manager.get_snapshot().master_volume
+            new_vol = min(100, current_vol + 10)
+            await sync_manager.update_state({"master_volume": new_vol}, source_device_id=session.client_id)
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.SYSTEM,
+                type=EventType.SET_VOLUME,
+                payload={"volume": new_vol, "direction": "up", "step": 10},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+
+        elif gesture in ("THUMB_DOWN", "VOLUME_DOWN"):
+            # Step Volume Down (-10%)
+            current_vol = sync_manager.get_snapshot().master_volume
+            new_vol = max(0, current_vol - 10)
+            await sync_manager.update_state({"master_volume": new_vol}, source_device_id=session.client_id)
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.SYSTEM,
+                type=EventType.SET_VOLUME,
+                payload={"volume": new_vol, "direction": "down", "step": 10},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+
+        elif gesture in ("POINTING_UP", "TOGGLE_FOCUS", "FOCUS_MODE"):
+            # Toggle Focus Mode
+            current_focus = sync_manager.get_snapshot().focus_mode
+            new_focus = not current_focus
+            await sync_manager.update_state({"focus_mode": new_focus}, source_device_id=session.client_id)
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.SYSTEM,
+                type=EventType.FOCUS_MODE_STATE,
+                payload={"toggle": True, "focus_mode": new_focus},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+
+        elif gesture in ("AIR_TAP", "PINCH_TAP", "SELECT"):
+            # Air tap / pinch click event
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.GESTURE,
+                type=EventType.GESTURE_EVENT,
+                payload={"gesture": "AIR_TAP", "action": "select"},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+
+        elif gesture.startswith("VOLUME_DIAL:") or gesture.startswith("PINCH_DIAL:"):
             try:
                 level = int(gesture.split(":")[1])
+                clamped = max(0, min(100, level))
+                await sync_manager.update_state({"master_volume": clamped}, source_device_id=session.client_id)
                 broadcast_envelope = ServerEnvelope(
                     uuid=envelope.uuid,
                     channel=Channel.SYSTEM,
                     type=EventType.SET_VOLUME,
-                    payload={"volume": level},
+                    payload={"volume": clamped},
                 )
                 await self.manager.broadcast(broadcast_envelope)
-            except ValueError:
+            except (ValueError, IndexError):
                 pass
+
+        elif gesture.startswith("GESTURE_TOGGLE"):
+            is_paused = ":PAUSED" in gesture or gesture == "GESTURE_TOGGLE_PAUSED"
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.GESTURE,
+                type=EventType.GESTURE_EVENT,
+                payload={"gesture": gesture, "tracking_paused": is_paused},
+            )
+            await self.manager.broadcast(broadcast_envelope)
 
     async def _handle_notify(self, session: ClientSession, envelope: ClientEnvelope) -> None:
         """Handles mobile companion notification ingestion."""

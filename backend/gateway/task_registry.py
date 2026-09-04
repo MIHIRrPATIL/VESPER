@@ -61,9 +61,17 @@ class TaskRegistry:
             if sid == session_id:
                 if self.cancel(cid):
                     cancelled_count += 1
-        if cancelled_count:
-            logger.info(f"[TASKS] Cancelled {cancelled_count} tasks for session '{session_id}'")
+        logger.info(f"[TASKS] Cancelled {cancelled_count} task(s) for session '{session_id}'")
         return cancelled_count
+
+    def has_active_session_tasks(self, session_id: str) -> bool:
+        """Returns True if any uncompleted tasks exist for this session."""
+        for cid, sid in self._task_sessions.items():
+            if sid == session_id:
+                task = self._tasks.get(cid)
+                if task and not task.done():
+                    return True
+        return False
 
     def cancel_all(self) -> int:
         """Cancels all currently active tasks across all sessions."""

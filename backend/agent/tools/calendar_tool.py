@@ -49,6 +49,7 @@ class GoogleCalendarTool:
                     "end": (now + datetime.timedelta(hours=3)).strftime("%I:%M %p"),
                     "location": "Google Meet",
                     "status": "confirmed",
+                    "source": "sandbox",
                 }
             ]
 
@@ -93,3 +94,146 @@ class GoogleCalendarTool:
 
         import asyncio
         return await asyncio.to_thread(_fetch_events_sync)
+
+    async def create_event(
+        self,
+        summary: str,
+        start_time_str: str,
+        end_time_str: Optional[str] = None,
+        description: Optional[str] = None,
+        location: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Schedules a new event on Google Calendar."""
+        start_dt, end_dt = self._parse_event_time(start_time_str, end_time_str)
+
+        if not TOKEN_PATH.exists():
+            return {
+                "id": f"event_mock_{int(datetime.datetime.now().timestamp())}",
+                "summary": summary,
+                "start": start_dt.strftime("%I:%M %p"),
+                "end": end_dt.strftime("%I:%M %p"),
+                "status": "confirmed_mock",
+                "html_link": "https://calendar.google.com",
+            }
+
+        def _create_event_sync() -> Dict[str, Any]:
+            try:
+                from google.oauth2.credentials import Credentials
+                from google.auth.transport.requests import Request
+                from googleapiclient.discovery import build
+
+                creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                    with open(TOKEN_PATH, "w") as token:
+                        token.write(creds.to_json())
+
+                service: Any = build("calendar", "v3", credentials=creds)
+                
+                # Use timezone-aware ISO strings
+                local_tz = datetime.datetime.now().astimezone().tzinfo
+                s_dt = start_dt if start_dt.tzinfo else start_dt.replace(tzinfo=local_tz)
+                e_dt = end_dt if end_dt.tzinfo else end_dt.replace(tzinfo=local_tz)
+                body = {
+                    "summary": summary,
+                    "description": description or "Scheduled by Alfred",
+                    "start": {"dateTime": s_dt.isoformat()},
+                    "end": {"dateTime": e_dt.isoformat()},
+                }
+                if location:
+                    body["location"] = location
+
+                created = service.events().insert(calendarId="primary", body=body).execute()
+                return {
+                    "id": created.get("id"),
+                    "summary": created.get("summary", summary),
+                    "start": start_dt.strftime("%I:%M %p"),
+                    "end": end_dt.strftime("%I:%M %p"),
+                    "status": "confirmed",
+                    "html_link": created.get("htmlLink", "https://calendar.google.com"),
+                }
+            except Exception as e:
+                logger.warning(f"[Calendar] Error creating event via Google Calendar API: {e}")
+                return {
+                    "id": f"event_fallback_{int(datetime.datetime.now().timestamp())}",
+                    "summary": summary,
+                    "start": start_dt.strftime("%I:%M %p"),
+                    "end": end_dt.strftime("%I:%M %p"),
+                    "status": "fallback_local",
+                    "error": str(e),
+                }
+
+        import asyncio
+        return await asyncio.to_thread(_create_event_sync)
+
+    async def delete_event(self, event_id: str) -> bool:
+        """Deletes an event from Google Calendar by ID."""
+        if not TOKEN_PATH.exists() or not event_id:
+            return True
+
+        def _delete_sync() -> bool:
+            try:
+                from google.oauth2.credentials import Credentials
+                from google.auth.transport.requests import Request
+                from googleapiclient.discovery import build
+
+                creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                    with open(TOKEN_PATH, "w") as token:
+                        token.write(creds.to_json())
+
+                service: Any = build("calendar", "v3", credentials=creds)
+                service.events().delete(calendarId="primary", eventId=event_id).execute()
+                logger.info(f"[Calendar] Successfully deleted event {event_id} from Google Calendar.")
+                return True
+            except Exception as e:
+                logger.warning(f"[Calendar] Error deleting event {event_id}: {e}")
+                return False
+
+        import asyncio
+        return await asyncio.to_thread(_delete_sync)
+
+    @staticmethod
+    def _parse_event_time(start_str: str, end_str: Optional[str] = None) -> tuple[datetime.datetime, datetime.datetime]:
+        """Parses conversational time expressions (e.g. '5.30 today', '5:30 PM', 'tomorrow at 3pm') into datetimes."""
+        import re
+
+        now = datetime.datetime.now()
+        target_date = now.date()
+
+        text = start_str.lower().strip()
+        if "tomorrow" in text:
+            target_date = target_date + datetime.timedelta(days=1)
+        elif "day after tomorrow" in text:
+            target_date = target_date + datetime.timedelta(days=2)
+
+        # Match patterns like 5:30, 5.30, 5pm, 17:30, 5:30 pm
+        match = re.search(r"(\d{1,2})[:.]?(\d{2})?\s*(am|pm)?", text)
+        hour = 12
+        minute = 0
+        if match:
+            h_str, m_str, ampm = match.groups()
+            hour = int(h_str)
+            minute = int(m_str) if m_str else 0
+            if ampm:
+                if ampm == "pm" and hour < 12:
+                    hour += 12
+                elif ampm == "am" and hour == 12:
+                    hour = 0
+            else:
+                # If unspecified and hour is between 1 and 7, assume PM for workday/evening
+                if 1 <= hour <= 7:
+                    hour += 12
+
+        start_dt = datetime.datetime(
+            year=target_date.year,
+            month=target_date.month,
+            day=target_date.day,
+            hour=hour,
+            minute=minute,
+        )
+        # Default duration 30 minutes
+        end_dt = start_dt + datetime.timedelta(minutes=30)
+        return start_dt, end_dt
+

@@ -19,6 +19,7 @@ class SpecialistResult(BaseModel):
 
     success: bool = True
     action: str = ""
+    agent_name: str = ""  # Populated by the registry on execution
     data: Dict[str, Any] = Field(default_factory=dict)
     speech_summary: str = ""
     card_payload: Optional[Dict[str, Any]] = None

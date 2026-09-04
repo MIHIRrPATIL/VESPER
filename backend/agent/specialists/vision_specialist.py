@@ -224,12 +224,37 @@ class VisionSpecialist(BaseSpecialist):
                 data={"source": "webcam"},
             )
 
+        desc = analysis.description or ""
+        desc_lower = desc.lower()
+
+        # Confidence scoring for scene analysis:
+        # Check if model expresses uncertainty, occlusion, or lack of visual clarity
+        uncertain_patterns = [
+            "unclear", "cannot clearly", "hard to see", "hard to tell", "blurry",
+            "difficult to read", "difficult to identify", "unable to identify",
+            "partially obscured", "cannot make out", "not clearly visible",
+            "not enough detail", "could not determine", "low lighting", "too dark"
+        ]
+        hedged_patterns = [
+            "appears to be", "might be", "possibly", "looks somewhat like",
+            "seems to be", "could be", "resembles"
+        ]
+
+        if len(desc.strip()) < 15 or any(p in desc_lower for p in uncertain_patterns):
+            confidence = "uncertain"
+        elif any(p in desc_lower for p in hedged_patterns):
+            confidence = "medium"
+        else:
+            confidence = "high"
+
         return SpecialistResult(
             success=True,
             action="inspect_webcam",
             speech_summary=analysis.description,
             data={
                 "description": analysis.description,
+                "confidence": confidence,
+                "raw_ocr": "",
                 "source": "webcam",
                 "width": frame.width,
                 "height": frame.height,
@@ -240,6 +265,7 @@ class VisionSpecialist(BaseSpecialist):
                 "title": "Webcam Visual Inspection",
                 "description": analysis.description,
                 "source": "webcam",
+                "confidence": confidence,
             },
         )
 
@@ -291,12 +317,26 @@ class VisionSpecialist(BaseSpecialist):
         text = ocr_result.extracted_text or ocr_result.description
         speech = "Here is the transcription of what you are holding, sir." if len(text) > 40 else text
 
+        # Confidence scoring: based on how much legible text was extracted.
+        # "high"     → ≥15 chars of text (enough for a title/label search)
+        # "medium"   → 5-14 chars (partial read, may still be useful)
+        # "uncertain" → <5 chars or empty (cover not readable, ask user to reposition)
+        stripped = text.strip()
+        if len(stripped) >= 15:
+            confidence = "high"
+        elif len(stripped) >= 5:
+            confidence = "medium"
+        else:
+            confidence = "uncertain"
+
         return SpecialistResult(
             success=True,
             action="ocr_webcam",
             speech_summary=speech,
             data={
                 "extracted_text": text,
+                "raw_ocr": text,           # direct OCR output, unmodified
+                "confidence": confidence,  # high / medium / uncertain
                 "source": "webcam",
                 "width": frame.width,
                 "height": frame.height,
@@ -305,9 +345,11 @@ class VisionSpecialist(BaseSpecialist):
                 "type": "OCR_TRANSCRIPTION",
                 "title": "Webcam Optical OCR",
                 "text": text,
+                "confidence": confidence,
                 "source": "webcam",
             },
         )
+
 
     async def _inspect_screen(self, params: Dict[str, Any]) -> SpecialistResult:
         """Captures desktop monitor frame and conducts multimodal visual reasoning."""
@@ -353,12 +395,23 @@ class VisionSpecialist(BaseSpecialist):
                 data={"source": "screen"},
             )
 
+        desc = analysis.description or ""
+        desc_lower = desc.lower()
+        if len(desc.strip()) < 15 or any(p in desc_lower for p in ["unclear", "blurry", "cannot clearly", "hard to read", "unable to identify"]):
+            confidence = "uncertain"
+        elif any(p in desc_lower for p in ["appears to be", "might be", "possibly"]):
+            confidence = "medium"
+        else:
+            confidence = "high"
+
         return SpecialistResult(
             success=True,
             action="inspect_screen",
             speech_summary=analysis.description,
             data={
                 "description": analysis.description,
+                "confidence": confidence,
+                "raw_ocr": "",
                 "source": "screen",
                 "width": frame.width,
                 "height": frame.height,
@@ -369,6 +422,7 @@ class VisionSpecialist(BaseSpecialist):
                 "title": "Desktop Screen Inspection",
                 "description": analysis.description,
                 "source": "screen",
+                "confidence": confidence,
             },
         )
 
@@ -414,12 +468,22 @@ class VisionSpecialist(BaseSpecialist):
         text = ocr_result.extracted_text or ocr_result.description
         speech = "I have transcribed the text visible on your display, sir." if len(text) > 40 else text
 
+        stripped = text.strip()
+        if len(stripped) >= 15:
+            confidence = "high"
+        elif len(stripped) >= 5:
+            confidence = "medium"
+        else:
+            confidence = "uncertain"
+
         return SpecialistResult(
             success=True,
             action="ocr_screen",
             speech_summary=speech,
             data={
                 "extracted_text": text,
+                "raw_ocr": text,
+                "confidence": confidence,
                 "source": "screen",
                 "width": frame.width,
                 "height": frame.height,

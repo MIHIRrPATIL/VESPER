@@ -2,8 +2,8 @@
 """VESPER Interactive Pipeline & Latency Tester (CLI).
 
 Comprehensive test harness for the VESPER voice, AI reasoning, and data layers:
-  [1] Live Microphone Roundtrip (Mic ➔ Groq STT ➔ OpenRouter LLM ➔ TTS ➔ Playback + Latency Report)
-  [2] Interactive Text Query (Text Prompt ➔ OpenRouter LLM ➔ TTS ➔ Playback)
+  [1] Live Microphone Roundtrip (Mic -> Groq STT -> OpenRouter LLM -> TTS -> Playback + Latency Report)
+  [2] Interactive Text Query (Text Prompt -> OpenRouter LLM -> TTS -> Playback)
   [3] Speech-to-Text Benchmark (Transcribe an existing WAV file via Groq Whisper)
   [4] Supabase Cloud Data Layer Verification (Tasks, Finance, Memories)
 """
@@ -73,7 +73,7 @@ def play_audio_file(audio_path: Path):
 
 def record_microphone_audio(sample_rate: int = 16000) -> bytes:
     """Records 16kHz mono 16-bit PCM audio from default microphone with Push-to-Talk."""
-    print(f"\n{YELLOW}{BOLD}🎤 [RECORDING] Press ENTER to START recording...{RESET}", end="")
+    print(f"\n{YELLOW}{BOLD}[RECORDING] Press ENTER to START recording...{RESET}", end="")
     input()
 
     frames = []
@@ -83,9 +83,18 @@ def record_microphone_audio(sample_rate: int = 16000) -> bytes:
         if not stop_event.is_set():
             frames.append(indata.copy())
 
-    stream = sd.InputStream(samplerate=sample_rate, channels=1, dtype="int16", callback=callback)
+    from backend.voice.audio_utils import get_best_input_device
+    device_idx = get_best_input_device(sample_rate=sample_rate)
+
+    stream = sd.InputStream(
+        samplerate=sample_rate,
+        channels=1,
+        dtype="int16",
+        device=device_idx,
+        callback=callback,
+    )
     with stream:
-        print(f"{RED}{BOLD}🔴 RECORDING IN PROGRESS — Speak now! (Press ENTER to STOP){RESET}")
+        print(f"{RED}{BOLD}RECORDING IN PROGRESS [Device {device_idx}] — Speak now! (Press ENTER to STOP){RESET}")
         input()
         stop_event.set()
 
@@ -96,7 +105,7 @@ def record_microphone_audio(sample_rate: int = 16000) -> bytes:
     pcm_array = np.concatenate(frames, axis=0)
     pcm_bytes = pcm_array.tobytes()
     duration_s = len(pcm_bytes) / (sample_rate * 2)
-    print(f"{GREEN}✓ Captured {duration_s:.2f}s of audio ({len(pcm_bytes)} bytes){RESET}")
+    print(f"{GREEN}[OK] Captured {duration_s:.2f}s of audio ({len(pcm_bytes)} bytes){RESET}")
     return pcm_bytes
 
 
@@ -122,7 +131,7 @@ async def query_alfred_swarm(prompt: str) -> Tuple[str, str, float, bool]:
 
     print(f"{BOLD}\"{res.speech_text}\"{RESET}")
     if res.hud_cards:
-        print(f"{CYAN}  📊 HUD Cards Generated: {len(res.hud_cards)}{RESET}")
+        print(f"{CYAN}HUD Cards Generated: {len(res.hud_cards)}{RESET}")
 
     return res.speech_text, res.markdown_body, elapsed, res.fast_path
 
@@ -209,7 +218,7 @@ def print_latency_report(
 
 
 async def run_live_microphone_pipeline():
-    """Live Mic ➔ Groq STT ➔ OpenRouter LLM ➔ TTS ➔ Playback + Latency Breakdown."""
+    """Live Mic -> Groq STT -> OpenRouter LLM -> TTS -> Playback + Latency Breakdown."""
     print(f"\n{CYAN}{BOLD}--- LIVE MICROPHONE ROUNDTRIP TEST ---{RESET}")
 
     # 1. Choose TTS Engine
@@ -254,7 +263,7 @@ async def run_live_microphone_pipeline():
                 tts_total_ms=total_s * 1000,
                 engine_name="Piper Spike",
             )
-            print(f"{CYAN}🔊 Playing back Piper audio through speakers...{RESET}")
+            print(f"{CYAN}[AUDIO] Playing back Piper audio through speakers...{RESET}")
             play_audio_file(piper_path)
 
     if tts_choice in ["2", "3"]:
@@ -268,7 +277,7 @@ async def run_live_microphone_pipeline():
                 tts_total_ms=total_s * 1000,
                 engine_name="Groq Orpheus",
             )
-            print(f"{CYAN}🔊 Playing back Groq audio through speakers...{RESET}")
+            print(f"{CYAN}[AUDIO] Playing back Groq audio through speakers...{RESET}")
             play_audio_file(groq_path)
 
 
@@ -293,13 +302,13 @@ async def run_text_query_pipeline():
     if choice in ["1", "3"]:
         path, first_s, total_s = await synthesize_with_piper(speech_text)
         if path:
-            print(f"{CYAN}🔊 Playing Piper audio...{RESET}")
+            print(f"{CYAN}[AUDIO] Playing Piper audio...{RESET}")
             play_audio_file(path)
 
     if choice in ["2", "3"]:
         path, first_s, total_s = await synthesize_with_groq(speech_text)
         if path:
-            print(f"{CYAN}🔊 Playing Groq audio...{RESET}")
+            print(f"{CYAN}[AUDIO] Playing Groq audio...{RESET}")
             play_audio_file(path)
 
 
@@ -352,7 +361,7 @@ async def inspect_swarm_specialists():
         return
 
     for s in specialists:
-        print(f"\n{BOLD}🐝 Specialist: {GREEN}{s.name.upper()}{RESET}")
+        print(f"\n{BOLD}[SWARM] Specialist: {GREEN}{s.name.upper()}{RESET}")
         print(f"  Description:  {s.description}")
         print(f"  Capabilities: {s.get_capabilities()}")
         print(f"  Available Tools:")
@@ -361,7 +370,7 @@ async def inspect_swarm_specialists():
             t_desc = tool.get("description", "No description")
             print(f"    - {CYAN}{t_name}{RESET}: {t_desc}")
 
-    print(f"\n{YELLOW}⚡ Fast-Path Engine: Active (Sub-10ms deterministic matching){RESET}\n")
+    print(f"\n{YELLOW}[FAST-PATH] Engine: Active (Sub-10ms deterministic matching){RESET}\n")
 
 
 def main():
@@ -369,8 +378,8 @@ def main():
 
     while True:
         print(f"{BOLD}Main Menu:{RESET}")
-        print(f"  {CYAN}[1] Live Microphone Swarm (Mic ➔ STT ➔ Alfred Swarm ➔ TTS ➔ Playback + Latency Report){RESET}")
-        print("  [2] Interactive Text Query (Text ➔ Alfred Swarm ➔ TTS ➔ Playback)")
+        print(f"  {CYAN}[1] Live Microphone Swarm (Mic -> STT -> Alfred Swarm -> TTS -> Playback + Latency Report){RESET}")
+        print("  [2] Interactive Text Query (Text -> Alfred Swarm -> TTS -> Playback)")
         print("  [3] Test Speech-to-Text on a WAV File (Groq Whisper)")
         print("  [4] Test Supabase Data Layer (Live Cloud DB Connection)")
         print("  [5] Inspect Active Swarm Specialists & Tools")

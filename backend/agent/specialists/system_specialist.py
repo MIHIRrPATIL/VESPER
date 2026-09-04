@@ -95,6 +95,11 @@ class SystemSpecialist(BaseSpecialist):
                 "description": "Lists available audio output devices (speakers, headphones, HDMI, Bluetooth).",
                 "parameters": {"type": "object", "properties": {}},
             },
+            {
+                "name": "scan_network_devices",
+                "description": "Performs an active subnet sweep to discover connected VESPER edge nodes (Orange Pi, Raspberry Pi, mobile HUD) and automatically re-allocate cluster roles.",
+                "parameters": {"type": "object", "properties": {}},
+            },
         ]
 
     # ── Hardware Telemetry (<5ms) ─────────────────────────────────────────────
@@ -316,6 +321,41 @@ class SystemSpecialist(BaseSpecialist):
             card_payload={"type": "audio_sinks_card", "sinks": sinks},
         )
 
+    # ── Network Device Discovery & Dynamic Role Allocation ───────────────────
+
+    async def scan_network_devices(self) -> SpecialistResult:
+        """Runs active subnet scan and returns discovery telemetry and new cluster role allocations."""
+        from backend.sync.network_scanner import network_scanner
+        from backend.sync.sync_manager import sync_manager
+
+        discovered = await network_scanner.scan_subnet(auto_register=True)
+        active = sync_manager.get_active_devices()
+        allocations = {dev.device_id: dev.assigned_roles for dev in active}
+
+        if not discovered:
+            speech = f"Network scan completed, sir. No new edge nodes were discovered on the local subnet. {len(active)} active device(s) registered in cluster."
+        else:
+            names = [f"{d.device_name} ({d.ip_address})" for d in discovered]
+            speech = f"Network scan completed, sir. Discovered {len(discovered)} active node(s): {', '.join(names)}. Cluster roles have been reallocated automatically."
+
+        return SpecialistResult(
+            success=True,
+            action="scan_network_devices",
+            data={
+                "discovered_count": len(discovered),
+                "discovered": [d.model_dump() for d in discovered],
+                "active_devices": [d.model_dump() for d in active],
+                "role_allocations": allocations,
+            },
+            speech_summary=speech,
+            card_payload={
+                "type": "network_discovery_card",
+                "discovered": [d.model_dump() for d in discovered],
+                "active_devices": [d.model_dump() for d in active],
+                "role_allocations": allocations,
+            },
+        )
+
     # ── Execution Router ─────────────────────────────────────────────────────
 
     async def execute(
@@ -360,5 +400,9 @@ class SystemSpecialist(BaseSpecialist):
 
         elif act in ["list_audio_sinks", "audio_sinks", "devices"]:
             return await self.list_audio_sinks()
+
+        # 4. Network Discovery
+        elif act in ["scan_network_devices", "scan_network", "discover_devices", "scan_devices"]:
+            return await self.scan_network_devices()
 
         return SpecialistResult(success=False, action=action, error=f"Unknown action '{action}' on system specialist.")

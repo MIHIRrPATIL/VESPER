@@ -42,12 +42,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Start Heartbeat Supervisor
     connection_manager.start_heartbeat_supervisor()
+
+    # Start Active Subnet Discovery Scanner
+    from backend.sync.network_scanner import network_scanner
+    network_scanner.start_periodic_loop()
+
     logger.info("[GATEWAY] Online and ready for WebSocket / REST connections.")
 
     yield
 
     # Shutdown Phase
     logger.info("[GATEWAY] Shutting down...")
+    await network_scanner.stop_periodic_loop()
     await connection_manager.stop_heartbeat_supervisor()
     task_registry.cancel_all()
     logger.info("[GATEWAY] Cleanup complete. Offline.")

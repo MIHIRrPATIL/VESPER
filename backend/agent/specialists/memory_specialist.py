@@ -146,8 +146,27 @@ class MemorySpecialist(BaseSpecialist):
         keywords = distilled.get("keywords", [])
 
         # 1. Search existing memories for semantic duplicates or contradictions
-        query_kw = keywords[0] if keywords else statement.split()[0]
-        candidates = self.repo.search_by_text(query_kw, limit=10)
+        candidate_ids: set[str] = set()
+        candidates = []
+
+        # Always inspect most recent active memories first
+        for cand in self.repo.list_memories(limit=25):
+            if cand.id not in candidate_ids:
+                candidate_ids.add(cand.id)
+                candidates.append(cand)
+
+        raw_words = [w.strip(".,!?:;\"'") for w in statement.split() if len(w.strip(".,!?:;\"'")) > 2]
+        canonical_words = [w.strip(".,!?:;\"'") for w in canonical.split() if len(w.strip(".,!?:;\"'")) > 2]
+        search_terms = list(dict.fromkeys(list(keywords) + canonical_words + raw_words))
+        for term in search_terms:
+            for cand in self.repo.search_by_text(term, limit=10):
+                if cand.id not in candidate_ids:
+                    candidate_ids.add(cand.id)
+                    candidates.append(cand)
+
+        def _norm(s: str) -> str:
+            cleaned = re.sub(r"[^\w\s]", "", s.lower()).strip()
+            return " ".join([w for w in cleaned.split() if w not in ("the", "a", "an", "user", "i")])
 
         # 2. Check for exact duplicate or superseding
         superseded_id: Optional[str] = None
@@ -157,8 +176,23 @@ class MemorySpecialist(BaseSpecialist):
             if meta.get("active") is False:
                 continue
 
+            cand_norm = _norm(cand.statement)
+            stmt_norm = _norm(statement)
+            canon_norm = _norm(canonical)
+
+            cand_words = set(cand_norm.split())
+            canon_words = set(canon_norm.split())
+            stmt_words = set(stmt_norm.split())
+
+            is_lexical_dup = (
+                cand_norm in (canon_norm, stmt_norm)
+                or (cand.statement.strip().lower() in (canonical.strip().lower(), statement.strip().lower()))
+                or (cand_words and canon_words and len(cand_words & canon_words) / len(cand_words | canon_words) >= 0.75)
+                or (cand_words and stmt_words and len(cand_words & stmt_words) / len(cand_words | stmt_words) >= 0.75)
+            )
+
             # Exact or near-exact duplicate: merge by incrementing access count
-            if cand.statement.lower() == canonical.lower():
+            if is_lexical_dup:
                 self.repo.record_access(cand.id)
                 return SpecialistResult(
                     success=True,

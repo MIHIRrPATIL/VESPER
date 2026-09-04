@@ -124,7 +124,7 @@ def test_voice_command_roundtrip(client: TestClient):
         assert resp["uuid"] == cmd_uuid
         assert resp["channel"] == Channel.VOICE.value
         assert resp["type"] == EventType.AGENT_RESPONSE.value
-        assert "Acknowledged" in resp["payload"]["response"]
+        assert len(resp["payload"]["response"]) > 0
 
 
 def test_gesture_event_broadcast(client: TestClient):
@@ -154,6 +154,81 @@ def test_gesture_event_broadcast(client: TestClient):
         assert resp["channel"] == Channel.SYSTEM.value
         assert resp["type"] == EventType.ZEN_MODE_STATE.value
         assert resp["payload"]["toggle"] is True
+
+
+def test_gesture_broadcast_closed_fist_and_open_palm(client: TestClient):
+    """Tests that CLOSED_FIST mutes/pauses and OPEN_PALM restores volume/playback."""
+    with client.websocket_connect("/ws") as ws:
+        # Handshake
+        ws.send_text(json.dumps({
+            "uuid": "h-gest",
+            "channel": Channel.CONTROL.value,
+            "type": EventType.CLIENT_HELLO.value,
+            "payload": {"client_id": "test-gest-hud", "client_type": ClientType.DESK_HUD.value},
+        }))
+        ws.receive_text()
+
+        # Send CLOSED_FIST (Mute/Pause)
+        ws.send_text(json.dumps({
+            "uuid": "g-fist",
+            "channel": Channel.GESTURE.value,
+            "type": EventType.GESTURE_EVENT.value,
+            "payload": {"gesture": "CLOSED_FIST"},
+        }))
+        resp_fist = json.loads(ws.receive_text())
+        assert resp_fist["channel"] == Channel.SYSTEM.value
+        assert resp_fist["type"] == EventType.SET_VOLUME.value
+        assert resp_fist["payload"]["volume"] == 0
+        assert resp_fist["payload"]["muted"] is True
+
+        # Send OPEN_PALM (Resume/Play)
+        ws.send_text(json.dumps({
+            "uuid": "g-palm",
+            "channel": Channel.GESTURE.value,
+            "type": EventType.GESTURE_EVENT.value,
+            "payload": {"gesture": "OPEN_PALM"},
+        }))
+        resp_palm = json.loads(ws.receive_text())
+        assert resp_palm["channel"] == Channel.SYSTEM.value
+        assert resp_palm["type"] == EventType.SET_VOLUME.value
+        assert resp_palm["payload"]["volume"] > 0
+        assert resp_palm["payload"]["muted"] is False
+
+        # Send VOLUME_DIAL:75
+        ws.send_text(json.dumps({
+            "uuid": "g-dial",
+            "channel": Channel.GESTURE.value,
+            "type": EventType.GESTURE_EVENT.value,
+            "payload": {"gesture": "VOLUME_DIAL:75"},
+        }))
+        resp_dial = json.loads(ws.receive_text())
+        assert resp_dial["channel"] == Channel.SYSTEM.value
+        assert resp_dial["type"] == EventType.SET_VOLUME.value
+        assert resp_dial["payload"]["volume"] == 75
+
+        # Send NEXT_TRACK
+        ws.send_text(json.dumps({
+            "uuid": "g-next",
+            "channel": Channel.GESTURE.value,
+            "type": EventType.GESTURE_EVENT.value,
+            "payload": {"gesture": "NEXT_TRACK"},
+        }))
+        resp_next = json.loads(ws.receive_text())
+        assert resp_next["channel"] == Channel.SYSTEM.value
+        assert resp_next["type"] == EventType.MEDIA_CONTROL.value
+        assert resp_next["payload"]["action"] == "next_track"
+
+        # Send THUMB_UP (+10% volume)
+        ws.send_text(json.dumps({
+            "uuid": "g-up",
+            "channel": Channel.GESTURE.value,
+            "type": EventType.GESTURE_EVENT.value,
+            "payload": {"gesture": "THUMB_UP"},
+        }))
+        resp_up = json.loads(ws.receive_text())
+        assert resp_up["channel"] == Channel.SYSTEM.value
+        assert resp_up["type"] == EventType.SET_VOLUME.value
+        assert resp_up["payload"]["volume"] == 85
 
 
 def test_notification_relay_broadcast(client: TestClient):

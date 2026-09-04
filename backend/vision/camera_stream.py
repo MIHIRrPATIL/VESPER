@@ -17,6 +17,10 @@ import time
 from typing import Optional, Tuple
 from pydantic import BaseModel, Field
 
+# Silence OpenCV internal C++ stderr warnings on Linux metadata device nodes
+os.environ.setdefault("OPENCV_LOG_LEVEL", "OFF")
+os.environ.setdefault("OPENCV_VIDEOIO_DEBUG", "0")
+
 from backend.vision.device_probe import DeviceProbe
 
 logger = logging.getLogger("vesper.vision.camera_stream")
@@ -59,15 +63,21 @@ class CameraCapture:
             )
 
         cap = None
+        used_idx = camera_index
         try:
             # Try specified camera_index or fallback through available indices
             indices_to_try = [camera_index] + [i for i in caps.available_cameras if i != camera_index]
             frame = None
-            used_idx = camera_index
 
             for idx in indices_to_try:
                 cap = cv2.VideoCapture(idx)
                 if cap.isOpened():
+                    logger.info(f"[PRIVACY.CAMERA] Optical sensor ACTIVE (hardware index={idx}) - Acquiring visual frame")
+                    try:
+                        from backend.sync.sync_manager import sync_manager
+                        sync_manager.state.optical_sensor_active = True
+                    except Exception:
+                        pass
                     # Set standard 720p or default resolution
                     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
@@ -119,6 +129,12 @@ class CameraCapture:
         finally:
             if cap is not None and hasattr(cap, "release"):
                 cap.release()
+            logger.info(f"[PRIVACY.CAMERA] Optical sensor INACTIVE (hardware index={used_idx}) - Hardware released")
+            try:
+                from backend.sync.sync_manager import sync_manager
+                sync_manager.state.optical_sensor_active = False
+            except Exception:
+                pass
 
 
 class ScreenCapture:

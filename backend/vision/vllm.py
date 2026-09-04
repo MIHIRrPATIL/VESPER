@@ -15,13 +15,14 @@ from typing import Any, Dict, Optional
 import httpx
 from pydantic import BaseModel
 
-from backend.shared.config import GROQ_API_KEY
+from backend.shared.config import GROQ_API_KEY, OPENROUTER_API_KEY
 
 logger = logging.getLogger("vesper.vision.vllm")
 
-# Primary Groq Multimodal Vision Model
-DEFAULT_VISION_MODEL = "llama-3.2-11b-vision-preview"
-FALLBACK_VISION_MODEL = "meta-llama/llama-3.2-11b-vision-instruct"
+# Primary Vision Models
+DEFAULT_VISION_MODEL = "google/gemini-2.5-flash"
+OPENROUTER_VISION_MODEL = "google/gemini-2.5-flash"
+GROQ_DECOMMISSIONED_VISION_MODELS = {"llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"}
 
 
 class VisionAnalysisResult(BaseModel):
@@ -37,10 +38,16 @@ class VisionAnalysisResult(BaseModel):
 
 
 class GroqVisionClient:
-    """Dispatches multimodal image reasoning and OCR requests to Groq LPUs."""
+    """Dispatches multimodal image reasoning and OCR requests to Groq LPUs or OpenRouter."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = DEFAULT_VISION_MODEL) -> None:
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        openrouter_key: Optional[str] = None,
+        model: str = DEFAULT_VISION_MODEL,
+    ) -> None:
         self.api_key = api_key or GROQ_API_KEY or os.getenv("GROQ_API_KEY", "")
+        self.openrouter_key = openrouter_key or OPENROUTER_API_KEY or os.getenv("OPENROUTER_API_KEY", "")
         self.model = model
 
     async def analyze_image(
@@ -50,16 +57,7 @@ class GroqVisionClient:
         source: str = "webcam",
         system_instruction: Optional[str] = None,
     ) -> VisionAnalysisResult:
-        """Sends an image and visual inquiry to the Groq Multimodal LPU."""
-        if not self.api_key:
-            logger.warning("[GroqVisionClient] No GROQ_API_KEY found.")
-            return VisionAnalysisResult(
-                success=False,
-                description="Vision perception requires a GROQ_API_KEY configured for free LPU multimodal inference, sir.",
-                error="GROQ_API_KEY is not set.",
-                source=source,
-            )
-
+        """Sends an image and visual inquiry to OpenRouter multimodal vision or Groq fallback."""
         if not image_base64:
             return VisionAnalysisResult(
                 success=False,
@@ -74,70 +72,96 @@ class GroqVisionClient:
             "and environmental details. Be concise, articulate, and direct."
         )
         sys_prompt = system_instruction or default_sys
-
-        # Note: Groq Jinja template requirement: Must include a user message with the query & image!
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
         image_data_url = f"data:image/jpeg;base64,{image_base64}"
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": sys_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": query},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": image_data_url},
+
+        # 1. Primary: OpenRouter Multimodal Vision (Google Gemini 2.5 Flash)
+        # Note: Groq decommissioned llama-3.2-11b/90b-vision-preview, so OpenRouter is primary.
+        if self.openrouter_key:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    or_res = await client.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.openrouter_key}",
+                            "Content-Type": "application/json",
                         },
-                    ],
-                },
-            ],
-            "temperature": 0.2,
-            "max_tokens": 800,
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                res = await client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
-                )
-
-                if res.status_code == 200:
-                    data = res.json()
-                    content = data["choices"][0]["message"]["content"].strip()
-                    return VisionAnalysisResult(
-                        success=True,
-                        description=content,
-                        source=source,
-                        model_used=self.model,
+                        json={
+                            "model": OPENROUTER_VISION_MODEL,
+                            "messages": [
+                                {"role": "system", "content": sys_prompt},
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": query},
+                                        {"type": "image_url", "image_url": {"url": image_data_url}},
+                                    ],
+                                },
+                            ],
+                            "max_tokens": 400,
+                        },
                     )
-                else:
-                    err_text = res.text
-                    logger.error(f"[GroqVisionClient] API error {res.status_code}: {err_text}")
-                    return VisionAnalysisResult(
-                        success=False,
-                        description=f"Optical reasoning encountered an issue (HTTP {res.status_code}), sir.",
-                        error=err_text,
-                        source=source,
+                    if or_res.status_code == 200:
+                        data = or_res.json()
+                        content = data["choices"][0]["message"]["content"].strip()
+                        return VisionAnalysisResult(
+                            success=True,
+                            description=content,
+                            source=source,
+                            model_used=OPENROUTER_VISION_MODEL,
+                        )
+                    else:
+                        logger.warning(f"[GroqVisionClient] OpenRouter returned {or_res.status_code}. Attempting Groq.")
+            except Exception as or_err:
+                logger.warning(f"[GroqVisionClient] OpenRouter failed: {or_err}. Attempting Groq.")
+
+        # 2. Secondary: Groq LPU if active vision model is available
+        if self.api_key and self.model not in GROQ_DECOMMISSIONED_VISION_MODELS:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": sys_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": query},
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                        ],
+                    },
+                ],
+                "temperature": 0.2,
+                "max_tokens": 500,
+            }
+
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    res = await client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers=headers,
+                        json=payload,
                     )
-        except Exception as e:
-            logger.error(f"[GroqVisionClient] Network request failed: {e}", exc_info=True)
-            return VisionAnalysisResult(
-                success=False,
-                description=f"Failed to communicate with the optical vision reasoning cluster: {str(e)}",
-                error=str(e),
-                source=source,
-            )
+
+                    if res.status_code == 200:
+                        data = res.json()
+                        content = data["choices"][0]["message"]["content"].strip()
+                        return VisionAnalysisResult(
+                            success=True,
+                            description=content,
+                            source=source,
+                            model_used=self.model,
+                        )
+            except Exception as e:
+                logger.warning(f"[GroqVisionClient] Groq vision request failed: {e}")
+
+        return VisionAnalysisResult(
+            success=False,
+            description="Neither OPENROUTER_API_KEY nor an active GROQ vision model is available, sir.",
+            error="No working vision API key found.",
+            source=source,
+        )
 
     async def ocr_image(
         self,

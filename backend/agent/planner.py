@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from backend.agent.llm import LLMClient
 from backend.agent.registry import SpecialistRegistry
+from backend.agent.semantic_router import SemanticIntent, SemanticIntentRouter
 from backend.agent.specialists.base import SpecialistResult
 
 logger = logging.getLogger("vesper.agent.planner")
@@ -30,6 +31,7 @@ class SwarmPlan(BaseModel):
     plan_type: str = "direct"  # "direct", "parallel", "sequential"
     direct_response: Optional[str] = None
     steps: List[Dict[str, Any]] = Field(default_factory=list)
+    provider_used: Optional[str] = "unknown"
 
 
 class ExecutionResult(BaseModel):
@@ -40,65 +42,575 @@ class ExecutionResult(BaseModel):
     specialist_results: List[SpecialistResult] = Field(default_factory=list)
     planning_latency_ms: float = 0.0
     execution_latency_ms: float = 0.0
+    provider_used: Optional[str] = None
 
 
 PLANNER_SYSTEM_PROMPT = """You are the Stage 1 Execution Planner for VESPER (supervised by Alfred).
-Analyze the user's intent and produce an optimal execution plan.
+Analyze the user's intent and produce an optimal execution plan matching the schema.
 
 {capabilities}
 
-Routing Rules:
-1. Tool Invocation Priority:
-   - Optical Perception & Webcam OCR (Primary): When user asks what they are holding, showing, wearing, or asks to inspect, read, transcribe, or perform OCR on a physical item/book/paper/document in front of them (e.g. "what am I holding", "inspect this", "look at my webcam", "read what's on this paper", "OCR this book", "what does this document say"), ALWAYS call 'vision' with 'inspect_webcam' or 'ocr_webcam'.
-   - Screen & Monitor Perception: When the user specifically asks about what is displayed on their computer screen, monitor, terminal, or window (e.g. "what error is on my screen", "inspect my desktop", "OCR my terminal screen"), ALWAYS call 'vision' with 'inspect_screen' or 'ocr_screen'.
-   - Long-Term Personal Memory & Profile: When the user asks to remember personal facts/habits/preferences, recalls personal knowledge, asks what you know about them, or asks to forget a fact (e.g. "remember that I prefer dark roast coffee", "what coffee do I like", "what do you know about me", "forget my old gym routine"), ALWAYS call 'memory' with 'store_memory', 'recall_memory', 'get_user_profile', or 'forget_memory'.
-   - Personal Finance & Debts: When the user asks about money, balances, expenses, income, spending, splitting bills, lending, borrowing, who owes whom, or financial goals (e.g. "log ₹450 on food", "what's my balance", "split ₹1800 with Rohit", "who owes me money", "set a savings goal"), ALWAYS call 'finance' with 'get_balance', 'log_transaction', 'split_expense', 'manage_debt', or 'manage_financial_goal'.
-   - System Vitals & Hardware: When the user asks about PC hardware, CPU, RAM, disk, thermals, heavy processes, or audio control (e.g. "system vitals", "how much RAM is used", "what is using the most CPU", "is docker running", "set volume to 70%"), ALWAYS call 'system' with 'get_system_vitals', 'get_top_processes', 'query_process', 'set_volume', 'set_mute', or 'list_audio_sinks'.
-   - Web Search & Research: When the user asks about current events, news, live facts, technical documentation, or quick lookups (e.g. "search for the latest SpaceX launch", "who won the game", "look up quantum computing"), ALWAYS call 'research' with action 'web_search' or 'quick_lookup'.
-   - Web Page Crawling & Scraping: When the user provides a URL or asks to scrape, read, or summarize a specific webpage (e.g. "read https://...", "summarize this page", "scrape the documentation at ..."), ALWAYS call 'crawl' with action 'scrape_and_summarize' or 'crawl_url'.
-   - Video / Content Search: When the user asks for videos, YouTube clips, channel uploads, or creators (e.g. "search for the latest video by mr whos the boss", "watch video"), ALWAYS call 'media' with action 'search_youtube_video'.
-   - Music & Audio: When the user asks to play a song, artist, album, or playlist, call 'media' with 'play_track' or 'play_playlist'. For player control (pause, resume, skip), call 'media' with 'control_playback'.
-   - Tasks & Schedules: When the user asks to add, list, complete tasks, or check today's agenda/calendar, ALWAYS call 'tasks' with 'add_task', 'list_tasks', 'complete_task', or 'get_daily_agenda'.
-   - Tolerate informal language, phonetic spelling, and typos (e.g. "seach" -> search, "whos the boss" -> mrwhosetheboss, "calender" -> calendar).
+PLANNING RULES:
+1. Plan Types:
+   - "parallel": DEFAULT for all single or multi-intent tasks fetching real-world data independently (e.g. weather + music, task + calendar, email search + news).
+   - "sequential": ONLY when step N+1 needs data produced by step N via '$step_<idx>.<property>'.
+     Examples:
+     * Search email then read thread: step 2 params: {{"thread_id": "$step_1.thread_id", "email_id": "$step_1.id"}}
+     * Media status then origin research: step 2 params: {{"query": "$step_1.track movie"}}
+     * Webcam/Screen OCR then web search: step 2 params: {{"query": "$step_1.extracted_text"}}
+   - "direct": ONLY for conversational greetings ("hello") or when answer is resolved completely from ACTIVE SESSION CONTEXT.
 
-2. Plan Types:
-   - "parallel": Use for one or more independent actions (e.g. searching the web, checking finances, checking CPU, adding a task, or doing both simultaneously).
-   - "sequential": Use when one step depends on the output of a prior step.
-     Example: If user asks "Search for the latest Next.js 16 update and summarize the article":
-     Step 1: {{"agent": "research", "action": "web_search", "params": {{"query": "latest Next.js 16 update"}}}}
-     Step 2: {{"agent": "crawl", "action": "scrape_and_summarize", "params": {{"url": "$step_1.result.top_url"}}}}
-   - "direct": Use ONLY for simple greetings ("hello", "good morning"), casual banter, or pure philosophical queries that do not involve tasks, schedules, finances, hardware, videos, research, or music.
+2. Perception:
+   - Screen/Display: Use 'vision:inspect_screen' or 'vision:ocr_screen' for computer monitor, IDE, windows, or desktop errors.
+   - Physical/Camera: Use 'vision:inspect_webcam' or 'vision:ocr_webcam' for handheld objects, documents, or physical surroundings.
 
-You MUST return strictly valid JSON matching this schema:
+3. Tasks vs Reminders vs Events:
+   - General todo without alarm: 'tasks:add_task' or 'tasks:list_tasks'.
+   - Time-anchored alarm clock: 'tasks:set_reminder' or 'tasks:list_reminders'.
+   - Calendar meeting/agenda: 'tasks:schedule_event', 'tasks:list_calendar_events', 'tasks:get_daily_agenda'.
+
+4. Web Search:
+   - Plan 'research:web_search' for real-world facts, trivia, movie origins, directors, weather, or explicit search queries.
+
+5. Critical Conversation Scope & Anti-Duplication:
+   - Plan steps STRICTLY and EXCLUSIVELY for the CURRENT USER QUERY.
+   - Any provided conversation history is SOLELY for resolving pronouns or references (e.g., 'it', 'him', 'that email').
+   - NEVER re-execute, repeat, or append tasks from earlier conversation turns or completed past queries.
+
+6. Email Dispatch & Drafts:
+   - When the user asks to "send [report/notes/summary/email] to [person/email]" or "write/draft an email to [person/email]":
+     * ALWAYS route to 'email:draft_email' with params: {{"to": "<email_or_recipient>", "subject": "<subject>", "body": "<body>"}}.
+     * NEVER route sending an email, notes, or research report as 'tasks:add_task'!
+     * If the user refers to recent research (e.g. "that report"), populate body with the research content.
+
+FEW-SHOT EXAMPLES:
+- Handheld: {{"plan_type": "sequential", "steps": [{{"agent": "vision", "action": "ocr_webcam", "params": {{"focus_hint": "title/label"}}}}, {{"agent": "research", "action": "web_search", "params": {{"query": "$step_1.extracted_text"}}}}]}}
+- Multi-intent: {{"plan_type": "parallel", "steps": [{{"agent": "media", "action": "play_music", "params": {{"query": "lofi"}}}}, {{"agent": "tasks", "action": "add_task", "params": {{"title": "review PR"}}}}]}}
+- Screen error: {{"plan_type": "parallel", "steps": [{{"agent": "vision", "action": "inspect_screen", "params": {{"query": "error"}}}}]}}
+- Read thread: {{"plan_type": "parallel", "steps": [{{"agent": "email", "action": "read_thread", "params": {{}}}}]}}
+
+Return strictly JSON:
 {{
   "plan_type": "parallel" | "sequential" | "direct",
   "direct_response": null | "string",
-  "steps": [
-    {{
-      "agent": "specialist_name",
-      "action": "action_name",
-      "params": {{}}
-    }}
-  ]
-}}
-"""
+  "steps": [{{"agent": "specialist_name", "action": "action_name", "params": {{}}}}]
+}}"""
 
 
 class SwarmPlanner:
     """Orchestrates 2-stage planning and dynamic specialist execution."""
 
-    def __init__(self, llm_client: Optional[LLMClient] = None) -> None:
+    def __init__(
+        self,
+        llm_client: Optional[LLMClient] = None,
+        semantic_router: Optional[SemanticIntentRouter] = None,
+    ) -> None:
         self.llm = llm_client or LLMClient()
+        self.semantic_router = semantic_router or SemanticIntentRouter.get_instance()
 
-    async def create_plan(self, query: str, registry: SpecialistRegistry) -> Tuple[SwarmPlan, float]:
-        """Stage 1: Generates an execution plan from the user query."""
-        capabilities_text = registry.get_capabilities_prompt()
-        prompt = PLANNER_SYSTEM_PROMPT.format(capabilities=capabilities_text)
+    def _check_deterministic_prefilter(
+        self,
+        query: str,
+        session_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[SwarmPlan]:
+        """Pre-filters high-stakes unambiguous queries deterministically before LLM invocation.
+
+        Tier 1: 0ms exact cache lookups and explicit hardware commands.
+        Tier 2: ~10ms local semantic similarity router using all-MiniLM-L6-v2 (0 Groq tokens).
+        """
+        q_lower = query.lower()
+
+        # ── TIER 1: DETERMINISTIC EXACT CACHE & HARDWARE RETRIEVAL (<1ms, 0 tokens) ──
+
+        # 0. Pending Email Draft Confirmation or Cancellation:
+        pending_draft = None
+        if session_context:
+            pending_draft = session_context.get("pending_email_draft")
+            if not pending_draft and "entities" in session_context:
+                pending_draft = session_context["entities"].get("email_draft")
+
+        if pending_draft:
+            cur_to = str(pending_draft.get("to", "")).strip()
+
+            # 0a. Check if user provides a full email address to complete or replace recipient
+            email_match = re.search(r"([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)", query)
+            if email_match:
+                new_email = email_match.group(1).strip()
+                pending_draft["to"] = new_email
+                logger.info(f"[Planner.PreFilter] Updated pending draft recipient to full email: {new_email}")
+                return SwarmPlan(
+                    plan_type="direct",
+                    provider_used="prefilter",
+                    direct_response=f"I have set the recipient address to {new_email}, sir. Would you like me to send the email now?",
+                )
+
+            # 0b. Check if user provides a domain completion (e.g. "@gmail.com" or "gmail.com")
+            # to complete an existing handle that lacks a domain
+            domain_match = re.search(r"@([a-zA-Z0-9-]+\.[a-zA-Z]{2,})", query) or re.search(
+                r"^\s*(?:it is\s+)?([a-zA-Z0-9-]+\.(?:com|net|org|io|ai|in|edu|gov|co|app|tech))\s*$",
+                query,
+                re.IGNORECASE,
+            )
+            if domain_match:
+                domain = domain_match.group(1).strip()
+                handle = cur_to.split("@")[0].strip() if cur_to else "user"
+                merged_email = f"{handle}@{domain}"
+                pending_draft["to"] = merged_email
+                logger.info(f"[Planner.PreFilter] Merged pending draft recipient domain: {merged_email}")
+                return SwarmPlan(
+                    plan_type="direct",
+                    provider_used="prefilter",
+                    direct_response=f"I have set the recipient address to {merged_email}, sir. Would you like me to dispatch the email now?",
+                )
+
+            is_confirmation = any(
+                re.search(rf"\b{w}\b", q_lower)
+                for w in [
+                    "yes", "yeah", "sure", "send it", "send", "go ahead", "dispatch",
+                    "confirm", "looks good", "send that email", "shoot", "do it",
+                ]
+            ) and not any(w in q_lower for w in ["don't", "dont", "no", "cancel", "stop", "change"])
+            if is_confirmation:
+                from backend.agent.specialists.email_specialist import is_valid_email
+
+                if not is_valid_email(cur_to):
+                    logger.info(f"[Planner.PreFilter] Blocked dispatch to invalid recipient: '{cur_to}'")
+                    return SwarmPlan(
+                        plan_type="direct",
+                        provider_used="prefilter",
+                        direct_response=f"I cannot send the email yet, sir. '{cur_to}' is not a complete email address with a domain. What is the recipient's full email address?",
+                    )
+
+                logger.info("[Planner.PreFilter] User confirmed pending email draft -> email:send_email")
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{
+                        "agent": "email",
+                        "action": "send_email",
+                        "params": {
+                            "to": cur_to,
+                            "subject": pending_draft.get("subject", "A brief note"),
+                            "body": pending_draft.get("body", ""),
+                        }
+                    }],
+                )
+
+            is_cancellation = any(
+                re.search(rf"\b{w}\b", q_lower)
+                for w in ["cancel", "don't send", "dont send", "no", "discard", "forget it", "never mind", "stop"]
+            )
+            if is_cancellation:
+                logger.info("[Planner.PreFilter] User cancelled pending email draft")
+                return SwarmPlan(
+                    plan_type="direct",
+                    provider_used="prefilter",
+                    direct_response="Understood, sir. I have discarded the email draft.",
+                )
+
+        # 1. Multi-Turn Email Anaphora & Contextual Sender Lookup:
+        active_email = session_context.get("active_email") if session_context else None
+        is_who_sent_email = any(
+            re.search(pat, q_lower)
+            for pat in [
+                r"\bwho sent (me )?(the|that) email\b",
+                r"\bwho sent the email we were discussing\b",
+                r"\bwho is (the|that) email from\b",
+                r"\bwho was that email from\b",
+                r"\bwho sent it\b",
+            ]
+        )
+        if is_who_sent_email:
+            if active_email and (active_email.get("sender_name") or active_email.get("sender")):
+                sender_name = active_email.get("sender_name") or active_email.get("sender", "Unknown sender")
+                sender_addr = active_email.get("sender", "")
+                subject = active_email.get("subject", "")
+                logger.info(f"[Planner.PreFilter] Resolving 'who sent the email' from active session context: {sender_name}")
+                addr_info = f" ({sender_addr})" if sender_addr else ""
+                subj_info = f" regarding '{subject}'" if subject else ""
+                return SwarmPlan(
+                    plan_type="direct",
+                    provider_used="prefilter",
+                    direct_response=f"The email we were discussing was sent by {sender_name}{addr_info}{subj_info}, sir.",
+                )
+            else:
+                return SwarmPlan(
+                    plan_type="direct",
+                    provider_used="prefilter",
+                    direct_response="Which email or conversation are you referring to, sir?",
+                )
+
+        # 2. Financial Balance / Net Worth checks:
+        is_balance_query = bool(
+            re.search(
+                r"\b(what('s| is) my (bank )?balance|check (my )?(bank )?balance|my account balance|how much money do i have|what is my net worth|check balance|show (my )?balance)\b",
+                q_lower,
+            )
+        )
+        if is_balance_query:
+            logger.info("[Planner.PreFilter] Matched balance query -> finance:get_balance")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "finance", "action": "get_balance", "params": {}}],
+            )
+
+        # 3. Explicit Screen perception: Screen/desktop look/inspect/ocr
+        has_screen_target = any(w in q_lower for w in ["screen", "monitor", "display", "desktop", "ide"])
+        has_perception_verb = any(w in q_lower for w in ["look", "see", "read", "ocr", "check", "inspect"])
+        if has_screen_target and has_perception_verb:
+            act = "ocr_screen" if "ocr" in q_lower else "inspect_screen"
+            logger.info(f"[Planner.PreFilter] Matched explicit screen query -> vision:{act}")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "vision", "action": act, "params": {"query": query}}],
+            )
+
+        # 4. Explicit Direct Camera/Webcam perception: strictly requires camera/webcam keyword
+        has_camera_target = any(w in q_lower for w in ["camera", "webcam"])
+        if has_camera_target and has_perception_verb:
+            act = "ocr_webcam" if ("ocr" in q_lower or "read" in q_lower) else "inspect_webcam"
+            logger.info(f"[Planner.PreFilter] Matched explicit webcam query -> vision:{act}")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "vision", "action": act, "params": {"query": query}}],
+            )
+
+        # 5. Inbox / Unread Emails check:
+        is_unread_email_query = bool(
+            re.search(
+                r"\b(check|read|show|list|get|any|do i have|what are)\s+(my\s+)?(unread|new|latest|recent|inbox)?\s*(emails?|messages?|inbox)\b",
+                q_lower,
+            )
+            or re.search(r"\b(unread|new)\s+emails?\b", q_lower)
+            or re.search(r"\bcheck\s+(my\s+)?(emails?|inbox)\b", q_lower)
+        ) and not any(w in q_lower for w in ["thread", "chain", "conversation with", "sent the", "send an email", "compose", "reply", "draft"])
+        if is_unread_email_query:
+            logger.info("[Planner.PreFilter] Matched unread/inbox email query -> email:list_unread_emails")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "email", "action": "list_unread_emails", "params": {}}],
+            )
+
+        # 6. Network Device Discovery & Subnet Scan:
+        is_network_scan_query = bool(
+            re.search(
+                r"\b(scan|detect|find|search)\s+(for\s+)?(the\s+)?(network|lan|subnet|wifi|edge|connected)?\s*(devices|nodes|hardware)\b",
+                q_lower,
+            )
+            or re.search(r"\b(scan\s+(the\s+)?(network|subnet|lan|wifi)|detect\s+(network\s+)?devices)\b", q_lower)
+        )
+        if is_network_scan_query:
+            logger.info("[Planner.PreFilter] Matched network scan query -> system:scan_network_devices")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "system", "action": "scan_network_devices", "params": {}}],
+            )
+
+        # 7. GitHub Repository Queries (my repos, recent projects on github):
+        is_github_repo_query = bool(
+            re.search(
+                r"\b(github|git\s?hub)\b",
+                q_lower,
+            )
+        ) and bool(
+            re.search(
+                r"\b(recent|latest|my|last|new|current)\s+(project|repo|repositor|code)\b",
+                q_lower,
+            )
+            or re.search(
+                r"\b(list|show|what|check)\s+(are\s+)?(my\s+)?(projects?|repos?|repositor)\b",
+                q_lower,
+            )
+        )
+        if is_github_repo_query:
+            logger.info("[Planner.PreFilter] Matched GitHub repo listing query -> github:list_user_repos")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "github", "action": "list_user_repos", "params": {"limit": 5}}],
+            )
+
+        # 8. Fast Email Drafting & Composition:
+        m_draft = re.search(
+            r"\b(?:write|draft|compose)\s+(?:an?\s+)?emails?\s+to\s+([^\s,]+@[^\s,]+|[a-zA-Z0-9._%+-]+)\s+(?:saying|about|with\s+(?:body|text|message)?)\s+(.+)",
+            query,
+            flags=re.IGNORECASE,
+        )
+        if m_draft:
+            recipient = m_draft.group(1).strip()
+            raw_body = m_draft.group(2).strip()
+            logger.info(f"[Planner.PreFilter] Matched direct email drafting query -> to: '{recipient}'")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{
+                    "agent": "email",
+                    "action": "draft_email",
+                    "params": {"to": recipient, "subject": "A brief note", "body": raw_body},
+                }],
+            )
+
+        # ── TIER 2: LOCAL SEMANTIC INTENT ROUTER (~10ms CPU, 0 tokens) ────────
+        intent, conf, proto = self.semantic_router.classify(query)
+
+        if intent == SemanticIntent.HANDHELD_OBJECT_RESEARCH:
+            logger.info(f"[Planner.PreFilter] Semantic match: HANDHELD_OBJECT_RESEARCH (conf={conf:.2f}, proto='{proto}')")
+            # Preserve user secondary questions (e.g. "and tell the best book by the same author")
+            secondary_hint = ""
+            for conj in [" and ", " also ", " plus ", " then ", ", "]:
+                if conj in query.lower():
+                    parts = re.split(rf"{conj}", query, flags=re.IGNORECASE)
+                    for p in parts[1:]:
+                        clean_p = p.strip()
+                        if any(w in clean_p.lower() for w in ["best", "other", "author", "similar", "rating", "review", "sequel", "movie", "synopsis", "summary", "price", "more"]):
+                            secondary_hint = f" {clean_p}"
+                            break
+                    if secondary_hint:
+                        break
+
+            search_query_tmpl = f"$step_1.extracted_text{secondary_hint}"
+            return SwarmPlan(
+                plan_type="sequential",
+                provider_used="prefilter",
+                steps=[
+                    {"agent": "vision", "action": "ocr_webcam", "params": {"focus_hint": "Extract all visible text: title, author, brand, subtitle, or any identifying label."}},
+                    {"agent": "research", "action": "web_search", "params": {"query": search_query_tmpl}},
+                ],
+            )
+
+        if intent == SemanticIntent.VERIFY_RESEARCH:
+            clean_sq = re.sub(
+                r"^(please\s+)?(can you\s+)?(are you sure[,.]?\s+try|try (again|researching|to search)|research (it|this|more|properly|again)|nah that ain't it|that's wrong|wrong|no try again)\s*",
+                "",
+                query,
+                flags=re.IGNORECASE,
+            ).strip()
+            if not clean_sq or len(clean_sq) < 3:
+                if session_context and session_context.get("active_visual"):
+                    clean_sq = session_context["active_visual"].get("text", query)[:300]
+                else:
+                    clean_sq = query
+            logger.info(f"[Planner.PreFilter] Semantic match: VERIFY_RESEARCH (conf={conf:.2f}) -> fresh research for: '{clean_sq}'")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "research", "action": "web_search", "params": {"query": clean_sq}}],
+            )
+
+        if intent == SemanticIntent.EMAIL_THREAD:
+            m_target = re.search(r"\b(?:conversation|thread|chain|emails?|messages?)\s+(?:with|from|regarding|about)\s+([a-zA-Z0-9_\s]+)", q_lower)
+            target_query = None
+            if m_target:
+                raw_target = m_target.group(1).strip()
+                clean_target = re.sub(r"^(about|regarding|with|from)\s+", "", raw_target).strip()
+                target_query = clean_target or raw_target
+
+            tid = (active_email.get("thread_id") or active_email.get("id")) if (active_email and not target_query) else None
+            eid = active_email.get("id") if (active_email and not target_query) else None
+
+            step_params: Dict[str, Any] = {}
+            if tid:
+                step_params["thread_id"] = tid
+            if eid:
+                step_params["email_id"] = eid
+            if target_query:
+                step_params["query"] = target_query
+            if not step_params:
+                step_params = {"query": query}
+
+            logger.info(f"[Planner.PreFilter] Semantic match: EMAIL_THREAD (conf={conf:.2f}) -> email:read_thread")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "email", "action": "read_thread", "params": step_params}],
+            )
+
+        if intent == SemanticIntent.UNREAD_EMAILS:
+            logger.info(f"[Planner.PreFilter] Semantic match: UNREAD_EMAILS (conf={conf:.2f}) -> email:list_unread_emails")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "email", "action": "list_unread_emails", "params": {}}],
+            )
+
+        is_direct_song_movie = (
+            any(w in q_lower for w in ["what song", "what track", "playing right now", "current song", "this track"])
+            and any(w in q_lower for w in ["movie", "film", "album", "who sang", "singer", "actor", "from"])
+        )
+        if intent == SemanticIntent.SONG_ORIGIN or is_direct_song_movie:
+            logger.info(f"[Planner.PreFilter] Semantic match: SONG_ORIGIN (conf={conf:.2f}) -> sequential media + research")
+            return SwarmPlan(
+                plan_type="sequential",
+                provider_used="prefilter",
+                steps=[
+                    {"agent": "media", "action": "get_playback_status", "params": {}},
+                    {"agent": "research", "action": "web_search", "params": {"query": "$step_1.track movie"}},
+                ],
+            )
+
+        if intent == SemanticIntent.DAILY_AGENDA:
+            logger.info(f"[Planner.PreFilter] Semantic match: DAILY_AGENDA (conf={conf:.2f}) -> tasks:get_daily_agenda")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "tasks", "action": "get_daily_agenda", "params": {}}],
+            )
+
+        if intent == SemanticIntent.FINANCE_BALANCE:
+            logger.info(f"[Planner.PreFilter] Semantic match: FINANCE_BALANCE (conf={conf:.2f}) -> finance:get_balance")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "finance", "action": "get_balance", "params": {}}],
+            )
+
+        if intent == SemanticIntent.SYSTEM_STATUS:
+            logger.info(f"[Planner.PreFilter] Semantic match: SYSTEM_STATUS (conf={conf:.2f}) -> system:get_system_vitals")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "system", "action": "get_system_vitals", "params": {}}],
+            )
+
+        return None
+
+    def _select_candidate_specialists(
+        self,
+        query: str,
+        session_context: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        """Selects the 2-4 candidate specialists relevant to the user query and active context."""
+        q_lower = query.lower()
+        candidates: set[str] = set()
+
+        domain_keywords = {
+            "media": ["play", "song", "music", "track", "spotify", "artist", "album", "volume", "pause", "resume", "listen", "soundtrack", "lofi"],
+            "tasks": ["task", "todo", "reminder", "remind", "calendar", "event", "meeting", "agenda", "schedule", "appointment"],
+            "email": ["email", "mail", "inbox", "thread", "message", "sender", "unread", "draft", "rohit", "arpit", "hemanshu"],
+            "vision": ["see", "look", "watch", "camera", "webcam", "screen", "display", "monitor", "holding", "read", "ocr", "terminal", "window"],
+            "github": ["repo", "repository", "git", "github", "commit", "branch", "pr", "pull request", "issue", "clone", "code"],
+            "finance": ["balance", "bank", "money", "rupees", "inr", "expense", "spent", "split", "debt", "owe", "transaction"],
+            "memory": ["remember", "forget", "recall", "memorize", "preference", "profile", "what do you know about me"],
+            "system": ["volume", "battery", "cpu", "ram", "specs", "brightness", "bluetooth", "wifi", "host"],
+            "crawl": ["crawl", "scrape", "documentation", "scrape page", "docs for"],
+        }
+
+        for domain, kws in domain_keywords.items():
+            if any(kw in q_lower for kw in kws):
+                candidates.add(domain)
+
+        # Retain active context specialists
+        if session_context:
+            if session_context.get("active_email"):
+                candidates.add("email")
+            if session_context.get("active_track"):
+                candidates.add("media")
+            if session_context.get("active_repo"):
+                candidates.add("github")
+            if session_context.get("active_task"):
+                candidates.add("tasks")
+            if session_context.get("active_visual"):
+                candidates.add("vision")
+
+        # Always include research as fallback
+        candidates.add("research")
+
+        # If too few candidates matched, include common desk specialists
+        if len(candidates) <= 1:
+            candidates.update(["media", "tasks", "vision"])
+
+        return list(candidates)
+
+    async def create_plan(
+        self,
+        query: str,
+        registry: SpecialistRegistry,
+        history: Optional[List[Dict[str, str]]] = None,
+        session_context: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[SwarmPlan, float]:
+        """Stage 1: Generates an execution plan from the user query with conversation context."""
+        # ── Deterministic Pre-Filter (<1ms) ──────────────────────────────────
+        prefilter_plan = self._check_deterministic_prefilter(query, session_context)
+        if prefilter_plan is not None:
+            prefilter_plan.provider_used = "prefilter"
+            logger.info("[Planner] Plan generated via deterministic pre-filter (0ms, provider: prefilter)")
+            return prefilter_plan, 0.0
+
+        candidate_specialists = self._select_candidate_specialists(query, session_context)
+        capabilities = registry.get_capabilities_prompt(compact=True, specialist_names=candidate_specialists)
+        system_prompt = PLANNER_SYSTEM_PROMPT.format(capabilities=capabilities)
 
         messages = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": query},
+            {"role": "system", "content": system_prompt},
         ]
+
+        # Inject active session context (holding active email, track, repo, task, visual, and dynamic entities)
+        if session_context:
+            context_lines = []
+            active_email = session_context.get("active_email")
+            if active_email:
+                context_lines.append(
+                    f"Active Email: ID='{active_email.get('id')}', ThreadID='{active_email.get('thread_id')}', "
+                    f"Sender='{active_email.get('sender_name')} <{active_email.get('sender')}>', "
+                    f"Subject='{active_email.get('subject')}'"
+                )
+            active_track = session_context.get("active_track")
+            if active_track:
+                context_lines.append(
+                    f"Active Music Track: '{active_track.get('track')}' by {active_track.get('artist')} "
+                    f"from album/film '{active_track.get('album')}'"
+                )
+            active_repo = session_context.get("active_repo")
+            if active_repo:
+                context_lines.append(f"Active GitHub Repo: '{active_repo.get('repo')}'")
+            active_task = session_context.get("active_task")
+            if active_task:
+                context_lines.append(f"Active Task: '{active_task.get('title')}'")
+            # Surface what Alfred just saw/read via camera or screen OCR
+            active_visual = session_context.get("active_visual")
+            if active_visual:
+                src = active_visual.get("source", "camera")
+                txt = active_visual.get("text", "")[:300]
+                context_lines.append(f"Last Visual Observation ({src}): {txt}")
+
+            entities = session_context.get("entities", {})
+            for ent_type, ent_data in entities.items():
+                if ent_type not in ("email", "track", "repo", "task", "visual"):
+                    context_lines.append(f"Active {ent_type.capitalize()}: {json.dumps(ent_data)}")
+
+            if context_lines:
+                messages.append({
+                    "role": "system",
+                    "content": "ACTIVE SESSION CONTEXT (retained across turns):\n" + "\n".join(context_lines),
+                })
+
+        # Inject recent dialogue history purely as reference context (NOT separate user messages)
+        # to prevent fast LLM planners from confusing past user turns with current tasks.
+        if history:
+            hist_lines = []
+            for turn in history[-4:]:
+                r_label = "User" if turn.get("role") == "user" else "Alfred"
+                c_text = turn.get("content", "").strip()
+                if c_text:
+                    hist_lines.append(f"{r_label}: {c_text}")
+            if hist_lines:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "RECENT CONVERSATION HISTORY (REFERENCE ONLY — DO NOT RE-EXECUTE COMPLETED REQUESTS):\n"
+                        + "\n".join(hist_lines)
+                    ),
+                })
+
+        messages.append({
+            "role": "user",
+            "content": f"CURRENT USER QUERY TO PLAN FOR (generate plan steps ONLY for this inquiry):\n\"{query}\"",
+        })
 
         plan_data, elapsed_ms = await self.llm.generate_json(messages, temperature=0.1)
 
@@ -106,9 +618,84 @@ class SwarmPlanner:
             plan = SwarmPlan(**plan_data)
             if plan.steps and plan.plan_type == "direct":
                 plan.plan_type = "parallel"
+            plan.provider_used = getattr(self.llm, "last_provider_used", "llm")
         except Exception as e:
             logger.warning(f"[Planner] Plan parsing fallback: {e}. Defaulting to direct.")
-            plan = SwarmPlan(plan_type="direct", direct_response="How may I be of service, sir?")
+            plan = SwarmPlan(plan_type="direct", direct_response="How may I be of service, sir?", provider_used="fallback")
+
+        # ── Post-LLM Factual & Search Guardrails ─────────────────────────────
+        # If the LLM returned a direct conversational response for an explicit search or
+        # realtime query, enforce an external research step to prevent hallucination.
+        q_lower = query.lower()
+        is_explicit_search = any(kw in q_lower for kw in [
+            "search for", "search the web", "search web", "google", "look up", "lookup", "find information", "find out about"
+        ])
+        is_realtime_data = any(kw in q_lower for kw in [
+            "weather in", "weather today", "forecast", "latest news", "news about", "who won the", "score of"
+        ])
+        is_media_trivia = any(kw in q_lower for kw in [
+            "what movie is", "which movie is", "what film is", "which film is", "who directed", "who starred in",
+            "who acted in", "who wrote the song", "who sang the song", "who is the director of", "who wrote",
+            "release date of", "when was", "when did", "box office of"
+        ])
+        is_entity_lookup = any(
+            re.search(rf"\b{re.escape(prefix)}\b", q_lower)
+            for prefix in [
+                "who is", "who was", "where is", "what is the capital of", "what is the net worth of",
+                "who invented", "who discovered", "what year was", "what year did"
+            ]
+        )
+        is_open_research = bool(
+            re.search(r"\b(tell me (more )?about|what can you tell me about|more about|explain|describe|summarize|summary of|overview of|details? (about|on|of)|info (about|on)|information (about|on))\b", q_lower)
+        )
+        is_verify_request = bool(
+            re.search(
+                r"\b(are you sure|no[,.]?\s+try|nope[,.]?\s+try|wrong[,.]?\s+try|incorrect[,.]?\s+try"
+                r"|try (again|researching|to search|looking it up|harder|properly)"
+                r"|research (it|this|more|properly|again|better)"
+                r"|double.?check|verify (this|that|it)"
+                r"|look it up|check again|search (again|properly|better|more carefully)"
+                r"|that('s| is) (wrong|incorrect|not right)"
+                r"|you('re| are) (wrong|incorrect|hallucinating|making (it|this) up))\b",
+                q_lower,
+            )
+        )
+
+        if is_explicit_search or is_realtime_data or is_media_trivia or is_entity_lookup or is_open_research or is_verify_request:
+            needs_override = (
+                is_verify_request
+                or plan.plan_type == "direct"
+                or not any(s.get("agent") == "research" for s in plan.steps)
+            )
+            if needs_override:
+                logger.info(f"[Planner] Enforcing research step for factual/verify query: '{query}'")
+                clean_sq = re.sub(
+                    r"^(please\s+)?(can you\s+)?(search\s+for|google|look\s+up|search\s+the\s+web\s+for|search\s+web\s+for|find\s+out\s+about|tell me (more )?about|what can you tell me about|are you sure[,.]?\s+try|try (again|researching|to search)|research (it|this|more|properly|again))\s+",
+                    "",
+                    query,
+                    flags=re.IGNORECASE,
+                ).strip()
+
+                # Anaphora resolution: if clean_sq is a bare pronoun or generic noun
+                # (e.g. "the book", "it", "this", "that movie") resolve it to the actual
+                # visual observation from the previous turn (what Alfred just saw/OCR'd).
+                _is_anaphoric = bool(re.fullmatch(
+                    r"(the\s+)?(book|novel|movie|film|show|article|document|item|thing|object|it|this|that|them)(\s+(book|novel|movie|film|show))?",
+                    clean_sq.strip(),
+                    re.IGNORECASE,
+                ))
+                if _is_anaphoric and session_context:
+                    active_visual = session_context.get("active_visual")
+                    if active_visual and active_visual.get("text"):
+                        logger.info("[Planner] Resolving anaphoric research query from active_visual context.")
+                        clean_sq = active_visual["text"][:300]
+
+                if not clean_sq or len(clean_sq) < 3:
+                    clean_sq = query
+                plan = SwarmPlan(
+                    plan_type="parallel",
+                    steps=[{"agent": "research", "action": "web_search", "params": {"query": clean_sq}}],
+                )
 
         return plan, elapsed_ms
 
@@ -127,6 +714,7 @@ class SwarmPlanner:
                 direct_response=plan.direct_response,
                 specialist_results=[],
                 execution_latency_ms=(time.perf_counter() - t0) * 1000,
+                provider_used=plan.provider_used,
             )
 
         # ── Parallel Execution (Independent Steps) ───────────────────────────
@@ -146,9 +734,10 @@ class SwarmPlanner:
                 plan_type="parallel",
                 specialist_results=list(results),
                 execution_latency_ms=exec_ms,
+                provider_used=plan.provider_used,
             )
 
-        # ── Sequential Execution (Chained Steps) ─────────────────────────────
+        # ── Sequential Execution (Chained Steps with Flexible Variable Interpolation) ──
         results: List[SpecialistResult] = []
         step_outputs: Dict[str, Any] = {}
 
@@ -157,34 +746,154 @@ class SwarmPlanner:
             action = step.get("action", "")
             params = step.get("params", {}).copy()
 
-            # Dynamic variable interpolation (e.g., "$step_1.result.top_result" or "$step_1.top_result")
-            for k, v in params.items():
-                if isinstance(v, str) and v.startswith("$step_"):
-                    match = re.match(r"\$step_(\d+)(?:\.(.+))?", v)
-                    if match:
-                        ref_step = f"step_{match.group(1)}"
-                        ref_prop = match.group(2)
-                        ref_data = step_outputs.get(ref_step, {})
+            # Dynamic variable interpolation (e.g. "$step_1.track movie", "$step_1.title", "$step_1.emails[0].id", "$step_1.result.top_result")
+            def _resolve_step_var(step_num: str, prop_path: Optional[str]) -> Any:
+                ref_step = f"step_{step_num}"
+                if ref_step not in step_outputs and step_num == "0" and "step_1" in step_outputs:
+                    ref_step = "step_1"
+                curr = step_outputs.get(ref_step, {})
+                if not prop_path:
+                    return curr
 
-                        if ref_prop:
-                            parts = [p for p in ref_prop.split(".") if p not in ("result", "data")]
-                            curr = ref_data
-                            for p in parts:
-                                if isinstance(curr, dict) and p in curr:
-                                    curr = curr[p]
-                                else:
-                                    break
-                            params[k] = curr
+                # Clean tokens from path: e.g. "emails[0].id", "result.top_result", "[0].id", "track"
+                tokens = re.findall(r"[a-zA-Z0-9_-]+", prop_path)
+                for tok in tokens:
+                    if isinstance(curr, dict):
+                        # Skip wrapper keys if present in path but not in curr
+                        if tok.lower() in ("result", "data", "task", "email", "track", "repo", "item", "record") and tok not in curr and tok.lower() not in curr:
+                            continue
+
+                        # Direct key match (exact or case-insensitive)
+                        matched_key = next((k for k in curr if k.lower() == tok.lower()), None)
+                        if matched_key is not None:
+                            curr = curr[matched_key]
+                        elif tok.isdigit() and len(curr) > int(tok):
+                            curr = curr.get(int(tok), curr.get(tok))
                         else:
-                            params[k] = ref_data
+                            # Auto-unwrap: if dict contains non-empty lists, search inside the first list
+                            unwrapped = False
+                            list_keys = [k for k, val in curr.items() if isinstance(val, list) and val]
+                            for lk in list_keys:
+                                sublist = curr[lk]
+                                if tok.isdigit() and int(tok) < len(sublist):
+                                    curr = sublist[int(tok)]
+                                    unwrapped = True
+                                    break
+                                elif isinstance(sublist[0], dict):
+                                    sub_matched_key = next((k for k in sublist[0] if k.lower() == tok.lower()), None)
+                                    if sub_matched_key is not None:
+                                        curr = sublist[0][sub_matched_key]
+                                        unwrapped = True
+                                        break
+                            if not unwrapped:
+                                return None
+                    elif isinstance(curr, list):
+                        if tok.isdigit():
+                            idx = int(tok)
+                            if 0 <= idx < len(curr):
+                                curr = curr[idx]
+                            else:
+                                return None
+                        elif curr and isinstance(curr[0], dict):
+                            # Auto-index first item if accessing property directly on list
+                            sub_matched_key = next((k for k in curr[0] if k.lower() == tok.lower()), None)
+                            if sub_matched_key is not None:
+                                curr = curr[0][sub_matched_key]
+                            else:
+                                return None
+                        else:
+                            return None
+                    else:
+                        return None
+                return curr
+
+            step_var_pattern = r"\$step_(\d+)(?:(?:\.([a-zA-Z0-9_.\[\]]+))|(\[[^\]]+\](?:\.[a-zA-Z0-9_.]+)?))?"
+            for k, v in params.items():
+                if isinstance(v, str) and "$step_" in v:
+                    exact_match = re.fullmatch(step_var_pattern, v.strip())
+                    if exact_match:
+                        prop_str = exact_match.group(2) or exact_match.group(3)
+                        params[k] = _resolve_step_var(exact_match.group(1), prop_str)
+                    else:
+                        def _replace_match(m: re.Match) -> str:
+                            prop_str = m.group(2) or m.group(3)
+                            val = _resolve_step_var(m.group(1), prop_str)
+                            return json.dumps(val) if isinstance(val, (dict, list)) else (str(val) if val is not None else "")
+
+                        params[k] = re.sub(step_var_pattern, _replace_match, v)
+
+            # Sanitize search queries interpolated from OCR text
+            if action == "web_search" and "query" in params and isinstance(params["query"], str):
+                raw_q = params["query"]
+                # Strip markdown code blocks & backticks
+                q_clean = re.sub(r"```[a-zA-Z]*\n?|```", " ", raw_q)
+                cleaned_lines = []
+                for line in q_clean.splitlines():
+                    l_str = line.strip()
+                    # Filter out isolated digits/dates and non-Latin artifacts (e.g. Marathi/Hindi dates)
+                    if re.search(r"[a-zA-Z]{2,}", l_str):
+                        cleaned_lines.append(l_str)
+                if cleaned_lines:
+                    q_clean = " ".join(cleaned_lines)
+                params["query"] = re.sub(r"\s+", " ", q_clean).strip()
 
             res = await registry.execute_action(agent_name, action, params, context)
             results.append(res)
             step_outputs[f"step_{idx}"] = res.data or res.speech_summary
+
+            # ── Confidence Gate (Fix 1/4): Vision/OCR → Research chains only ──────
+            # If this step is a vision/OCR action and the NEXT step is a research step,
+            # check the OCR confidence before blindly passing the result downstream.
+            if (
+                action in ("ocr_webcam", "ocr_screen", "inspect_webcam", "inspect_screen")
+                and res.success
+                and isinstance(res.data, dict)
+                and idx < len(plan.steps)  # there is a next step
+            ):
+                next_step = plan.steps[idx]  # plan.steps is 0-indexed, idx is 1-indexed
+                is_next_research = next_step.get("agent") == "research"
+                confidence = res.data.get("confidence", "high")
+
+                if is_next_research and confidence == "uncertain":
+                    # Item is unreadable — ask user to reposition instead of hallucinating
+                    logger.info(f"[Planner] Vision/OCR {action} confidence=uncertain: halting sequential chain, requesting repositioning.")
+                    msg = (
+                        "I'm having difficulty reading your display clearly, sir. Could you please zoom in or bring the window to focus?"
+                        if "screen" in action
+                        else "I'm having difficulty reading the cover clearly, sir. Could you hold it a bit closer to the camera, or face it more directly toward me?"
+                    )
+                    clarify = SpecialistResult(
+                        success=True,
+                        action="confidence_gate",
+                        agent_name="planner",
+                        speech_summary=msg,
+                        data={
+                            "gate": "uncertain",
+                            "extracted_text": res.data.get("extracted_text", "") or res.data.get("description", ""),
+                        },
+                    )
+                    results.append(clarify)
+                    # Return early — skip the research step
+                    exec_ms = (time.perf_counter() - t0) * 1000
+                    return ExecutionResult(
+                        plan_type="sequential",
+                        direct_response=clarify.speech_summary,
+                        specialist_results=results,
+                        execution_latency_ms=exec_ms,
+                        provider_used=plan.provider_used,
+                    )
+                elif is_next_research and confidence == "medium":
+                    # Partial read — proceed but log warning; Alfred will hedge in synthesis
+                    logger.warning(
+                        f"[Planner] OCR confidence=medium (text='{res.data.get('extracted_text', '')[:40]}'). "
+                        "Proceeding with research but result may be imprecise."
+                    )
+
 
         exec_ms = (time.perf_counter() - t0) * 1000
         return ExecutionResult(
             plan_type="sequential",
             specialist_results=results,
             execution_latency_ms=exec_ms,
+            provider_used=plan.provider_used,
         )

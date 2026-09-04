@@ -26,6 +26,7 @@ class HeartbeatRequest(BaseModel):
 
 
 @router.get("/state", response_model=Dict[str, Any])
+@router.get("/snapshot", response_model=Dict[str, Any])
 async def get_state_snapshot() -> Dict[str, Any]:
     """Returns the full cluster synchronization state snapshot."""
     return sync_manager.get_state_snapshot().to_snapshot()
@@ -58,3 +59,21 @@ async def heartbeat(req: HeartbeatRequest) -> Dict[str, Any]:
     if not success:
         raise HTTPException(status_code=404, detail=f"Device '{req.device_id}' not found.")
     return {"status": "ok", "device_id": req.device_id}
+
+
+@router.post("/scan", response_model=Dict[str, Any])
+@router.get("/scan", response_model=Dict[str, Any])
+async def scan_network_devices() -> Dict[str, Any]:
+    """Triggers an active subnet sweep to discover and register VESPER edge nodes."""
+    from backend.sync.network_scanner import network_scanner
+    discovered = await network_scanner.scan_subnet(auto_register=True)
+    snapshot = sync_manager.get_state_snapshot()
+    allocations = {dev.device_id: dev.assigned_roles for dev in snapshot.active_devices.values()}
+    return {
+        "status": "scan_complete",
+        "discovered_count": len(discovered),
+        "discovered_devices": [d.model_dump() for d in discovered],
+        "active_devices": [d.model_dump() for d in sync_manager.get_active_devices()],
+        "cluster_role_allocations": allocations,
+        "cluster_version": snapshot.version,
+    }

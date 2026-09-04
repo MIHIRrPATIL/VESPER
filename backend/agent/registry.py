@@ -41,23 +41,49 @@ class SpecialistRegistry:
         """Returns all currently registered specialist instances."""
         return list(self._specialists.values())
 
-    def get_capabilities_prompt(self) -> str:
-        """Builds a comprehensive domain and action prompt for Alfred's Stage 1 Planner."""
+    def get_capabilities_prompt(
+        self,
+        compact: bool = True,
+        specialist_names: Optional[List[str]] = None,
+    ) -> str:
+        """Builds a token-efficient domain and action prompt for Alfred's Stage 1 Planner."""
         if not self._specialists:
             return "No specialist agents are currently active."
 
-        lines = ["Available Specialists, Actions, and Tools:"]
-        for spec in self._specialists.values():
-            lines.append(f"\n- {spec.name}: {spec.get_capabilities()}")
+        specs = list(self._specialists.values())
+        if specialist_names:
+            target_set = {n.lower().strip() for n in specialist_names}
+            matched = [s for s in specs if s.name.lower().strip() in target_set]
+            if matched:
+                specs = matched
+
+        if not compact:
+            lines = ["Available Specialists, Actions, and Tools:"]
+            for spec in specs:
+                lines.append(f"\n- {spec.name}: {spec.get_capabilities()}")
+                tools = spec.get_tool_schemas()
+                if tools:
+                    lines.append("  Actions:")
+                    for t in tools:
+                        props = t.get("parameters", {}).get("properties", {})
+                        params_str = ", ".join([f"{k}: {v.get('type', 'any')}" for k, v in props.items()])
+                        lines.append(f"    - action: '{t['name']}'({params_str}) -> {t.get('description', '')}")
+                else:
+                    lines.append(f"  Capabilities: {spec.get_capabilities()}")
+            return "\n".join(lines)
+
+        # High-density compact format (saves ~75% tokens)
+        lines = ["Available Specialists & Actions:"]
+        for spec in specs:
             tools = spec.get_tool_schemas()
-            if tools:
-                lines.append("  Actions:")
-                for t in tools:
-                    props = t.get("parameters", {}).get("properties", {})
-                    params_str = ", ".join([f"{k}: {v.get('type', 'any')}" for k, v in props.items()])
-                    lines.append(f"    - action: '{t['name']}'({params_str}) -> {t.get('description', '')}")
-            else:
-                lines.append(f"  Capabilities: {spec.get_capabilities()}")
+            actions_summary = []
+            for t in tools:
+                props = t.get("parameters", {}).get("properties", {})
+                reqs = t.get("parameters", {}).get("required", [])
+                p_list = [k if k in reqs else f"{k}?" for k in props]
+                actions_summary.append(f"'{t['name']}'({', '.join(p_list)})")
+            acts_str = " | ".join(actions_summary) if actions_summary else ""
+            lines.append(f"- {spec.name}: {spec.get_capabilities()} -> Actions: [{acts_str}]")
         return "\n".join(lines)
 
     def get_all_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -78,10 +104,13 @@ class SpecialistRegistry:
             return SpecialistResult(success=False, action=action, error=err_msg)
 
         try:
-            return await spec.execute(action, params, context)
+            result = await spec.execute(action, params, context)
+            result.agent_name = agent_name  # Stamp for trace logging
+            return result
         except Exception as e:
             logger.exception(f"[Registry] Error executing action '{action}' on specialist '{agent_name}': {e}")
-            return SpecialistResult(success=False, action=action, error=str(e))
+            return SpecialistResult(success=False, action=action, agent_name=agent_name, error=str(e))
+
 
 
 # Global default registry instance
@@ -137,6 +166,18 @@ def register_default_specialists(reg: SpecialistRegistry) -> None:
         reg.register(VisionSpecialist())
     except Exception as e:
         logger.warning(f"[Registry] Could not load VisionSpecialist: {e}")
+
+    try:
+        from backend.agent.specialists.github_specialist import GitHubSpecialist
+        reg.register(GitHubSpecialist())
+    except Exception as e:
+        logger.warning(f"[Registry] Could not load GitHubSpecialist: {e}")
+
+    try:
+        from backend.agent.specialists.email_specialist import EmailSpecialist
+        reg.register(EmailSpecialist())
+    except Exception as e:
+        logger.warning(f"[Registry] Could not load EmailSpecialist: {e}")
 
 
 # Initialize default specialists

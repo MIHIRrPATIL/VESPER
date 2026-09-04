@@ -6,24 +6,25 @@ Designed from first principles for low latency, zero operating cost, touchless m
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
-- **🎙️ Low-Power Continuous Wake Word Detection**:
+- **Low-Power Continuous Wake Word Detection**:
   - Two-tier engine: WebRTC VAD pre-gating (**<0.5% CPU** when silent) + 1.5s rolling acoustic buffer for `"Hey Alfred"` and `"Alfred"`.
   - Self-trigger protection: Pauses audio input during TTS synthesis so Alfred never triggers himself.
 
-- **👁️ Vision Perception Suite (`VisionSpecialist`)**:
+- **Vision Perception Suite (`VisionSpecialist`)**:
   - **Webcam-First Priority**: Analyzes physical surroundings, hand-held items, books, and receipts via `/dev/video0`.
   - **Webcam OCR**: Verbatim transcription of documents, printed code, serial numbers, and handwritten notes.
   - **Screen Perception**: Secondary inspection of active monitors, IDE errors, and terminal logs.
   - **Hardware & Edge Awareness (`DeviceProbe`)**: Automatically probes host architecture (Desktop, Orange Pi, Raspberry Pi, Jetson). If camera is disconnected or absent on an SBC, provides an articulate butler response instead of crashing.
-  - **Decoupled Touchless Gestures (`GestureWorker`)**: Runs at throttled 5–8 FPS (80% CPU savings) with zero-CPU standby on camera-less SBCs (`CLOSED_FIST` $\to$ Mute/Pause, `OPEN_PALM` $\to$ Resume, `PEACE_SIGN` $\to$ Toggle Zen).
+  - **Decoupled Touchless Gestures (`GestureWorker`)**: Runs at throttled 5–8 FPS (80% CPU savings) with zero-CPU standby on camera-less SBCs (`CLOSED_FIST` $\to$ Mute/Pause, `OPEN_PALM` $\to$ Resume, `PEACE_SIGN` $\to$ Next Track, `POINTING_UP` $\to$ Prev Track, `VOLUME_DIAL` rotary knob, and `ROCK_ON` 1.0s hold to toggle gesture lock with anti-flapping buffer).
 
-- **🔄 Cross-Device State Sync Engine (`backend/sync/`)**:
+- **Cross-Device State Sync & Cluster Allocation (`backend/sync/`)**:
   - Real-time synchronization of master volume, Zen Mode, Focus Mode, active tasks, and currently playing media across Desktop, Orange Pi edge nodes, and mobile companions.
   - Single-pipe multiplexed WebSocket `Channel.SYNC` and full REST endpoint catalog (`/sync/state`, `/sync/devices`).
+  - **Least-Capability Workload Allocator**: Real-time telemetry monitoring and edge vs. cloud compute offloading.
 
-- **🧠 8-Specialist Swarm Architecture**:
+- **10-Specialist Cognitive Swarm Architecture**:
   1. `TaskSpecialist`: Supabase tasks CRUD, combined daily agenda, Google Calendar v3 OAuth.
   2. `MediaSpecialist`: Spotify Web API playback controls and SerpAPI YouTube video search.
   3. `ResearchSpecialist`: Real-time Tavily search + SerpAPI Google fallback (<500ms).
@@ -32,14 +33,17 @@ Designed from first principles for low latency, zero operating cost, touchless m
   6. `SystemSpecialist`: Hardware vitals, process resource inspector, PipeWire/PulseAudio volume and mute controls.
   7. `MemorySpecialist`: 4-Tier Shodh Cognitive Memory with contradiction resolution, fact superseding, and 360° user dossiers.
   8. `VisionSpecialist`: Optical webcam VLLM reasoning, webcam OCR, screen perception.
+  9. `EmailSpecialist`: RFC-compliant Gmail OAuth integration, multi-turn drafts, thread context holding, and unread triage.
+  10. `GitHubSpecialist`: GitHub REST API repository search, pull request reviews, issues, and workflow runs.
 
-- **⚡ Fast-Path & Real-Time Gateway**:
-  - Sub-10ms deterministic fast-path regex and out-of-band barge-in interruption (<30ms) via `TaskRegistry`.
+- **3-Tier Semantic Routing & Real-Time Gateway**:
+  - Tier 1 deterministic cache (<0.1ms), Tier 2 local zero-token semantic router (`all-MiniLM-L6-v2` via FastEmbed, ~10ms CPU), and Tier 3 cognitive LLM planning.
+  - Sub-30ms out-of-band barge-in interruption via `TaskRegistry`.
   - 100% Free Operating Tier using Groq LPUs (`qwen/qwen3.8-27b`, `llama-3.2-11b-vision-preview`, Whisper-Large-v3-Turbo) and local Piper TTS.
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 ```
                                ┌────────────────────────────────────────────────┐
@@ -52,8 +56,8 @@ Designed from first principles for low latency, zero operating cost, touchless m
                                ┌────────────────────────────────────────────────┐
                                │           VESPER API Gateway (:8000)           │
                                │  • Multiplexed Channels (CONTROL, VOICE, SYNC) │
-                               │  • TaskRegistry (<30ms Out-of-band Interruption│
-                               │  • Central SyncManager (State & Topology)      │
+                               │  • TaskRegistry (<30ms Out-of-band Interruption)
+                               │  • Central SyncManager (State & Topology)
                                └───────────────────────┬────────────────────────┘
                                                        │
                  ┌─────────────────────────────────────┼─────────────────────────────────────┐
@@ -69,7 +73,7 @@ Designed from first principles for low latency, zero operating cost, touchless m
 
 ---
 
-## 🚀 Quickstart
+## Quickstart
 
 ### Prerequisites
 - Python 3.11+
@@ -114,10 +118,16 @@ uvicorn backend.voice.app:app --host 0.0.0.0 --port 8002 --reload
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 For exhaustive technical references, see the [`docs/`](docs/) directory:
+- [Complete System Architecture Diagram](docs/vesper_complete_system_architecture.puml) ([SVG](docs/vesper_complete_system_architecture.svg) | [PNG](docs/vesper_complete_system_architecture.png))
 - [AI Specialists & Tools Reference Manual](docs/agents_and_tools_reference.md)
+- [3-Tier Semantic Routing Architecture](docs/three_tier_semantic_routing_architecture.md)
+- [Multi-Turn Context & Dynamic Planning](docs/multi_turn_context_and_planning.md)
+- [Touchless Gesture Perception & Control](docs/gesture_perception_and_control.md)
+- [Distributed Cluster & Hardware Allocation](docs/distributed_cluster_and_hardware_allocation.md)
+- [OAuth & Integrations Setup Guide](docs/oauth_and_integrations_guide.md)
 - [Gateway & Real-Time Networking Reference](docs/gateway_and_networking_reference.md)
 - [Perceptual & Synchronization Engines Reference](docs/perceptual_and_sync_engines.md)
 - [Backend & Multi-Agent Swarm Architecture](docs/backend_and_multiagent_architecture.md)
@@ -125,6 +135,6 @@ For exhaustive technical references, see the [`docs/`](docs/) directory:
 
 ---
 
-## 📜 License
+## License
 
 MIT License. Designed and engineered for the VESPER ambient companion ecosystem.

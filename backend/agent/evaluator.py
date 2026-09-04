@@ -56,21 +56,37 @@ class OutputEvaluator:
     INLINE_CODE_PATTERN = re.compile(r"`([^`]+)`")
     TABLE_LINE_PATTERN = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
     TABLE_SEPARATOR_PATTERN = re.compile(r"^\s*\|?[\s\-:]+\|[\s\-:|]*$", re.MULTILINE)
+    HR_LINE_PATTERN = re.compile(r"^\s*[-=_*]{3,}\s*$", re.MULTILINE)
+    REASONING_BLOCK_PATTERN = re.compile(
+        r"(?:^|\n|\s---+\s)\s*(?:Reasoning|Rationale|Explanation|Internal Thinking):\s*[\s\S]*?(?=(?:\n\n|\Z))",
+        re.I,
+    )
+    HEADER_LABELS_PATTERN = re.compile(r"\b(?:Subject|To|From):\s*", re.I)
     MARKDOWN_FORMATTING = re.compile(r"[*_~#>]")
     EXCESS_WHITESPACE = re.compile(r"\s{2,}")
 
     @classmethod
-    def sanitize_speech_text(cls, text: str) -> str:
-        """Strips URLs, tables, code, and markdown syntax to produce smooth, human-like speech."""
+    def sanitize_speech_text(cls, text: Optional[str]) -> str:
+        """Strips URLs, tables, code, reasoning disclaimers, and markdown syntax to produce smooth, human-like speech."""
+        if not text:
+            return ""
         cleaned = text.strip()
 
-        # Remove code blocks
+        # Remove code blocks and inline code
         cleaned = cls.CODE_BLOCK_PATTERN.sub("", cleaned)
         cleaned = cls.INLINE_CODE_PATTERN.sub(r"\1", cleaned)
 
-        # Remove markdown tables
+        # Remove reasoning / explanation metadata blocks
+        cleaned = cls.REASONING_BLOCK_PATTERN.sub("", cleaned)
+
+        # Remove markdown tables and horizontal rules
         cleaned = cls.TABLE_SEPARATOR_PATTERN.sub("", cleaned)
         cleaned = cls.TABLE_LINE_PATTERN.sub("", cleaned)
+        cleaned = cls.HR_LINE_PATTERN.sub("", cleaned)
+        cleaned = re.sub(r"[-=_*]{3,}", " ", cleaned)
+
+        # Remove email/header labels that sound awkward when read aloud
+        cleaned = cls.HEADER_LABELS_PATTERN.sub("", cleaned)
 
         # Replace URLs with spoken-friendly domain mention or remove
         def _replace_url(match: re.Match) -> str:
@@ -98,10 +114,11 @@ class OutputEvaluator:
     @classmethod
     def evaluate(
         cls,
-        raw_text: str,
+        raw_text: Optional[str],
         specialist_results: Optional[List[SpecialistResult]] = None,
     ) -> EvaluatorResult:
         """Evaluates raw output and specialist returns into speech and HUD presentation."""
+        raw_text_str = (raw_text or "").strip()
         specialist_results = specialist_results or []
         diagnostics: List[str] = []
         hud_cards: List[Dict[str, Any]] = []
@@ -124,7 +141,7 @@ class OutputEvaluator:
                 })
 
         # Sanitize speech text for TTS
-        speech_text = cls.sanitize_speech_text(raw_text)
+        speech_text = cls.sanitize_speech_text(raw_text_str)
 
         # Fallback if speech text was completely stripped
         if not speech_text:
@@ -137,7 +154,7 @@ class OutputEvaluator:
         return EvaluatorResult(
             speech_text=speech_text,
             hud_cards=hud_cards,
-            markdown_body=raw_text.strip(),
+            markdown_body=raw_text_str,
             has_errors=has_errors,
             diagnostics=diagnostics,
         )

@@ -47,6 +47,10 @@ class SyncManager:
         if callback in self._listeners:
             self._listeners.remove(callback)
 
+    def get_snapshot(self) -> SynchronizedState:
+        """Returns the current synchronized cluster state snapshot."""
+        return self.state
+
     async def register_device(self, reg: DeviceRegistration) -> SynchronizedState:
         """Registers or updates a connected device's presence and hardware profile."""
         async with self._lock:
@@ -58,8 +62,9 @@ class SyncManager:
 
             logger.info(
                 f"[SyncManager] Registered device '{reg.device_id}' ({reg.device_type} - {reg.device_name}) | "
-                f"Camera: {reg.has_camera} | Display: {reg.has_display}"
+                f"Camera: {reg.has_camera} | Display: {reg.has_display} | CPU: {reg.cpu_cores}c | RAM: {reg.ram_available_gb}/{reg.ram_total_gb}GB"
             )
+            self._reallocate_roles_sync()
             await self._notify_listeners({"device_registered": reg.device_id})
             return self.state
 
@@ -143,8 +148,27 @@ class SyncManager:
             if pruned:
                 self.state.version += 1
                 self.state.updated_at = now
+                self._reallocate_roles_sync()
                 await self._notify_listeners({"devices_pruned": pruned})
         return pruned
+
+    def _reallocate_roles_sync(self) -> Dict[str, List[str]]:
+        """Synchronously invokes ClusterWorkloadAllocator to assign cluster roles."""
+        try:
+            from backend.sync.cluster_allocator import ClusterWorkloadAllocator
+            return ClusterWorkloadAllocator.allocate_roles(self.state.active_devices)
+        except Exception as e:
+            logger.error(f"[SyncManager] Failed to allocate cluster roles: {e}", exc_info=True)
+            return {}
+
+    async def reallocate_cluster_roles(self) -> Dict[str, List[str]]:
+        """Asynchronously triggers full cluster workload reallocation and notifies subscribers."""
+        async with self._lock:
+            allocs = self._reallocate_roles_sync()
+            self.state.version += 1
+            self.state.updated_at = time.time()
+            await self._notify_listeners({"roles_reallocated": allocs})
+            return allocs
 
     async def _notify_listeners(self, change_meta: Dict[str, Any]) -> None:
         """Invokes registered subscriber callbacks asynchronously."""

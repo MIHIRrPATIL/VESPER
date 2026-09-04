@@ -23,6 +23,14 @@ class DeviceRegistration(BaseModel):
     has_camera: bool = False
     has_display: bool = False
     has_microphone: bool = True
+    has_speaker: bool = True
+    cpu_cores: int = 1
+    cpu_usage_pct: float = 0.0
+    ram_total_gb: float = 1.0
+    ram_available_gb: float = 0.5
+    capability_score: float = 1.0
+    assigned_roles: List[str] = Field(default_factory=list)
+    resource_status: str = "nominal"  # "nominal", "warning", "overloaded"
     ip_address: Optional[str] = None
     registered_at: float = Field(default_factory=time.time)
     last_heartbeat: float = Field(default_factory=time.time)
@@ -35,6 +43,7 @@ class SynchronizedState(BaseModel):
     master_volume: int = 60
     zen_mode: bool = False
     focus_mode: bool = False
+    optical_sensor_active: bool = False
     active_tasks_count: int = 0
     current_media: Dict[str, Any] = Field(
         default_factory=lambda: {

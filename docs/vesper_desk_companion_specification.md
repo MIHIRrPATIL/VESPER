@@ -93,7 +93,7 @@ graph TB
         AndroidService["Android: NotificationListenerService (Background Relay)"]
         iOSService["iOS: EventKit (Calendar/Reminders) & Share Extension"]
         MobileSync["Bidirectional Task / Digest Sync Engine"]
-        noteNoPWA["⚠️ PWA explicitly omitted: Browser sandbox blocks system notification APIs"]
+        noteNoPWA["[NOTICE] PWA explicitly omitted: Browser sandbox blocks system notification APIs"]
     end
 
     subgraph BackendCore ["VESPER Core Engine (FastAPI + Asyncio)"]
@@ -102,8 +102,8 @@ graph TB
         TriageEngine["Notification Triage & Deduplication"]
         
         subgraph AgentOrchestrator ["LangGraph Agent Orchestrator"]
-            FastPath["⚡ Fast Path: Single-Turn Execution (<500ms)"]
-            SlowPath["🧠 Slow Path: Bounded Refinement Loop (<=2 Turns)"]
+            FastPath["Fast Path: Single-Turn Execution (<500ms)"]
+            SlowPath["Slow Path: Bounded Refinement Loop (<=2 Turns)"]
         end
 
         LLMRouter["LiteLLM Router (Cloud Primary / Isolated Local Process)"]
@@ -156,10 +156,10 @@ graph TB
 ### 4.2 Agentic Fast Path vs. Slow Path
 To eliminate the 4–10 second latency of ReflectOS v1, the LangGraph workflow is bifurcated:
 
-1. **⚡ Fast Path (Target: <500ms)**:
+1. **Fast Path (Target: <500ms)**:
    * *Tasks*: Volume adjustment, playback control, task checkbox, notification dismissal, basic status queries.
-   * *Flow*: Single structured-output LLM call extracts intent and parameters → executes tool directly → returns response. Skips validation, context enrichment, and quality evaluation loops.
-2. **🧠 Slow Path (Target: 1.5–3s)**:
+   * *Flow*: Single structured-output LLM call extracts intent and parameters -> executes tool directly -> returns response. Skips validation, context enrichment, and quality evaluation loops.
+2. **Slow Path (Target: 1.5–3s)**:
    * *Tasks*: Open web research, multi-account financial summaries, OCR / document reading, complex schedule resolution.
    * *Flow*: Intent classification → Guard validation → Tool invocation → Bounded quality evaluation (maximum 2 iterations) → Natural language synthesis.
 
@@ -192,9 +192,9 @@ Memory is partitioned into distinct tiers to prevent state explosion:
 
 | Platform | Compute & Specs | Evaluation | Verdict |
 |---|---|---|---|
-| **Orange Pi PC Plus** *(Legacy)* | Quad Cortex-A7, 1GB RAM, Mali-400 GPU | 2016-era hardware; cannot run local LLM, CV, or modern audio pipelines. | ❌ Repurpose solely as dumb audio peripheral if needed. |
-| **Orange Pi 5 Plus** | RK3588S (8-core), 16GB RAM, 6 TOPS NPU | Good value (~$150), but Rockchip NPU SDK (RKNN) is fragile compared to CUDA. | ⚠️ Runner-up. |
-| **Nvidia Jetson Orin Nano Super** | 6-core ARM A78AE, 8GB RAM, 1024-core Ampere GPU, 67 TOPS | Mature CUDA/TensorRT stack; runs Llama-3.1 8B (Q4) at >15 tps and concurrent YOLOv8. | ✅ **Recommended Primary Compute**. |
+| **Orange Pi PC Plus** *(Legacy)* | Quad Cortex-A7, 1GB RAM, Mali-400 GPU | 2016-era hardware; cannot run local LLM, CV, or modern audio pipelines. | [REJECTED] Repurpose solely as dumb audio peripheral if needed. |
+| **Orange Pi 5 Plus** | RK3588S (8-core), 16GB RAM, 6 TOPS NPU | Good value (~$150), but Rockchip NPU SDK (RKNN) is fragile compared to CUDA. | [ALTERNATIVE] Runner-up. |
+| **Nvidia Jetson Orin Nano Super** | 6-core ARM A78AE, 8GB RAM, 1024-core Ampere GPU, 67 TOPS | Mature CUDA/TensorRT stack; runs Llama-3.1 8B (Q4) at >15 tps and concurrent YOLOv8. | [SELECTED] **Recommended Primary Compute**. |
 
 ### 5.2 Sensor & Peripheral Strategy
 * **Depth / Gesture Sensing**:

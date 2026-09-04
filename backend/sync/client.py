@@ -40,6 +40,8 @@ class SyncClient:
 
         self.is_running = False
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._server: Optional[asyncio.Server] = None
+        self.profile_port: int = 8004
         self.latest_state: Optional[SynchronizedState] = None
         self.on_state_change: Optional[Callable[[SynchronizedState], None]] = None
 
@@ -62,18 +64,79 @@ class SyncClient:
             is_online=True,
         )
 
-    async def start(self) -> None:
-        """Starts client heartbeat and synchronization loop."""
+    async def _handle_profile_request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Lightweight HTTP handler for subnet discovery probes."""
+        import json
+        try:
+            line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            req_line = line.decode("utf-8", errors="ignore")
+            # Consume remaining HTTP headers
+            while True:
+                h_line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+                if not h_line or h_line in (b"\r\n", b"\n"):
+                    break
+
+            if "GET /sync/profile" in req_line:
+                body = self.get_registration_profile().model_dump_json()
+                resp = (
+                    f"HTTP/1.1 200 OK\r\n"
+                    f"Content-Type: application/json\r\n"
+                    f"Content-Length: {len(body.encode())}\r\n"
+                    f"Connection: close\r\n\r\n{body}"
+                )
+            elif "GET /health" in req_line:
+                body = json.dumps({"status": "healthy", "service": "vesper-edge-sync", "device_id": self.device_id})
+                resp = (
+                    f"HTTP/1.1 200 OK\r\n"
+                    f"Content-Type: application/json\r\n"
+                    f"Content-Length: {len(body.encode())}\r\n"
+                    f"Connection: close\r\n\r\n{body}"
+                )
+            else:
+                resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+            writer.write(resp.encode("utf-8"))
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def start_profile_server(self, host: str = "0.0.0.0", port: int = 8004) -> None:
+        """Starts a zero-overhead TCP responder so the central Gateway subnet scanner can discover this node."""
+        self.profile_port = port
+        try:
+            self._server = await asyncio.start_server(self._handle_profile_request, host, port)
+            logger.info(f"[SyncClient] Profile responder listening on {host}:{port}")
+        except Exception as e:
+            logger.warning(f"[SyncClient] Could not bind profile server to port {port} ({e})")
+
+    async def stop_profile_server(self) -> None:
+        """Closes the profile responder server."""
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+
+    async def start(self, enable_profile_server: bool = True) -> None:
+        """Starts client heartbeat, synchronization loop, and discovery profile responder."""
         if self.is_running:
             return
 
         self.is_running = True
         logger.info(f"[SyncClient] Starting sync client for device '{self.device_id}'...")
+        if enable_profile_server:
+            await self.start_profile_server(port=self.profile_port)
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     async def stop(self) -> None:
-        """Stops client heartbeat loop."""
+        """Stops client heartbeat loop and profile server."""
         self.is_running = False
+        await self.stop_profile_server()
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
             try:

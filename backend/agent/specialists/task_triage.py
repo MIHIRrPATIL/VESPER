@@ -85,7 +85,7 @@ class AsyncTaskTriageWorker:
             }).eq("id", task_id).execute()
 
             logger.info(
-                f"[TaskTriage] ✓ Completed triage for '{title}': "
+                f"[TaskTriage] [OK] Completed triage for '{title}': "
                 f"Priority={valid_p.value}, Tags={tags} (in {elapsed_ms:.1f}ms background time)"
             )
 

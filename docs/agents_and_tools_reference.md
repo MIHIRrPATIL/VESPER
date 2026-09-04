@@ -334,7 +334,127 @@ Returns host hardware and sensory profile (device model, camera device nodes, di
 
 ---
 
-## 9. `AsyncTaskTriageWorker` (Autonomous Background Sentry)
+## 9. `EmailSpecialist` (Gmail Inbox Management & Thread Triage)
+
+- **Source**: [`backend/agent/specialists/email_specialist.py`](file:///home/mihir/Codes/VESPER/backend/agent/specialists/email_specialist.py)
+- **Identifier**: `email`
+- **Capabilities Prompt**: *"Manages Gmail messages: checks unread emails, searches message threads, reads email content, reconstructs entire conversation threads, drafts replies, and sends emails."*
+- **Authentication & Resiliency**:
+  - Automatically attempts live authentication using Google OAuth 2.0 (`backend/credentials/gmail_token.json` or `google_calendar_token.json`).
+  - Gracefully validates required Gmail scopes. If absent or offline, seamlessly switches to a verified offline mock sandbox (`_sandbox_inbox`, `_sandbox_threads`, and `_sandbox_outbox`).
+
+### Tools & API Actions
+
+#### `list_unread_emails`
+Retrieves recent unread messages in the inbox.
+- **Parameters**:
+  - `max_results` (`integer`, optional): Maximum unread emails to retrieve (default: `5`).
+- **Live Gmail Integration**: Queries `is:unread` with metadata headers (`From`, `Subject`, `Date`).
+- **Returns**: `data.count`, `data.emails` (array of email objects), `card_payload` (type `email_list_card`).
+
+#### `search_emails`
+Performs keyword, sender, subject, and filter searches across the email inbox.
+- **Parameters**:
+  - `query` (`string`, **required**): Search query or filter expression (*e.g. "from:rohit", "VESPER", "invoice"*).
+  - `max_results` (`integer`, optional): Maximum results to return (default: `5`).
+- **Resilient Prefix Stripping**: In offline sandbox mode, automatically strips Gmail filter prefixes (`from:`, `to:`, `subject:`) to match target senders and content.
+- **Returns**: `data.query`, `data.count`, `data.emails`, `card_payload` (type `email_list_card`).
+
+#### `read_email`
+Retrieves the full headers, recipient details, and decoded text body of a specific email message.
+- **Parameters**:
+  - `email_id` (`string` or `dict`, **required**): Unique identifier of the email message (*e.g. "msg_001"*). Unpacks dictionary references from prior sequential search steps automatically.
+- **Body Decoding**: Automatically handles `text/plain` multipart MIME payloads and base64 URL-safe decoding.
+- **Mark as Read**: Marks message as read by removing the `UNREAD` label via Gmail API.
+- **Returns**: `data.id`, `data.sender`, `data.to`, `data.subject`, `data.date`, `data.body`, `card_payload` (type `email_card`).
+
+#### `read_thread`
+Retrieves and reconstructs the complete chronological conversation thread (all back-and-forth messages and replies).
+- **Parameters**:
+  - `thread_id` (`string`, optional): Unique identifier of the conversation thread (*e.g. "thread_rohit_vesper"*).
+  - `email_id` (`string`, optional): Specific email ID belonging to the thread.
+  - `query` (`string`, optional): Search query or sender name if thread ID is unknown.
+- **Chronological Stitching**: Reconstructs every message in temporal order, identifies all distinct participants, and isolates the latest reply.
+- **Returns**: `data.thread_id`, `data.subject`, `data.count`, `data.participants`, `data.messages`, `data.latest`, `card_payload` (type `email_thread_card`).
+
+#### `draft_email`
+Composes an email draft with recipient, subject, and body text without sending it.
+- **Parameters**:
+  - `to` (`string`, **required**): Recipient email address.
+  - `subject` (`string`, **required**): Subject line.
+  - `body` (`string`, **required**): Body text content.
+- **Returns**: `data.draft` (draft ID, to, subject, body), `card_payload` (type `email_draft_card`).
+
+#### `send_email`
+Dispatches an email message to a specified recipient via live Gmail API or sandbox outbox.
+- **Parameters**:
+  - `to` (`string`, **required**): Recipient email address.
+  - `subject` (`string`, **required**): Subject line.
+  - `body` (`string`, **required**): Body text content.
+- **Returns**: `data.status` (`"sent"`), `data.to`, `data.subject`, `card_payload` (type `email_card`).
+
+---
+
+## 10. `GitHubSpecialist` (Repository Intelligence & Code Navigation)
+
+- **Source**: [`backend/agent/specialists/github_specialist.py`](file:///home/mihir/Codes/VESPER/backend/agent/specialists/github_specialist.py)
+- **Identifier**: `github`
+- **Capabilities Prompt**: *"Interacts with GitHub repositories: fetches repo metadata, searches code and files, reads code snippets, answers doubts, and tracks issues."*
+- **Authentication**: Uses `GITHUB_TOKEN` from environment if configured; falls back to public GitHub REST API v3 with robust error handling for rate limits.
+
+### Tools & API Actions
+
+#### `get_repo_info`
+Fetches high-level repository statistics, descriptions, star counts, fork counts, and primary programming languages.
+- **Parameters**:
+  - `repo` (`string`, **required**): Repository name in `owner/repo` format (*e.g. "MIHIRrPATIL/VESPER"*).
+- **Returns**: `data.name`, `data.full_name`, `data.description`, `data.stars`, `data.forks`, `data.open_issues`, `data.language`, `data.default_branch`, `card_payload` (type `github_repo_card`).
+
+#### `search_code`
+Searches for symbols, class names, functions, or keywords across a repository's codebase.
+- **Parameters**:
+  - `repo` (`string`, **required**): Target repository (`owner/repo`).
+  - `query` (`string`, **required**): Search expression (*e.g. "class BaseSpecialist", "FastAPI"*).
+  - `max_results` (`integer`, optional): Maximum files to return (default: `5`).
+- **Returns**: `data.repo`, `data.query`, `data.count`, `data.results` (list of file paths and matching symbol snippets).
+
+#### `get_code_snippet`
+Retrieves exact source code content from a specific file with optional line range slicing.
+- **Parameters**:
+  - `repo` (`string`, **required**): Target repository (`owner/repo`).
+  - `file_path` (`string`, **required**): Path to the source file (*e.g. "backend/agent/alfred.py"*).
+  - `start_line` (`integer`, optional): 1-indexed start line.
+  - `end_line` (`integer`, optional): 1-indexed end line.
+  - `ref` (`string`, optional): Branch or commit SHA (default: default branch).
+- **Returns**: `data.repo`, `data.file_path`, `data.total_lines`, `data.snippet`, `data.language`, `card_payload` (type `github_snippet_card`).
+
+#### `solve_doubt`
+Synthesizes an architectural explanation or code solution to a programming question by analyzing repository files.
+- **Parameters**:
+  - `repo` (`string`, **required**): Target repository (`owner/repo`).
+  - `query` (`string`, **required**): Developer doubt or bug question (*e.g. "How does Alfred handle fast-path queries?"*).
+  - `file_context` (`string`, optional): Relevant file path to ground the answer (*e.g. "backend/agent/alfred.py"*).
+- **Returns**: `data.repo`, `data.query`, `data.solution`, `data.reference_files`.
+
+#### `list_issues`
+Retrieves open or closed issues and pull requests from a repository.
+- **Parameters**:
+  - `repo` (`string`, **required**): Target repository (`owner/repo`).
+  - `state` (`string`, optional): `open` (default) | `closed` | `all`.
+  - `max_results` (`integer`, optional): Maximum issues to return (default: `5`).
+- **Returns**: `data.repo`, `data.count`, `data.issues` (list of issue titles, authors, labels, and URLs).
+
+#### `get_recent_commits`
+Lists recent commits from the repository's commit history.
+- **Parameters**:
+  - `repo` (`string`, **required**): Target repository (`owner/repo`).
+  - `max_results` (`integer`, optional): Maximum commits to return (default: `5`).
+  - `branch` (`string`, optional): Target branch.
+- **Returns**: `data.repo`, `data.count`, `data.commits` (list of commit SHAs, authors, messages, and dates).
+
+---
+
+## 11. `AsyncTaskTriageWorker` (Autonomous Background Sentry)
 
 - **Source**: [`backend/agent/specialists/task_triage.py`](file:///home/mihir/Codes/VESPER/backend/agent/specialists/task_triage.py)
 - **Role**: Non-blocking background worker that autonomously triages pending tasks.

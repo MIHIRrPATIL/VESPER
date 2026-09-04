@@ -1,0 +1,396 @@
+@startuml VESPER_Complete_System_Architecture
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontName "Inter", "Segoe UI", Arial, sans-serif
+skinparam roundCorner 8
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam componentStyle uml2
+
+skinparam ArrowColor #1E293B
+skinparam ArrowThickness 1.2
+skinparam NoteBackgroundColor #FEF3C7
+skinparam NoteBorderColor #F59E0B
+skinparam NoteFontColor #92400E
+
+skinparam package {
+    BackgroundColor #F8FAFC
+    BorderColor #94A3B8
+    BorderThickness 1.5
+    FontColor #0F172A
+    FontStyle bold
+}
+
+skinparam component {
+    BackgroundColor #FFFFFF
+    BorderColor #64748B
+    BorderThickness 1.2
+    FontColor #1E293B
+}
+
+title "VESPER Complete Distributed System Architecture & Multi-Agent Swarm Specification"
+
+package "Clients & Physical Edge Node Cluster" as ClientsLayer {
+    component "Desktop HUD Client\n(Tauri v2 + Vite + React 19 + Tailwind)" as DesktopClient
+    note bottom of DesktopClient
+        - Borderless transparent overlay HUD
+        - Client-side WebWorker MediaPipe
+        - Audio visualizer VU level meter
+        - Reactive HUD Cards & State Sync
+    end note
+
+    component "Mobile Companion App\n(Android Kotlin / iOS Swift)" as MobileApp
+    note bottom of MobileApp
+        - Android NotificationListenerService
+        - iOS EventKit (Calendar & Reminders)
+        - Background push relay to Gateway
+        - Remote volume & Zen mode dial
+    end note
+
+    component "Edge Hardware Node\n(Orange Pi Zero 3 / 5 / Raspberry Pi)" as EdgeNode
+    note bottom of EdgeNode
+        - SyncClient profile daemon (HTTP :8090..8099)
+        - Offloaded low-power VAD audio capture
+        - Piper ONNX offline TTS audio playback
+        - Heartbeat ping every 15s to cluster
+    end note
+}
+
+package "API Gateway & Real-Time Multiplexing (Port 8000)" as GatewayLayer {
+    component "FastAPI Async Gateway Server\n(Uvicorn + uvloop)" as APIGateway
+    component "Universal Envelope Demultiplexer" as Demuxer
+    note right of Demuxer
+        Universal Envelope:
+        {
+          "uuid": "UUIDv4",
+          "channel": "CONTROL|VOICE|GESTURE|NOTIFY|SYSTEM|SYNC",
+          "type": "ActionIdentifier",
+          "timestamp": 1725494400.123,
+          "payload": { ... }
+        }
+    end note
+
+    component "Multiplexed Channel Router" as ChannelRouter
+    component "TaskRegistry & Barge-In Engine" as BargeInManager
+    note right of BargeInManager
+        - Tracks active request UUIDs
+        - Pre-empts ongoing LLM / TTS on speech
+        - Out-of-band kill signal latency: <30ms
+    end note
+
+    component "NetworkScanner\n(Active Network Sweeper)" as NetScanner
+    note bottom of NetScanner
+        - Subnet sweep (/24 IP ranges)
+        - Probes TCP ports (8090-8099)
+        - mDNS / SSDP broadcast listener
+        - Auto-registers edge nodes
+    end note
+
+    component "SyncManager & State Engine" as ClusterSyncManager
+    note bottom of ClusterSyncManager
+        Universal ClusterState:
+        * active_devices: Dict[str, DeviceRegistration]
+        * master_volume: int (0-100)
+        * zen_mode: bool
+        * focus_mode: bool
+        * active_tasks_count: int
+        * current_media_track: str
+    end note
+
+    component "ClusterWorkloadAllocator\n(Least-Capability Principle)" as Allocator
+    note right of Allocator
+        - Telemetry probe (CPU %, RAM Free, Cameras)
+        - Capability score = (Cores*2) + RAM_GB + GPU
+        - Audio I/O offloaded to least-capable node
+        - Heavy Swarm & Vision retained on workstation
+        - Dynamic failover on heartbeat timeout (>30s)
+    end note
+}
+
+package "Perceptual Sensing & Audio Subsystem" as PerceptualLayer {
+    component "WakeWord Engine & VAD" as WakeEngine
+    note bottom of WakeEngine
+        - Tier 1: WebRTC VAD pre-filter (<0.5% CPU)
+        - Tier 2: openWakeWord 1.5s acoustic rolling buffer
+        - Triggers: 'Hey Alfred', 'Alfred', 'Hey Jarvis'
+        - Self-trigger mute during TTS playback
+    end note
+
+    component "Speech-to-Text Engine\n(GroqCloud Whisper Large v3 Turbo)" as STTEngine
+    note bottom of STTEngine
+        - 16kHz mono 16-bit PCM streaming
+        - Transcribe latency: 150-250ms
+    end note
+
+    component "Text-to-Speech Engine\n(Piper ONNX + GroqCloud Orpheus)" as TTSEngine
+    note bottom of TTSEngine
+        - Primary: Piper Local ONNX (British Butler)
+        - Secondary: GroqCloud Orpheus LPU
+        - Natural pause insertion logic (350ms)
+    end note
+
+    component "Touchless Gesture Engine\n(GestureWorker)" as GestureSensing
+    note bottom of GestureSensing
+        - Throttled 5-8 FPS (80% CPU reduction)
+        - Zero-CPU standby when camera absent
+        - Vocab: CLOSED_FIST, OPEN_PALM, VOLUME_DIAL, PEACE_SIGN
+    end note
+
+    component "Optical & Screen Perception\n(CameraCapture & ScreenCapture)" as CaptureDevices
+    note bottom of CaptureDevices
+        - Optical Webcam: /dev/video0 (640x480..1920x1080)
+        - Screen Capture: Active monitor desktop buffer
+        - DeviceProbe: Graceful degradation if absent
+    end note
+}
+
+package "Cognitive Routing & Multi-Agent Swarm Orchestrator" as BrainLayer {
+    component "3-Tier Hybrid Semantic Router" as SemanticRouter
+    note right of SemanticRouter
+        <b>Tier 1: Deterministic Fast-Path (<0.1ms)</b>
+        * Regex matching (volume, mute, zen, devices)
+        * Bypasses LLM entirely
+
+        <b>Tier 2: Local Semantic Router (~10ms)</b>
+        * all-MiniLM-L6-v2 via FastEmbed (CPU)
+        * Zero token cost, sub-turn intent dispatch
+
+        <b>Tier 3: Stage 1 LLM Planner (<400ms)</b>
+        * Complex queries, multi-intent decomposition
+        * Parallel asyncio.gather() or sequential DAG
+        * Variable interpolation (.result)
+    end note
+
+    component "Alfred Supervisor\n(Butler Persona & Dialogue Engine)" as AlfredBrain
+    note bottom of AlfredBrain
+        - Personality: Dry, witty, concise British butler
+        - Context window: Sliding 10-15 conversation turns
+        - Multi-turn entity resolution (, etc.)
+        - Anti-hallucination factual grounding
+        - Numerical precision safeguard (INR)
+    end note
+
+    component "Output Evaluator & Sanitizer" as Sanitizer
+    note right of Sanitizer
+        - Strips markdown code blocks for audio
+        - Emits HUD card payloads to UI
+        - Validates JSON schemas
+    end note
+}
+
+package "Cognitive Swarm Specialist Agents & Tools" as SwarmLayer {
+    component "TaskSpecialist" as TaskSpecialist
+    note right of TaskSpecialist
+        <b>Domain: Tasks & Calendar</b>
+        * add_task(title: string, priority: string)
+        * set_reminder(reminder: string, time: string, priority: string)
+        * list_reminders(limit: integer)
+        * schedule_event(summary: string, start_time: string, end_time: string)
+        * list_tasks(include_completed: boolean, limit: integer)
+        * list_calendar_events(max_results: integer)
+        * complete_task(task_id: string)
+        * delete_task(task_id: string, title: string)
+        * clear_reminders()
+        * get_daily_agenda()
+    end note
+
+    component "MediaSpecialist" as MediaSpecialist
+    note right of MediaSpecialist
+        <b>Domain: Spotify & YouTube</b>
+        * play_track(query: string, artist: string, device: string)
+        * play_playlist(name: string, device: string)
+        * play_radio(station: string, device: string)
+        * list_devices()
+        * switch_device(device: string)
+        * get_playback_status()
+        * get_recently_played(limit: integer, filter_artist: string)
+        * queue_track(query: string)
+        * get_queue()
+        * control_playback(command: string)
+        * search_youtube_video(query: string, max_results: integer)
+    end note
+
+    component "ResearchSpecialist" as ResearchSpecialist
+    note right of ResearchSpecialist
+        <b>Domain: Web Intelligence</b>
+        * web_search(query: string, search_depth: string, max_results: integer)
+        * quick_lookup(query: string)
+        * search_news(topic: string, max_results: integer)
+    end note
+
+    component "CrawlSpecialist" as CrawlSpecialist
+    note right of CrawlSpecialist
+        <b>Domain: Web Scraping & Synthesis</b>
+        * crawl_url(url: string, max_chars: integer)
+        * scrape_and_summarize(url: string, focus_topic: string)
+        * quick_scrape(url: string)
+    end note
+
+    component "FinanceSpecialist" as FinanceSpecialist
+    note right of FinanceSpecialist
+        <b>Domain: Ledger & Accounts</b>
+        * get_balance(account_name: string)
+        * log_transaction(amount: number, type: string, category: string, description: string, account_name: string)
+        * split_expense(total_amount: number, people: array, description: string)
+        * manage_debt(action: string, person: string, amount: number, description: string)
+        * manage_financial_goal(action: string, name: string, target_amount: number, current_amount: number, deadline: string)
+    end note
+
+    component "SystemSpecialist" as SystemSpecialist
+    note right of SystemSpecialist
+        <b>Domain: Hardware & Network</b>
+        * get_system_vitals()
+        * get_top_processes(sort_by: string, limit: integer)
+        * query_process(name: string)
+        * set_volume(volume_percent: integer)
+        * set_mute(mute: boolean)
+        * list_audio_sinks()
+        * scan_network_devices()
+    end note
+
+    component "MemorySpecialist" as MemorySpecialist
+    note right of MemorySpecialist
+        <b>Domain: 4-Tier Shodh Memory</b>
+        * store_memory(statement: string, category: string)
+        * recall_memory(query: string, category: string)
+        * forget_memory(query: string)
+        * get_user_profile()
+    end note
+
+    component "VisionSpecialist" as VisionSpecialist
+    note right of VisionSpecialist
+        <b>Domain: Webcam & Screen OCR</b>
+        * inspect_webcam(query: string, camera_index: integer)
+        * ocr_webcam(focus_hint: string, camera_index: integer)
+        * inspect_screen(query: string, monitor_index: integer)
+        * ocr_screen(focus_hint: string, monitor_index: integer)
+        * get_device_vision_status()
+    end note
+
+    component "GitHubSpecialist" as GitHubSpecialist
+    note right of GitHubSpecialist
+        <b>Domain: Code & Git Repos</b>
+        * get_repo_info(repo: string)
+        * search_code(query: string, repo: string)
+        * get_code_snippet(path: string, repo: string, start_line: integer, end_line: integer, ref: string)
+        * solve_doubt(query: string, path: string, code: string, repo: string)
+        * list_issues(repo: string, state: string, limit: integer)
+        * get_recent_commits(repo: string, limit: integer)
+    end note
+
+    component "EmailSpecialist" as EmailSpecialist
+    note right of EmailSpecialist
+        <b>Domain: Gmail Inbox & Threads</b>
+        * list_unread_emails(max_results: integer)
+        * search_emails(query: string, max_results: integer)
+        * read_email(email_id: string)
+        * draft_email(to: string, subject: string, body: string)
+        * send_email(to: string, subject: string, body: string)
+        * read_thread(thread_id: string, email_id: string, query: string)
+    end note
+}
+
+package "Autonomous Proactive Background Sentries" as SentriesLayer {
+    component "TaskTriage Sentry" as TaskTriageSentry
+    note bottom of TaskTriageSentry
+        - Auto-categorizes created tasks
+        - Assigns priority, tags, est_minutes
+        - Latency: <150ms background task
+    end note
+
+    component "PresenceAgent (Desk Sentinel)" as PresenceSentry
+    note bottom of PresenceSentry
+        - Low-frequency optical presence (1 frame / 5s)
+        - Auto-pauses media on desk departure
+        - Ambient briefing on desk return
+    end note
+
+    component "NotificationTriage Sentry" as NotificationSentry
+    note bottom of NotificationSentry
+        - Ingests mobile push notifications
+        - Increments silent badge for bulk alerts
+        - Triggers audio interrupt only for VIP / Urgent
+    end note
+}
+
+package "Data Persistence, Vector Memory & Cloud Services" as DataCloudLayer {
+    database "Supabase PostgreSQL Cloud\n(Tasks, Ledger, Accounts, Goals)" as SupabaseDB
+    database "Shodh-Memory Engine\n(SQLite WAL + Vector Cache)" as ShodhDB
+    cloud "GroqCloud LPUs\n(Qwen 2.5 72B / Llama-3.3 70B)" as GroqCloud
+    cloud "OpenRouter API\n(Fallback LLM Router)" as OpenRouterCloud
+    cloud "Google Workspace APIs\n(Gmail v1 & Calendar v3 OAuth)" as GoogleAPI
+    cloud "Spotify Web API\n(Playback & Connect Devices)" as SpotifyAPI
+    cloud "Tavily & SerpAPI\n(Search & Deep Research)" as SearchAPI
+    cloud "GitHub REST API v3\n(Repos, Commits, Issues)" as GitHubAPI
+}
+
+' Client to Gateway connections
+DesktopClient --> APIGateway : WebSocket /ws (Universal Envelope)
+DesktopClient --> APIGateway : HTTP REST (GET /sync/state)
+MobileApp --> APIGateway : WebSocket /ws (Notification Relay)
+MobileApp --> APIGateway : HTTP POST /sync/notify
+EdgeNode --> APIGateway : WebSocket /ws (Offloaded PCM Audio)
+NetScanner ..> EdgeNode : Outbound HTTP Probe (GET /sync/profile)
+
+' Gateway Internal Routing
+APIGateway --> Demuxer : Ingest Envelopes
+Demuxer --> BargeInManager : Check Interrupt Packet (<30ms)
+Demuxer --> ChannelRouter : Demux by Channel
+ChannelRouter --> ChannelRouter : Channels: CONTROL | VOICE | GESTURE | NOTIFY | SYSTEM | SYNC
+
+ChannelRouter --> ClusterSyncManager : Update Universal State (SYNC)
+ClusterSyncManager --> Allocator : Evaluate Headroom & Topology
+Allocator ..> EdgeNode : Assign Roles (audio_capture / playback)
+
+' Gateway to Perceptual & Voice
+ChannelRouter --> WakeEngine : Stream Audio Frames (VOICE)
+WakeEngine --> STTEngine : Trigger Wake Phrase
+STTEngine --> SemanticRouter : Transcribed Utterance
+
+' Routing & Planning to Swarm
+ChannelRouter --> SemanticRouter : Fast-Path Action (GESTURE/SYSTEM)
+SemanticRouter --> AlfredBrain : Route Query & Context
+AlfredBrain --> Sanitizer : Structured Execution Results
+Sanitizer --> TTSEngine : Synthesize Clean Spoken Text
+TTSEngine --> EdgeNode : Stream WAV/PCM (Playback)
+Sanitizer --> DesktopClient : Broadcast HUD Cards & State
+
+' Brain to Specialist Swarm
+SemanticRouter ..> TaskSpecialist : execute()
+SemanticRouter ..> MediaSpecialist : execute()
+SemanticRouter ..> ResearchSpecialist : execute()
+SemanticRouter ..> CrawlSpecialist : execute()
+SemanticRouter ..> FinanceSpecialist : execute()
+SemanticRouter ..> SystemSpecialist : execute()
+SemanticRouter ..> MemorySpecialist : execute()
+SemanticRouter ..> VisionSpecialist : execute()
+SemanticRouter ..> GitHubSpecialist : execute()
+SemanticRouter ..> EmailSpecialist : execute()
+
+' Specialists to Hardware / Peripherals
+VisionSpecialist --> CaptureDevices : Capture Optical Frame / Screen
+SystemSpecialist --> Allocator : Trigger NetScanner Subnet Sweep
+
+' Specialists to Cloud / Data
+TaskSpecialist --> SupabaseDB : CRUD Tasks & Reminders
+TaskSpecialist --> GoogleAPI : Calendar v3 OAuth Events
+MediaSpecialist --> SpotifyAPI : Connect API & Player
+MediaSpecialist --> SearchAPI : SerpAPI YouTube Search
+ResearchSpecialist --> SearchAPI : Tavily / SerpAPI
+CrawlSpecialist --> GroqCloud : Page Content Summaries
+FinanceSpecialist --> SupabaseDB : Double-Entry Ledger
+MemorySpecialist --> ShodhDB : Commit / Retrieve Facts
+VisionSpecialist --> GroqCloud : Vision VLLM Reasoning
+GitHubSpecialist --> GitHubAPI : REST API v3
+EmailSpecialist --> GoogleAPI : Gmail v1 Threads & Drafts
+AlfredBrain --> GroqCloud : Primary LLM Synthesis
+AlfredBrain --> OpenRouterCloud : Fallback LLM
+
+' Background Sentries to Swarm & Gateway
+TaskSpecialist ..> TaskTriageSentry : Trigger Background Triage
+CaptureDevices ..> PresenceSentry : Periodic 5s Sample
+ChannelRouter ..> NotificationSentry : Mobile Push Stream (NOTIFY)
+NotificationSentry --> DesktopClient : Ambient Digest Badge
+PresenceSentry --> ClusterSyncManager : Update Presence State
+
+@enduml

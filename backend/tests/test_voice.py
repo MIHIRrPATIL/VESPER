@@ -167,3 +167,20 @@ async def test_voice_pipeline_session_interruption():
 
     # Interruption flag should be set and stream curtailed
     assert session._interrupted is True
+
+
+@pytest.mark.asyncio
+async def test_tts_manager_piper_priority():
+    """Verifies that Piper TTS is the primary preferred provider and produces stream audio."""
+    manager = TTSManager()
+    active = manager.get_active_providers()
+    assert len(active) > 0
+    # Piper must be the first active provider
+    assert active[0].name.startswith("piper")
+
+    chunks = []
+    async for chunk in manager.stream_speech("Good evening, sir."):
+        chunks.append(chunk)
+    assert len(chunks) > 0
+    total_bytes = sum(len(c) for c in chunks)
+    assert total_bytes > 1000

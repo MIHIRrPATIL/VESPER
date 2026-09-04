@@ -95,11 +95,12 @@ class ResearchSpecialist(BaseSpecialist):
         if not self.tavily_key:
             return None
 
+        depth = "advanced" if "adv" in (search_depth).lower() else "basic"
         url = "https://api.tavily.com/search"
         payload = {
             "api_key": self.tavily_key,
             "query": query,
-            "search_depth": search_depth,
+            "search_depth": depth,
             "include_answer": True,
             "max_results": max_results,
         }
@@ -174,17 +175,25 @@ class ResearchSpecialist(BaseSpecialist):
         results = data.get("results", [])
 
         sources = []
+        snippets = []
         for r in results[:max_results]:
+            title = r.get("title", "Source")
+            url = r.get("url", "")
+            snippet = str(r.get("content", "")).strip()
             sources.append({
-                "title": r.get("title", "Source"),
-                "url": r.get("url", ""),
-                "snippet": r.get("content", "")[:250],
+                "title": title,
+                "url": url,
+                "snippet": snippet[:350],
             })
+            if snippet:
+                snippets.append(f"[{title}]: {snippet[:250]}")
 
         top_url = sources[0]["url"] if sources else ""
 
         if answer:
             speech = f"{answer}"
+        elif snippets:
+            speech = f"Web search findings for '{query}': " + " | ".join(snippets[:2])
         else:
             top_title = sources[0]["title"] if sources else query
             speech = f"I have located relevant information regarding '{query}' from {top_title}, sir."

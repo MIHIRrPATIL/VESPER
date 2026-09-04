@@ -97,7 +97,7 @@ Every message flowing over the WebSocket is wrapped in a strict **Universal Enve
 ┌─────────────────────────────────────────────────────────────┐
 │                 VESPER UNIVERSAL ENVELOPE                   │
 ├───────────────┬─────────────────────────────────────────────┤
-│ uuid          │ UUIDv4 Correlation ID (Pairs Req ➔ Resp)    │
+│ uuid          │ UUIDv4 Correlation ID (Pairs Req -> Resp)    │
 │ channel       │ CONTROL | VOICE | GESTURE | NOTIFY | SYSTEM │
 │ type          │ Specific Action / Event Identifier          │
 │ timestamp     │ Unix Epoch Float (seconds.microseconds)     │
@@ -127,15 +127,15 @@ graph LR
 
 | Channel | Event Type (`type`) | Direction | Payload Description |
 | :--- | :--- | :---: | :--- |
-| `CONTROL` | `CLIENT_HELLO` | C ➔ S | Client identity, capabilities, authentication. |
-| `CONTROL` | `SERVER_HELLO` | S ➔ C | Session establishment, heartbeat parameters. |
+| `CONTROL` | `CLIENT_HELLO` | C -> S | Client identity, capabilities, authentication. |
+| `CONTROL` | `SERVER_HELLO` | S -> C | Session establishment, heartbeat parameters. |
 | `CONTROL` | `PING` / `PONG` | Both | Keep-alive liveness checks. |
-| `VOICE` | `VOICE_COMMAND` | C ➔ S | Final or interim speech transcript from client/openWakeWord. |
+| `VOICE` | `VOICE_COMMAND` | C -> S | Final or interim speech transcript from client/openWakeWord. |
 | `VOICE` | `VOICE_AUDIO_CHUNK` | Both | Binary or base64 PCM/MP3 streaming audio slice. |
-| `VOICE` | `AGENT_RESPONSE` | S ➔ C | Spoken text, synthesized audio status, UI card payload. |
-| `GESTURE` | `GESTURE_EVENT` | C ➔ S | Discrete shortcut (`TOGGLE_ZEN`, `MUTE`, `VOLUME_DIAL:65`). |
-| `NOTIFY` | `NOTIFICATION_RELAY`| C ➔ S | Mobile companion push notification (app, title, body, priority). |
-| `NOTIFY` | `NOTIFICATION_DIGEST`| S ➔ C | Aggregated count and triage card for ambient HUD display. |
+| `VOICE` | `AGENT_RESPONSE` | S -> C | Spoken text, synthesized audio status, UI card payload. |
+| `GESTURE` | `GESTURE_EVENT` | C -> S | Discrete shortcut (`TOGGLE_ZEN`, `MUTE`, `VOLUME_DIAL:65`). |
+| `NOTIFY` | `NOTIFICATION_RELAY`| C -> S | Mobile companion push notification (app, title, body, priority). |
+| `NOTIFY` | `NOTIFICATION_DIGEST`| S -> C | Aggregated count and triage card for ambient HUD display. |
 | `SYSTEM` | `SET_VOLUME` | Both | Master audio volume adjustment (0–100). |
 | `SYSTEM` | `ZEN_MODE_STATE` | Both | Boolean toggle for minimal ambient display. |
 | `SYSTEM` | `FOCUS_MODE_STATE`| Both | Boolean toggle suppressing non-critical alerts. |
@@ -250,7 +250,7 @@ response: AgentResponsePayload = await alfred_orchestrator.process(
 )
 ```
 
-* **👑 Alfred (Supervisor & Router)**:
+* **Alfred (Supervisor & Router)**:
   * Inspects the command.
   * Executes **Fast-Path** system commands (volume, mute, zen mode) in <50ms without invoking an LLM.
   * For domain queries, delegates concurrently to specialized sub-agents (`MediaAgent`, `FinanceAgent`, `TaskAgent`, `ResearchAgent`, `VisionAgent`).

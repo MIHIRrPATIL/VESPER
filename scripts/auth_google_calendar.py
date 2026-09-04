@@ -43,7 +43,7 @@ def main():
     with open(TOKEN_FILE, "w") as token:
         token.write(creds.to_json())
 
-    print(f"\n✓ Authorization successful! Saved token to:\n  {TOKEN_FILE}\n")
+    print(f"\n[OK] Authorization successful! Saved token to:\n  {TOKEN_FILE}\n")
 
     # Test live retrieval
     print("3. Testing live Google Calendar retrieval...")
@@ -60,9 +60,9 @@ def main():
 
     events = events_result.get("items", [])
     if not events:
-        print("✓ Connected to your calendar! No upcoming events found in primary calendar.")
+        print("[OK] Connected to your calendar! No upcoming events found in primary calendar.")
     else:
-        print(f"✓ Connected to your calendar! Found {len(events)} upcoming events:")
+        print(f"[OK] Connected to your calendar! Found {len(events)} upcoming events:")
         for event in events:
             start = event.get("start", {}).get("dateTime", event.get("start", {}).get("date"))
             print(f"   - [{start}] {event.get('summary', 'Untitled Event')}")

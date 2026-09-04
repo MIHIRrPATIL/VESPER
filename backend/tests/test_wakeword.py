@@ -77,3 +77,23 @@ def test_wakeword_listener_feed_pcm_and_detection():
     # Simulate manual trigger on detector
     wake_event = listener.detector.trigger_manual_wake("hey_alfred")
     assert wake_event.detected is True
+
+
+def test_wakeword_listener_utterance_complete_callback():
+    """Verifies that WakeWordListener accepts on_utterance_complete callback."""
+    received_utterances = []
+
+    def on_utterance(pcm: bytes):
+        received_utterances.append(pcm)
+
+    listener = WakeWordListener(
+        on_wake_word=lambda e: None,
+        on_utterance_complete=on_utterance,
+        sample_rate=16000,
+    )
+
+    assert listener.on_utterance_complete is not None
+    test_pcm = b"\x01\x00" * 3200
+    listener.on_utterance_complete(test_pcm)
+    assert len(received_utterances) == 1
+    assert received_utterances[0] == test_pcm

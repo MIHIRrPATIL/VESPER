@@ -87,23 +87,23 @@ Instead of a monolithic sequential graph, VESPER uses a **Hierarchical Swarm Arc
 
 ```mermaid
 graph TB
-    Input["User Query (Voice / Text)"] --> Alfred["👑 Alfred (Supervisor & Persona Orchestrator)"]
+    Input["User Query (Voice / Text)"] --> Alfred["Alfred (Supervisor & Persona Orchestrator)"]
 
-    subgraph FastPath ["⚡ Fast Path (<50ms - No LLM)"]
+    subgraph FastPath ["Fast Path (<50ms - No LLM)"]
         SysExec["Native Execution (Volume / Mute / Zen Mode)"]
     end
 
-    subgraph SpecialistSwarm ["🐝 Specialist Sub-Agent Swarm"]
-        Media["🎵 MediaAgent<br/>Tools: Spotify Web API, Playlists, YouTube"]
-        Finance["💰 FinanceAgent<br/>Tools: Accounts, Transactions, Debts, Summaries"]
-        Tasks["📅 TaskAgent<br/>Tools: Task CRUD, Deadlines, Google Calendar v3"]
-        Research["🔍 ResearchAgent<br/>Tools: Tavily Search, Crawl4AI Scraper"]
-        Vision["👁️ VisionAgent<br/>Tools: YOLOv8 Detect, PaddleOCR, VLM"]
+    subgraph SpecialistSwarm ["Specialist Sub-Agent Swarm"]
+        Media["MediaAgent<br/>Tools: Spotify Web API, Playlists, YouTube"]
+        Finance["FinanceAgent<br/>Tools: Accounts, Transactions, Debts, Summaries"]
+        Tasks["TaskAgent<br/>Tools: Task CRUD, Deadlines, Google Calendar v3"]
+        Research["ResearchAgent<br/>Tools: Tavily Search, Crawl4AI Scraper"]
+        Vision["VisionAgent<br/>Tools: YOLOv8 Detect, PaddleOCR, VLM"]
     end
 
-    subgraph ProactiveSwarm ["⏰ Proactive Background Swarm"]
-        Triage["🛡️ TriageAgent<br/>Event: Phone Notification Ingestion & Filter"]
-        Presence["👤 PresenceAgent<br/>Event: Camera Desk Arrival / Departure"]
+    subgraph ProactiveSwarm ["Proactive Background Swarm"]
+        Triage["TriageAgent<br/>Event: Phone Notification Ingestion & Filter"]
+        Presence["PresenceAgent<br/>Event: Camera Desk Arrival / Departure"]
     end
 
     Alfred -->|Match Regex / Direct Command| SysExec
@@ -123,7 +123,7 @@ graph TB
 
 ## 5. Swarm Agent Specifications
 
-### 1. 👑 Alfred (Supervisor & Personality Orchestrator)
+### 1. Alfred (Supervisor & Personality Orchestrator)
 * **Input**: User command text + multimodal metadata (presence, current time, active focus mode).
 * **Execution Logic**:
   1. **Fast-Path Check**: Direct pattern match for deterministic commands (`volume up/down`, `pause/play`, `zen mode`). Bypasses all LLMs.
@@ -134,28 +134,28 @@ graph TB
   * British butler persona: dry, witty, efficient, understated.
   * **Context Gating**: Warm and dryly humorous for casual banter; strictly terse, flat, and concise for financial numbers, emergency alerts, or during **Focus Mode**.
 
-### 2. 🎵 `MediaAgent` (The Resident DJ)
+### 2. `MediaAgent` (The Resident DJ)
 * **Domain**: Spotify Web API & local media playback.
 * **Tools**: `play_track(query)`, `pause()`, `next()`, `queue(track)`, `transfer_playback(device)`, `get_recommendation(mood)`.
 * **Latency Goal**: <300ms.
 * **Specialized Knowledge**: Spotify playlist IDs, music genres, mood mapping.
 
-### 3. 💰 `FinanceAgent` (Private Ledger Master)
+### 3. `FinanceAgent` (Private Ledger Master)
 * **Domain**: Personal double-entry bookkeeping, expense logging, peer debt settlement.
 * **Tools**: `log_expense(amount, category, account, note)`, `log_income()`, `transfer_funds()`, `get_balances()`, `record_debt(person, amount, direction)`, `settle_debt()`, `spending_summary(period)`.
 * **Rules**: Zero conversational filler. Enforces mathematical precision, Indian Rupee (₹) denomination, and account integrity across Union Bank, SBI, Saraswat, and Cash.
 
-### 4. 📅 `TaskAgent` (Chief of Staff)
+### 4. `TaskAgent` (Chief of Staff)
 * **Domain**: Todo items, deadlines, schedule coordination.
 * **Tools**: `add_task(title, deadline)`, `list_pending_tasks()`, `complete_task(id)`, `delete_task(id)`, `get_upcoming_calendar_events(hours)`.
 * **Sync**: Automatically syncs bidirectional updates to SQLite for mobile companion reconciliation.
 
-### 5. 🔍 `ResearchAgent` (Deep Diver - Slow Path)
+### 5. `ResearchAgent` (Deep Diver - Slow Path)
 * **Domain**: External knowledge, live news, web research.
 * **Tools**: `tavily_search(query)`, `crawl_page(url)`.
 * **Behavior**: Runs as an asynchronous background worker. Extracts clean markdown, filters advertising junk, and distills complex findings into 2–3 spoken sentences.
 
-### 6. 👁️ `VisionAgent` (Desk Scanner)
+### 6. `VisionAgent` (Desk Scanner)
 * **Domain**: Physical desk environment and document OCR.
 * **Tools**: `detect_objects(image)`, `read_document_text(image)`, `inspect_scene_vlm(image, prompt)`.
 * **Behavior**: Executed on-demand when the user gestures or asks *"Read this document"* or *"What's on my desk?"*.
@@ -166,14 +166,14 @@ graph TB
 
 A stationary desk companion must act autonomously when appropriate:
 
-### 🛡️ `TriageAgent` (The Focus Sentry)
+### `TriageAgent` (The Focus Sentry)
 * Constantly monitors incoming notification streams relayed from the companion mobile app.
 * **Triage Rules**:
   * *Low / Bulk (Promotions, social media, non-urgent group chats)*: Increments the silent HUD badge counter. No audio interruption.
   * *Heads-Down / Focus Mode*: Suppresses all alerts except pre-configured VIP contacts (e.g. Manager, Family).
   * *Critical Alert*: Surfaces an immediate glowing HUD card and prompts Alfred to notify: *"Pardon the intrusion, sir, but an urgent message has arrived from your team."*
 
-### 👤 `PresenceAgent` (Desk Sentinel)
+### `PresenceAgent` (Desk Sentinel)
 * Inspects camera frames at low frequency (1 frame every 3–5 seconds) to detect human presence at the desk.
 * **Actions**:
   * *User Departs*: HUD transitions to low-power ambient clock or display sleep; active media can auto-pause.
@@ -207,9 +207,9 @@ User Command:
    )
    ```
 4. **Structured Results**:
-   * `MediaAgent` ➔ `{"status": "playing", "track": "Lofi Hip Hop Beats"}`
-   * `TaskAgent` ➔ `{"status": "created", "task_id": 42}`
-   * `FinanceAgent` ➔ `{"status": "success", "total_inr": 48500}`
+   * `MediaAgent` -> `{"status": "playing", "track": "Lofi Hip Hop Beats"}`
+   * `TaskAgent` -> `{"status": "created", "task_id": 42}`
+   * `FinanceAgent` -> `{"status": "success", "total_inr": 48500}`
 5. **Alfred Synthesis**:
    > *"Lofi is playing, 'Deploy backend' is on your list, and your combined balance stands at ₹48,500."*
 6. **Total Latency**: **~650ms** (compared to 6–10s in ReflectOS v1 sequential chaining).
