@@ -1,10 +1,7 @@
-# VESPER Desktop Shell (Tauri v2 + Vite / React 19)
+# Tauri + React + Typescript
 
-This folder contains the **Tauri v2** native desktop application for the desk companion HUD.
+This template should help get you started developing with Tauri, React and Typescript in Vite.
 
-* **Tech Stack**: Rust Core (Tauri v2) + Vite + React 19 + Framer Motion + Tailwind CSS.
-* **Responsibilities**:
-  * Native borderless HUD window with glassmorphism styling.
-  * System tray icon with quick toggle controls (Zen Mode, Mute, Status).
-  * Supervision of the backend microservice processes.
-  * Web Worker hosting MediaPipe `GestureRecognizer` for client-side gesture shortcuts.
+## Recommended IDE Setup
+
+- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)

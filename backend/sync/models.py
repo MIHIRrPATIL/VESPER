@@ -43,6 +43,7 @@ class SynchronizedState(BaseModel):
     master_volume: int = 60
     zen_mode: bool = False
     focus_mode: bool = False
+    wakeword_active: bool = True
     optical_sensor_active: bool = False
     active_tasks_count: int = 0
     current_media: Dict[str, Any] = Field(

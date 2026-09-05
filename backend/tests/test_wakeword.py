@@ -97,3 +97,32 @@ def test_wakeword_listener_utterance_complete_callback():
     listener.on_utterance_complete(test_pcm)
     assert len(received_utterances) == 1
     assert received_utterances[0] == test_pcm
+
+
+def test_wakeword_single_dispatch_guarantee():
+    """Verifies that a wake word trigger invokes the callback exactly once, avoiding duplicate logs or events."""
+    dispatch_count = 0
+
+    def on_wake(evt: WakeWordEvent):
+        nonlocal dispatch_count
+        dispatch_count += 1
+
+    listener = WakeWordListener(on_wake_word=on_wake, sample_rate=16000)
+
+    # Mock detector triggering a detected event
+    class MockDetector:
+        def __init__(self, on_wake_word=None):
+            self.on_wake_word = on_wake_word
+        def process_frame(self, data):
+            return WakeWordEvent(detected=True, wake_word="hey_alfred", confidence=0.95)
+        def reset(self):
+            pass
+
+    listener.detector = MockDetector(on_wake_word=listener._handle_detector_wake)
+
+    # Feeding 1 frame with detection
+    event = listener.feed_pcm(b"\x00" * 640)
+    assert event is not None
+    assert event.detected is True
+    assert dispatch_count == 1  # Must be called EXACTLY once, not twice
+

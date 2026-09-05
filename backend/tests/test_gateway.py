@@ -117,7 +117,15 @@ def test_voice_command_roundtrip(client: TestClient):
             "payload": {"command": "What time is it?", "is_final": True},
         }))
 
-        # 3. Receive Agent Response
+        # 3. Receive Agent Activating Broadcast
+        raw_act = ws.receive_text()
+        act = json.loads(raw_act)
+        assert act["uuid"] == cmd_uuid
+        assert act["channel"] == Channel.AGENT.value
+        assert act["type"] == EventType.AGENT_ACTIVATING.value
+        assert act["payload"]["state"] == "THINKING"
+
+        # 4. Receive Agent Response
         raw_resp = ws.receive_text()
         resp = json.loads(raw_resp)
 
@@ -125,6 +133,36 @@ def test_voice_command_roundtrip(client: TestClient):
         assert resp["channel"] == Channel.VOICE.value
         assert resp["type"] == EventType.AGENT_RESPONSE.value
         assert len(resp["payload"]["response"]) > 0
+
+
+def test_wake_word_detected_broadcast(client: TestClient):
+    """Tests that sending WAKE_WORD_DETECTED broadcasts LISTENING state to the cluster."""
+    with client.websocket_connect("/ws") as ws:
+        # 1. Handshake
+        ws.send_text(json.dumps({
+            "uuid": "hw1",
+            "channel": Channel.CONTROL.value,
+            "type": EventType.CLIENT_HELLO.value,
+            "payload": {"client_id": "mic-node-01", "client_type": ClientType.EDGE_NODE.value},
+        }))
+        ws.receive_text()
+
+        # 2. Emit WAKE_WORD_DETECTED
+        ws.send_text(json.dumps({
+            "uuid": "ww-123",
+            "channel": Channel.VOICE.value,
+            "type": EventType.WAKE_WORD_DETECTED.value,
+            "payload": {"wake_word": "hey alfred", "confidence": 0.95},
+        }))
+
+        # 3. Receive Broadcast
+        raw_resp = ws.receive_text()
+        resp = json.loads(raw_resp)
+
+        assert resp["channel"] == Channel.VOICE.value
+        assert resp["type"] == EventType.WAKE_WORD_DETECTED.value
+        assert resp["payload"]["state"] == "LISTENING"
+        assert resp["payload"]["wake_word"] == "hey alfred"
 
 
 def test_gesture_event_broadcast(client: TestClient):
@@ -181,6 +219,11 @@ def test_gesture_broadcast_closed_fist_and_open_palm(client: TestClient):
         assert resp_fist["payload"]["volume"] == 0
         assert resp_fist["payload"]["muted"] is True
 
+        resp_fist_ww = json.loads(ws.receive_text())
+        assert resp_fist_ww["channel"] == Channel.VOICE.value
+        assert resp_fist_ww["type"] == EventType.WAKE_WORD_STATE.value
+        assert resp_fist_ww["payload"]["wakeword_active"] is False
+
         # Send OPEN_PALM (Resume/Play)
         ws.send_text(json.dumps({
             "uuid": "g-palm",
@@ -193,6 +236,11 @@ def test_gesture_broadcast_closed_fist_and_open_palm(client: TestClient):
         assert resp_palm["type"] == EventType.SET_VOLUME.value
         assert resp_palm["payload"]["volume"] > 0
         assert resp_palm["payload"]["muted"] is False
+
+        resp_palm_ww = json.loads(ws.receive_text())
+        assert resp_palm_ww["channel"] == Channel.VOICE.value
+        assert resp_palm_ww["type"] == EventType.WAKE_WORD_STATE.value
+        assert resp_palm_ww["payload"]["wakeword_active"] is True
 
         # Send VOLUME_DIAL:75
         ws.send_text(json.dumps({

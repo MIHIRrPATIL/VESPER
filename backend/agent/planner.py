@@ -10,6 +10,7 @@ Stage 2: Dispatches tasks to registered specialists in the swarm.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import re
@@ -21,6 +22,7 @@ from backend.agent.llm import LLMClient
 from backend.agent.registry import SpecialistRegistry
 from backend.agent.semantic_router import SemanticIntent, SemanticIntentRouter
 from backend.agent.specialists.base import SpecialistResult
+from backend.agent.title_normalizer import build_action, classify_action_type, extract_time_phrase, normalize_title
 
 logger = logging.getLogger("vesper.agent.planner")
 
@@ -47,6 +49,10 @@ class ExecutionResult(BaseModel):
 
 PLANNER_SYSTEM_PROMPT = """You are the Stage 1 Execution Planner for VESPER (supervised by Alfred).
 Analyze the user's intent and produce an optimal execution plan matching the schema.
+
+CURRENT TEMPORAL CONTEXT:
+- System Date & Time: {current_datetime}
+- Day of Week: {current_day}
 
 {capabilities}
 
@@ -83,9 +89,17 @@ PLANNING RULES:
      * NEVER route sending an email, notes, or research report as 'tasks:add_task'!
      * If the user refers to recent research (e.g. "that report"), populate body with the research content.
 
+7. Temporal Grounding & Relative Dates:
+   - Base reference date and time is {current_datetime} ({current_day}).
+   - Relative terms ('today', 'yesterday', 'tomorrow', 'tonight', 'next week', 'this morning') must be resolved relative to this reference point.
+   - For daily agenda or today's tasks ('what are my tasks today', 'today's agenda', 'what do I have scheduled today'): route to 'tasks:get_daily_agenda' with params: {{"date": "today", "query": "<user query>"}}.
+
 FEW-SHOT EXAMPLES:
+- Reminder: {{"plan_type": "parallel", "steps": [{{"agent": "tasks", "action": "set_reminder", "params": {{"reminder": "Pick up my mom", "time": "5:45 PM today"}}}}]}}
+- Task: {{"plan_type": "parallel", "steps": [{{"agent": "tasks", "action": "add_task", "params": {{"title": "Deploy backend"}}}}]}}
+- Event: {{"plan_type": "parallel", "steps": [{{"agent": "tasks", "action": "schedule_event", "params": {{"summary": "Meeting with Rohit", "start_time": "tomorrow at 3pm"}}}}]}}
 - Handheld: {{"plan_type": "sequential", "steps": [{{"agent": "vision", "action": "ocr_webcam", "params": {{"focus_hint": "title/label"}}}}, {{"agent": "research", "action": "web_search", "params": {{"query": "$step_1.extracted_text"}}}}]}}
-- Multi-intent: {{"plan_type": "parallel", "steps": [{{"agent": "media", "action": "play_music", "params": {{"query": "lofi"}}}}, {{"agent": "tasks", "action": "add_task", "params": {{"title": "review PR"}}}}]}}
+- Multi-intent: {{"plan_type": "parallel", "steps": [{{"agent": "media", "action": "play_music", "params": {{"query": "lofi"}}}}, {{"agent": "tasks", "action": "add_task", "params": {{"title": "Review PR"}}}}]}}
 - Screen error: {{"plan_type": "parallel", "steps": [{{"agent": "vision", "action": "inspect_screen", "params": {{"query": "error"}}}}]}}
 - Read thread: {{"plan_type": "parallel", "steps": [{{"agent": "email", "action": "read_thread", "params": {{}}}}]}}
 
@@ -455,10 +469,25 @@ class SwarmPlanner:
 
         if intent == SemanticIntent.DAILY_AGENDA:
             logger.info(f"[Planner.PreFilter] Semantic match: DAILY_AGENDA (conf={conf:.2f}) -> tasks:get_daily_agenda")
+            target_date = "today"
+            if "next week" in q_lower:
+                target_date = "next week"
+            elif "this week" in q_lower:
+                target_date = "this week"
+            elif "tomorrow" in q_lower:
+                target_date = "tomorrow"
+            elif "yesterday" in q_lower:
+                target_date = "yesterday"
+            else:
+                for day_name in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+                    if day_name in q_lower:
+                        target_date = f"next {day_name}" if "next" in q_lower else day_name
+                        break
+
             return SwarmPlan(
                 plan_type="parallel",
                 provider_used="prefilter",
-                steps=[{"agent": "tasks", "action": "get_daily_agenda", "params": {}}],
+                steps=[{"agent": "tasks", "action": "get_daily_agenda", "params": {"date": target_date, "query": query}}],
             )
 
         if intent == SemanticIntent.FINANCE_BALANCE:
@@ -471,10 +500,13 @@ class SwarmPlanner:
 
         if intent == SemanticIntent.SYSTEM_STATUS:
             logger.info(f"[Planner.PreFilter] Semantic match: SYSTEM_STATUS (conf={conf:.2f}) -> system:get_system_vitals")
+            steps = [{"agent": "system", "action": "get_system_vitals", "params": {}}]
+            if any(w in q_lower for w in ["cluster", "network", "node", "nodes", "subnet", "sweep"]):
+                steps.append({"agent": "system", "action": "scan_network_devices", "params": {}})
             return SwarmPlan(
                 plan_type="parallel",
                 provider_used="prefilter",
-                steps=[{"agent": "system", "action": "get_system_vitals", "params": {}}],
+                steps=steps,
             )
 
         return None
@@ -496,7 +528,7 @@ class SwarmPlanner:
             "github": ["repo", "repository", "git", "github", "commit", "branch", "pr", "pull request", "issue", "clone", "code"],
             "finance": ["balance", "bank", "money", "rupees", "inr", "expense", "spent", "split", "debt", "owe", "transaction"],
             "memory": ["remember", "forget", "recall", "memorize", "preference", "profile", "what do you know about me"],
-            "system": ["volume", "battery", "cpu", "ram", "specs", "brightness", "bluetooth", "wifi", "host"],
+            "system": ["volume", "battery", "cpu", "ram", "specs", "brightness", "bluetooth", "wifi", "host", "system", "cluster", "vitals", "hardware", "report"],
             "crawl": ["crawl", "scrape", "documentation", "scrape page", "docs for"],
         }
 
@@ -543,7 +575,14 @@ class SwarmPlanner:
 
         candidate_specialists = self._select_candidate_specialists(query, session_context)
         capabilities = registry.get_capabilities_prompt(compact=True, specialist_names=candidate_specialists)
-        system_prompt = PLANNER_SYSTEM_PROMPT.format(capabilities=capabilities)
+        now_dt = datetime.datetime.now().astimezone()
+        current_datetime = now_dt.strftime("%A, %B %d, %Y, %I:%M %p %Z")
+        current_day = now_dt.strftime("%A")
+        system_prompt = PLANNER_SYSTEM_PROMPT.format(
+            capabilities=capabilities,
+            current_datetime=current_datetime,
+            current_day=current_day,
+        )
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -623,17 +662,84 @@ class SwarmPlanner:
             logger.warning(f"[Planner] Plan parsing fallback: {e}. Defaulting to direct.")
             plan = SwarmPlan(plan_type="direct", direct_response="How may I be of service, sir?", provider_used="fallback")
 
+        # ── Post-LLM Task / Reminder / Event Title Normalizer & Safety Net ──
+        for step in plan.steps:
+            if step.get("agent") == "tasks":
+                act_name = str(step.get("action", "")).lower().strip()
+                if act_name in (
+                    "add_task", "set_reminder", "schedule_event",
+                    "create_task", "add_reminder", "create_event", "schedule_meeting", "new_task", "add", "reminder"
+                ):
+                    params = step.get("params", {})
+                    extracted_frag = (
+                        params.get("reminder")
+                        or params.get("title")
+                        or params.get("summary")
+                        or params.get("task")
+                        or params.get("text")
+                        or query
+                    )
+                    action_info = build_action(query, str(extracted_frag))
+                    time_anchor = params.get("time") or params.get("start_time") or action_info.time_phrase or "today"
+
+                    if action_info.action_type == "reminder":
+                        step["action"] = "set_reminder"
+                        step["params"] = {
+                            "reminder": action_info.title,
+                            "time": time_anchor,
+                            "priority": params.get("priority", "normal"),
+                        }
+                    elif action_info.action_type == "event":
+                        step["action"] = "schedule_event"
+                        step["params"] = {
+                            "summary": action_info.title,
+                            "start_time": time_anchor,
+                            "end_time": params.get("end_time"),
+                            "location": params.get("location", ""),
+                            "description": params.get("description", ""),
+                        }
+                    else:  # task
+                        step["action"] = "add_task"
+                        step["params"] = {
+                            "title": action_info.title,
+                            "priority": params.get("priority", "normal"),
+                        }
+
+        # ── Post-LLM Personal Correspondence vs Web Search Disambiguation ──
+        q_lower = query.lower()
+        is_personal_inbox_query = any(kw in q_lower for kw in [
+            "heard from", "heard back from", "hear back from", "email from", "emails from",
+            "received from", "got an email from", "any message from", "messages from",
+            "any mail from", "did i hear from", "did they email", "reply from", "replied to",
+            "check my email", "check my inbox", "look in my email", "look in my inbox",
+        ])
+
+        if is_personal_inbox_query and not any(s.get("agent") == "email" for s in plan.steps):
+            # Extract sender or topic target
+            target_match = re.search(
+                r"\b(?:from|about|regarding)\s+([a-zA-Z0-9_\s]+?)(?:\s+(?:regarding|about|status)|$)",
+                query,
+                re.IGNORECASE,
+            )
+            target_term = target_match.group(1).strip() if target_match else query
+            logger.info(f"[Planner] Routing personal correspondence query '{query}' to email:search_emails for '{target_term}'")
+            plan = SwarmPlan(
+                plan_type="parallel",
+                provider_used=getattr(self.llm, "last_provider_used", "llm"),
+                steps=[{"agent": "email", "action": "search_emails", "params": {"query": target_term}}],
+            )
+            return plan, elapsed_ms
+
         # ── Post-LLM Factual & Search Guardrails ─────────────────────────────
         # If the LLM returned a direct conversational response for an explicit search or
         # realtime query, enforce an external research step to prevent hallucination.
-        q_lower = query.lower()
         is_explicit_search = any(kw in q_lower for kw in [
             "search for", "search the web", "search web", "google", "look up", "lookup", "find information", "find out about"
         ])
         is_realtime_data = any(kw in q_lower for kw in [
             "weather in", "weather today", "forecast", "latest news", "news about", "who won the", "score of"
         ])
-        is_media_trivia = any(kw in q_lower for kw in [
+        is_media_trivia = not is_personal_inbox_query and any(kw in q_lower for kw in [
             "what movie is", "which movie is", "what film is", "which film is", "who directed", "who starred in",
             "who acted in", "who wrote the song", "who sang the song", "who is the director of", "who wrote",
             "release date of", "when was", "when did", "box office of"

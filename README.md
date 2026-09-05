@@ -56,8 +56,8 @@ Designed from first principles for low latency, zero operating cost, touchless m
                                ┌────────────────────────────────────────────────┐
                                │           VESPER API Gateway (:8000)           │
                                │  • Multiplexed Channels (CONTROL, VOICE, SYNC) │
-                               │  • TaskRegistry (<30ms Out-of-band Interruption)
-                               │  • Central SyncManager (State & Topology)
+                               │  • TaskRegistry(<30ms Out-of-band Interruption)|
+                               │  • Central SyncManager (State & Topology)      | 
                                └───────────────────────┬────────────────────────┘
                                                        │
                  ┌─────────────────────────────────────┼─────────────────────────────────────┐

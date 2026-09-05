@@ -121,13 +121,19 @@ class WakeWordListener:
             ) as stream:
                 logger.info(f"[WakeWordListener] Raw audio stream opened successfully on device {self.device_index}.")
                 while not self._stop_event.is_set():
-                    if self.is_paused:
-                        time.sleep(0.05)
+                    try:
+                        # Read audio chunk from RawInputStream (returns data, overflowed)
+                        data, overflowed = stream.read(chunk_samples)
+                    except Exception as read_err:
+                        logger.warning(f"[WakeWordListener] Audio stream read glitch: {read_err}")
+                        time.sleep(0.02)
                         continue
 
-                    # Read audio chunk
-                    data, overflowed = stream.read(chunk_samples)
                     if not data or len(data) == 0:
+                        continue
+
+                    # If paused (e.g. while Alfred is thinking or speaking), discard chunk so buffer stays fresh
+                    if self.is_paused:
                         continue
 
                     # Process through detector

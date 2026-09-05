@@ -95,6 +95,11 @@ INTENT_PROTOTYPES: Dict[SemanticIntent, List[str]] = {
         "check my calendar and tasks for today",
         "what are my priorities for today",
         "what do I have planned today",
+        "what are my tasks for today",
+        "what are my tasks today",
+        "what tasks do I have today",
+        "show my tasks for today",
+        "check my tasks today",
     ],
     SemanticIntent.FINANCE_BALANCE: [
         "what is my bank balance",
@@ -113,6 +118,11 @@ INTENT_PROTOTYPES: Dict[SemanticIntent, List[str]] = {
         "check system vitals",
         "how is my computer running",
         "show system telemetry",
+        "give me a brief system and cluster status report",
+        "system and cluster status report",
+        "system and cluster status",
+        "cluster status report",
+        "how is the cluster running",
     ],
 }
 

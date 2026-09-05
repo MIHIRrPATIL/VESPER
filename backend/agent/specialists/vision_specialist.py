@@ -354,7 +354,24 @@ class VisionSpecialist(BaseSpecialist):
     async def _inspect_screen(self, params: Dict[str, Any]) -> SpecialistResult:
         """Captures desktop monitor frame and conducts multimodal visual reasoning."""
         query = params.get("query") or "Describe the contents and windows currently visible on this desktop screen."
-        mon_idx = params.get("monitor_index", 1)
+        mon_idx = params.get("monitor_index")
+        mon_name = params.get("monitor_name")
+
+        # Natural language display routing if query specifies a screen
+        if query and not mon_name and mon_idx is None:
+            q_low = query.lower()
+            if any(k in q_low for k in ["both screens", "all screens", "entire desktop", "every monitor", "all monitors"]):
+                mon_idx = 0
+            elif any(k in q_low for k in ["external screen", "external monitor"]):
+                mon_name = "external"
+            elif any(k in q_low for k in ["second screen", "second monitor", "monitor 2"]):
+                mon_idx = 2
+            elif any(k in q_low for k in ["laptop screen", "laptop display", "built-in"]):
+                mon_name = "laptop"
+            elif "dp-3" in q_low:
+                mon_name = "DP-3"
+            elif "edp-1" in q_low:
+                mon_name = "eDP-1"
 
         caps = DeviceProbe.get_capabilities()
         if caps.is_headless or not caps.has_display:
@@ -365,7 +382,7 @@ class VisionSpecialist(BaseSpecialist):
                 data={"is_headless": True},
             )
 
-        frame = ScreenCapture.capture_screen(monitor_index=mon_idx)
+        frame = ScreenCapture.capture_screen(monitor_index=mon_idx, monitor_name=mon_name)
         if not frame.success:
             return SpecialistResult(
                 success=False,
@@ -392,7 +409,7 @@ class VisionSpecialist(BaseSpecialist):
                 action="inspect_screen",
                 speech_summary=analysis.description,
                 error=analysis.error,
-                data={"source": "screen"},
+                data={"source": "screen", "monitor_name": frame.monitor_name},
             )
 
         desc = analysis.description or ""
@@ -415,13 +432,17 @@ class VisionSpecialist(BaseSpecialist):
                 "source": "screen",
                 "width": frame.width,
                 "height": frame.height,
+                "monitor_name": frame.monitor_name,
+                "monitor_index": frame.monitor_index,
+                "available_monitors": ScreenCapture.list_monitors(),
                 "model_used": analysis.model_used,
             },
             card_payload={
                 "type": "VISION_ANALYSIS",
-                "title": "Desktop Screen Inspection",
+                "title": f"Desktop Screen Inspection ({frame.monitor_name or 'Display'})",
                 "description": analysis.description,
                 "source": "screen",
+                "monitor_name": frame.monitor_name,
                 "confidence": confidence,
             },
         )
@@ -429,7 +450,23 @@ class VisionSpecialist(BaseSpecialist):
     async def _ocr_screen(self, params: Dict[str, Any]) -> SpecialistResult:
         """Captures desktop screen and performs OCR."""
         focus_hint = params.get("focus_hint", "")
-        mon_idx = params.get("monitor_index", 1)
+        mon_idx = params.get("monitor_index")
+        mon_name = params.get("monitor_name")
+
+        if focus_hint and not mon_name and mon_idx is None:
+            f_low = focus_hint.lower()
+            if any(k in f_low for k in ["both screens", "all screens", "all monitors", "entire desktop"]):
+                mon_idx = 0
+            elif any(k in f_low for k in ["external screen", "external monitor"]):
+                mon_name = "external"
+            elif any(k in f_low for k in ["second screen", "second monitor", "monitor 2"]):
+                mon_idx = 2
+            elif any(k in f_low for k in ["laptop screen", "laptop display", "built-in"]):
+                mon_name = "laptop"
+            elif "dp-3" in f_low:
+                mon_name = "DP-3"
+            elif "edp-1" in f_low:
+                mon_name = "eDP-1"
 
         caps = DeviceProbe.get_capabilities()
         if caps.is_headless or not caps.has_display:
@@ -440,7 +477,7 @@ class VisionSpecialist(BaseSpecialist):
                 data={"is_headless": True},
             )
 
-        frame = ScreenCapture.capture_screen(monitor_index=mon_idx)
+        frame = ScreenCapture.capture_screen(monitor_index=mon_idx, monitor_name=mon_name)
         if not frame.success:
             return SpecialistResult(
                 success=False,
@@ -460,12 +497,12 @@ class VisionSpecialist(BaseSpecialist):
             return SpecialistResult(
                 success=False,
                 action="ocr_screen",
-                speech_summary=ocr_result.description,
+                speech_summary=ocr_result.error or "OCR transcription failed, sir.",
                 error=ocr_result.error,
-                data={"source": "screen"},
+                data={"source": "screen", "monitor_name": frame.monitor_name},
             )
 
-        text = ocr_result.extracted_text or ocr_result.description
+        text = ocr_result.extracted_text or ocr_result.description or ""
         speech = "I have transcribed the text visible on your display, sir." if len(text) > 40 else text
 
         stripped = text.strip()
@@ -485,14 +522,17 @@ class VisionSpecialist(BaseSpecialist):
                 "raw_ocr": text,
                 "confidence": confidence,
                 "source": "screen",
+                "monitor_name": frame.monitor_name,
+                "monitor_index": frame.monitor_index,
                 "width": frame.width,
                 "height": frame.height,
             },
             card_payload={
                 "type": "OCR_TRANSCRIPTION",
-                "title": "Desktop Screen OCR",
+                "title": f"Desktop Screen OCR ({frame.monitor_name or 'Display'})",
                 "text": text,
                 "source": "screen",
+                "monitor_name": frame.monitor_name,
             },
         )
 

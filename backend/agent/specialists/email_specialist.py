@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import datetime
+import html
 import logging
 import os
 import re
@@ -217,6 +218,61 @@ class EmailSpecialist(BaseSpecialist):
         self._sandbox_threads = {k: list(v) for k, v in DEFAULT_MOCK_THREADS.items()}
         self._sandbox_outbox: List[Dict[str, Any]] = []
         self._last_search_results: List[Dict[str, Any]] = []
+
+    @staticmethod
+    def _clean_html_to_text(text: str) -> str:
+        """Converts HTML or rich email text into clean, human-readable plain text without tags, scripts, styles, or zero-width unicode artifacts."""
+        if not text:
+            return ""
+        # Remove style, script, head, title blocks completely
+        text = re.sub(r"<(script|style|head|title)[^>]*>[\s\S]*?</\1>", " ", text, flags=re.IGNORECASE)
+        # Remove HTML tags
+        text = re.sub(r"<[^>]+>", " ", text)
+        # Unescape HTML entities (e.g. &#39; -> ', &amp; -> &, &zwnj; -> "")
+        text = html.unescape(text)
+        # Remove zero-width characters and invisible unicode artifacts (\u200b-\u200f, \ufeff, \u034f, \u00ad, etc.)
+        text = re.sub(r"[\u200b-\u200f\ufeff\u034f\u00ad]", "", text)
+        # Collapse multiple whitespace / newlines
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    @classmethod
+    def _extract_body_from_payload(cls, payload: Dict[str, Any]) -> str:
+        """Recursively extracts and sanitizes body text from Gmail payload parts."""
+        def _find_parts(p: Dict[str, Any], mime: str) -> Optional[str]:
+            if p.get("mimeType") == mime:
+                data = p.get("body", {}).get("data", "")
+                if data:
+                    try:
+                        return base64.urlsafe_b64decode(data.encode()).decode("utf-8", errors="ignore")
+                    except Exception:
+                        pass
+            for subpart in p.get("parts", []):
+                found = _find_parts(subpart, mime)
+                if found:
+                    return found
+            return None
+
+        # 1. Look for text/plain
+        plain = _find_parts(payload, "text/plain")
+        if plain:
+            return cls._clean_html_to_text(plain) if ("<" in plain and ">" in plain) else html.unescape(plain).strip()
+
+        # 2. Look for text/html
+        html_raw = _find_parts(payload, "text/html")
+        if html_raw:
+            return cls._clean_html_to_text(html_raw)
+
+        # 3. Fallback to direct body data
+        data = payload.get("body", {}).get("data")
+        if data:
+            try:
+                raw = base64.urlsafe_b64decode(data.encode()).decode("utf-8", errors="ignore")
+                return cls._clean_html_to_text(raw) if ("<" in raw and ">" in raw) else html.unescape(raw).strip()
+            except Exception:
+                pass
+
+        return ""
 
     @property
     def name(self) -> str:
@@ -638,17 +694,8 @@ class EmailSpecialist(BaseSpecialist):
                 payload = detail.get("payload", {})
                 headers = {h["name"]: h["value"] for h in payload.get("headers", [])}
                 
-                body_text = ""
-                parts = payload.get("parts", [])
-                if parts:
-                    for part in parts:
-                        if part.get("mimeType") == "text/plain":
-                            data = part.get("body", {}).get("data", "")
-                            if data:
-                                body_text = base64.urlsafe_b64decode(data.encode()).decode("utf-8", errors="ignore")
-                                break
-                if not body_text and payload.get("body", {}).get("data"):
-                    body_text = base64.urlsafe_b64decode(payload["body"]["data"].encode()).decode("utf-8", errors="ignore")
+                body_text = self._extract_body_from_payload(payload)
+                raw_snippet = self._clean_html_to_text(detail.get("snippet", ""))
 
                 email_obj = {
                     "id": email_id,
@@ -656,7 +703,7 @@ class EmailSpecialist(BaseSpecialist):
                     "to": headers.get("To", "me"),
                     "subject": headers.get("Subject", "(No Subject)"),
                     "date": headers.get("Date", ""),
-                    "body": body_text or detail.get("snippet", ""),
+                    "body": body_text or raw_snippet,
                 }
                 # Mark as read
                 try:
@@ -666,7 +713,9 @@ class EmailSpecialist(BaseSpecialist):
                 except Exception:
                     pass
 
-                speech = f"Email from {email_obj['sender'].split('<')[0].strip()} regarding '{email_obj['subject']}': {email_obj['body'][:160]}..."
+                clean_body = self._clean_html_to_text(email_obj["body"])
+                excerpt = (clean_body[:160] + "...") if len(clean_body) > 160 else clean_body
+                speech = f"Email from {email_obj['sender'].split('<')[0].strip()} regarding '{email_obj['subject']}': {excerpt}"
                 return SpecialistResult(
                     success=True,
                     action="read_email",
@@ -718,7 +767,10 @@ class EmailSpecialist(BaseSpecialist):
         target["source"] = "sandbox"
         if not target.get("thread_id"):
             target["thread_id"] = "thread_general"
-        speech = f"Email from {target.get('sender_name', target['sender'])} regarding '{target['subject']}': {target['snippet']}"
+        clean_snippet = self._clean_html_to_text(target.get("snippet", ""))
+        clean_body = self._clean_html_to_text(target.get("body", ""))
+        excerpt = clean_snippet or ((clean_body[:160] + "...") if len(clean_body) > 160 else clean_body)
+        speech = f"Email from {target.get('sender_name', target['sender'])} regarding '{target['subject']}': {excerpt}"
         return SpecialistResult(
             success=True,
             action="read_email",
@@ -759,17 +811,8 @@ class EmailSpecialist(BaseSpecialist):
                 for m in messages_data:
                     payload = m.get("payload", {})
                     headers = {h["name"]: h["value"] for h in payload.get("headers", [])}
-                    body_text = ""
-                    parts = payload.get("parts", [])
-                    if parts:
-                        for part in parts:
-                            if part.get("mimeType") == "text/plain":
-                                data = part.get("body", {}).get("data", "")
-                                if data:
-                                    body_text = base64.urlsafe_b64decode(data.encode()).decode("utf-8", errors="ignore")
-                                    break
-                    if not body_text and payload.get("body", {}).get("data"):
-                        body_text = base64.urlsafe_b64decode(payload["body"]["data"].encode()).decode("utf-8", errors="ignore")
+                    body_text = self._extract_body_from_payload(payload)
+                    raw_snippet = self._clean_html_to_text(m.get("snippet", ""))
                     msgs.append({
                         "id": m["id"],
                         "thread_id": tid,
@@ -777,8 +820,8 @@ class EmailSpecialist(BaseSpecialist):
                         "sender_name": headers.get("From", "Unknown").split("<")[0].strip(),
                         "subject": headers.get("Subject", "(No Subject)"),
                         "date": headers.get("Date", ""),
-                        "body": body_text or m.get("snippet", ""),
-                        "snippet": m.get("snippet", ""),
+                        "body": body_text or raw_snippet,
+                        "snippet": raw_snippet or (body_text[:140] if body_text else ""),
                     })
 
                 if msgs:

@@ -34,9 +34,10 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Deque, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, Optional, Set, Tuple
 from pydantic import BaseModel
 
 from backend.vision.device_probe import DeviceProbe
@@ -54,26 +55,84 @@ logger = logging.getLogger("vesper.vision.gesture")
 # ─── Real System Volume Control ─────────────────────────────────────────────
 
 def _set_system_volume(percent: int) -> None:
-    """Sets the real system audio volume via wpctl (PipeWire) or pactl (PulseAudio)."""
+    """Sets the real system audio volume across Linux (wpctl/pactl/amixer), macOS (osascript), and Windows."""
     percent = max(0, min(100, percent))
     frac = percent / 100.0
     try:
+        if sys.platform == "darwin":
+            subprocess.run(
+                ["osascript", "-e", f"set volume output volume {percent}"],
+                timeout=2, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return
+
+        if sys.platform == "win32":
+            # Attempt pycaw if installed, otherwise fallback to nircmd
+            try:
+                from ctypes import cast, POINTER
+                from comtypes import CLSCTX_ALL
+                from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+                devices = AudioUtilities.GetSpeakers()
+                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                volume = cast(interface, POINTER(IAudioEndpointVolume))
+                volume.SetMasterVolumeLevelScalar(frac, None)
+                return
+            except Exception:
+                nircmd = shutil.which("nircmd.exe") or shutil.which("nircmd")
+                if nircmd:
+                    subprocess.run(
+                        [nircmd, "setsysvolume", str(int(65535 * frac))],
+                        timeout=2, check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                return
+
+        # Linux (PipeWire -> PulseAudio -> ALSA)
         wpctl = shutil.which("wpctl")
         if wpctl:
-            subprocess.run(
+            r = subprocess.run(
                 [wpctl, "set-volume", "@DEFAULT_AUDIO_SINK@", f"{frac:.2f}"],
                 timeout=2, check=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            return
+            if r.returncode == 0:
+                if percent > 0:
+                    subprocess.run(
+                        [wpctl, "set-mute", "@DEFAULT_AUDIO_SINK@", "0"],
+                        timeout=2, check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    subprocess.run(
+                        [wpctl, "set-mute", "@DEFAULT_AUDIO_SINK@", "1"],
+                        timeout=2, check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                return
+
         pactl = shutil.which("pactl")
         if pactl:
-            subprocess.run(
-                [pactl, "set-sink-volume", "@DEFAULT_SINK", f"{percent}%"],
+            r = subprocess.run(
+                [pactl, "set-sink-volume", "@DEFAULT_SINK@", f"{percent}%"],
                 timeout=2, check=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            return
+            if r.returncode == 0:
+                if percent > 0:
+                    subprocess.run(
+                        [pactl, "set-sink-mute", "@DEFAULT_SINK@", "0"],
+                        timeout=2, check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    subprocess.run(
+                        [pactl, "set-sink-mute", "@DEFAULT_SINK@", "1"],
+                        timeout=2, check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                return
+
         amixer = shutil.which("amixer")
         if amixer:
             subprocess.run(
@@ -82,12 +141,32 @@ def _set_system_volume(percent: int) -> None:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
     except Exception as e:
-        logger.debug(f"[VolumeCtrl] Failed to set system volume: {e}")
+        logger.warning(f"[VolumeCtrl] Failed to set system volume: {e}")
 
 
 def _get_system_volume() -> int:
-    """Reads the current real system volume (0-100)."""
+    """Reads the current real system volume (0-100) across Linux, macOS, and Windows."""
     try:
+        if sys.platform == "darwin":
+            r = subprocess.run(
+                ["osascript", "-e", "output volume of (get volume settings)"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if r.stdout.strip().isdigit():
+                return int(r.stdout.strip())
+
+        if sys.platform == "win32":
+            try:
+                from ctypes import cast, POINTER
+                from comtypes import CLSCTX_ALL
+                from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+                devices = AudioUtilities.GetSpeakers()
+                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                volume = cast(interface, POINTER(IAudioEndpointVolume))
+                return int(volume.GetMasterVolumeLevelScalar() * 100)
+            except Exception:
+                pass
+
         wpctl = shutil.which("wpctl")
         if wpctl:
             r = subprocess.run(
@@ -100,46 +179,114 @@ def _get_system_volume() -> int:
                     return int(float(part) * 100)
                 except ValueError:
                     continue
-    except Exception:
-        pass
+
+        pactl = shutil.which("pactl")
+        if pactl:
+            r = subprocess.run(
+                [pactl, "get-sink-volume", "@DEFAULT_SINK@"],
+                capture_output=True, text=True, timeout=2,
+            )
+            import re
+            m = re.search(r"(\d+)%", r.stdout)
+            if m:
+                return int(m.group(1))
+    except Exception as e:
+        logger.debug(f"[VolumeCtrl] Failed to get volume: {e}")
     return 60
 
 
 def _set_system_mute(muted: bool) -> None:
-    """Mutes or unmutes the system audio sink."""
+    """Mutes or unmutes the system audio sink across Linux, macOS, and Windows."""
     try:
-        wpctl = shutil.which("wpctl")
-        if wpctl:
+        if sys.platform == "darwin":
             subprocess.run(
-                [wpctl, "set-mute", "@DEFAULT_AUDIO_SINK@", "1" if muted else "0"],
+                ["osascript", "-e", f"set volume output muted {'true' if muted else 'false'}"],
                 timeout=2, check=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             return
+
+        if sys.platform == "win32":
+            try:
+                from ctypes import cast, POINTER
+                from comtypes import CLSCTX_ALL
+                from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+                devices = AudioUtilities.GetSpeakers()
+                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                volume = cast(interface, POINTER(IAudioEndpointVolume))
+                volume.SetMute(1 if muted else 0, None)
+                return
+            except Exception:
+                nircmd = shutil.which("nircmd.exe") or shutil.which("nircmd")
+                if nircmd:
+                    subprocess.run(
+                        [nircmd, "mutesysvolume", "1" if muted else "0"],
+                        timeout=2, check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                return
+
+        wpctl = shutil.which("wpctl")
+        if wpctl:
+            r = subprocess.run(
+                [wpctl, "set-mute", "@DEFAULT_AUDIO_SINK@", "1" if muted else "0"],
+                timeout=2, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if r.returncode == 0:
+                return
+
         pactl = shutil.which("pactl")
         if pactl:
             subprocess.run(
-                [pactl, "set-sink-mute", "@DEFAULT_SINK", "1" if muted else "0"],
+                [pactl, "set-sink-mute", "@DEFAULT_SINK@", "1" if muted else "0"],
                 timeout=2, check=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
     except Exception as e:
-        logger.debug(f"[VolumeCtrl] Failed to set mute: {e}")
+        logger.warning(f"[VolumeCtrl] Failed to set mute: {e}")
 
 
 def _control_media_player(action: str) -> None:
-    """Controls running media players (Spotify, browsers, MPRIS) via playerctl."""
-    playerctl = shutil.which("playerctl")
-    if not playerctl:
-        return
+    """Controls running media players (Spotify, Apple Music, browsers) across Linux, macOS, and Windows."""
     try:
-        subprocess.run(
-            [playerctl, action],
-            timeout=2, check=False,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        if sys.platform == "darwin":
+            # macOS AppleScript for Spotify or Music.app
+            osascript_action = "playpause" if action in ("play", "pause") else ("next track" if action == "next" else "previous track")
+            subprocess.run(
+                ["osascript", "-e", f'tell application "Spotify" to {osascript_action}'],
+                timeout=2, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return
+
+        playerctl = shutil.which("playerctl")
+        if playerctl:
+            subprocess.run(
+                [playerctl, action],
+                timeout=2, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
     except Exception as e:
-        logger.debug(f"[MediaCtrl] playerctl {action} failed: {e}")
+        logger.debug(f"[MediaCtrl] Media player {action} failed: {e}")
+
+
+DEFAULT_GESTURE_COOLDOWNS: Dict[str, float] = {
+    "VOLUME_DIAL": 0.12,
+    "THUMB_UP": 0.35,
+    "THUMB_DOWN": 0.35,
+    "VOLUME_UP": 0.35,
+    "VOLUME_DOWN": 0.35,
+    "CLOSED_FIST": 1.5,
+    "OPEN_PALM": 1.5,
+    "PEACE_SIGN": 2.0,
+    "POINTING_UP": 2.0,
+    "NEXT_TRACK": 1.6,
+    "PREV_TRACK": 1.6,
+    "AIR_TAP": 1.2,
+    "GESTURE_TOGGLE": 2.5,
+    "ROCK_ON": 2.5,
+}
 
 
 class GestureState(BaseModel):
@@ -182,10 +329,16 @@ class GestureWorker:
         self._saved_volume = _get_system_volume()
         self._last_volume_dial_value = -1  # Throttle repeated VOLUME_DIAL dispatches
 
-        # Deliberate lock tracking (Rock On 🤟 / ILoveYou hold 1.0s)
+        # Deliberate lock tracking (Rock On / ILoveYou hold 1.0s)
         self._toggle_gesture_start: float = 0.0
         self._toggle_gesture_fired: bool = False
         self._toggle_lockout_until: float = 0.0
+        # Per-gesture debouncing & hysteresis release tracking
+        self._last_gesture_emitted_times: Dict[str, float] = {}
+        self._gesture_awaiting_release: Set[str] = set()
+        self._candidate_gesture: str = "NONE"
+        self._candidate_streak: int = 0
+        self._none_streak: int = 0
         # Backward compatibility aliases
         self._open_palm_start: float = 0.0
         self._open_palm_toggle_fired: bool = False
@@ -309,29 +462,77 @@ class GestureWorker:
 
                     current_camera_idx = desired_camera_idx
                     if not cap.isOpened():
-                        logger.warning(f"[GestureWorker] Failed to open camera index {desired_camera_idx}.")
-                        cap = None
-                        await asyncio.sleep(2.0)
-                        continue
+                        # Check if CameraHub or another service is publishing frames to shared memory
+                        try:
+                            from backend.vision.camera_stream import get_shared_frame_path
+                            target_p = get_shared_frame_path()
+                            if target_p.exists() and (time.time() - target_p.stat().st_mtime) < 2.5:
+                                raw_bytes = target_p.read_bytes()
+                                if len(raw_bytes) > 1000:
+                                    import numpy as np
+                                    nparr = np.frombuffer(raw_bytes, np.uint8)
+                                    frame_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                    if frame_bgr is not None:
+                                        cap = None
+                        except Exception:
+                            pass
+                        if cap is None and frame_bgr is None:
+                            logger.warning(f"[GestureWorker] Failed to open camera index {desired_camera_idx}.")
+                            cap = None
+                            await asyncio.sleep(2.0)
+                            continue
                     try:
-                        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                        if cap is not None:
+                            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                     except Exception:
                         pass
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-                # 2. Acquire raw frame directly from open device
+                # 2. Acquire raw frame directly from open device or shared memory
                 try:
-                    def _read_frame(c):
-                        return c.read()
+                    if cap is not None and cap.isOpened():
+                        def _read_frame(c):
+                            return c.read()
 
-                    ret, frame_bgr = await asyncio.to_thread(_read_frame, cap)
-                    if not ret or frame_bgr is None:
-                        await asyncio.sleep(self.interval)
-                        continue
+                        ret, frame_bgr = await asyncio.to_thread(_read_frame, cap)
+                        if not ret or frame_bgr is None:
+                            await asyncio.sleep(self.interval)
+                            continue
+
+                        # Broadcast latest frame to shared memory for VLM OCR / Snapshots without device lock contention
+                        now_t = time.time()
+                        if (now_t - getattr(self, "_last_shared_frame_save", 0.0)) >= 0.12:
+                            self._last_shared_frame_save = now_t
+                            try:
+                                from backend.vision.camera_stream import get_shared_frame_path
+                                target_p = get_shared_frame_path()
+                                tmp_p = target_p.with_suffix(".tmp")
+                                success, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                                if success:
+                                    tmp_p.write_bytes(buf.tobytes())
+                                    tmp_p.replace(target_p)
+                            except Exception:
+                                pass
+                    elif frame_bgr is None:
+                        # Poll shared frame if device is owned by another service (e.g. CameraHub)
+                        from backend.vision.camera_stream import get_shared_frame_path
+                        target_p = get_shared_frame_path()
+                        if target_p.exists() and (time.time() - target_p.stat().st_mtime) < 2.5:
+                            try:
+                                raw_bytes = target_p.read_bytes()
+                                if len(raw_bytes) > 1000:
+                                    import numpy as np
+                                    nparr = np.frombuffer(raw_bytes, np.uint8)
+                                    frame_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                            except Exception:
+                                frame_bgr = None
+                        if frame_bgr is None:
+                            await asyncio.sleep(self.interval)
+                            continue
 
                     # If tracking is paused, still read frames (keep camera warm)
-                    # but only look for the deliberate lock toggle (Rock On 🤟 hold 1.0s) to re-enable
+                    # but only look for the deliberate lock toggle (Rock On / ILoveYou hold 1.0s) to re-enable
                     if self.state.tracking_paused:
                         toggle_gesture, toggle_conf = self._check_toggle_gesture_only(frame_bgr)
                         if toggle_gesture.startswith("GESTURE_TOGGLE"):
@@ -340,39 +541,106 @@ class GestureWorker:
                             self._toggle_gesture_fired = False
                             self._open_palm_start = 0.0
                             self._open_palm_toggle_fired = False
-                            logger.info("[GestureWorker] Tracking RESUMED via Rock On 🤟 hold")
+                            self._toggle_lockout_until = time.time() + 2.5
+                            self._gesture_awaiting_release.add("ROCK_ON")
+                            self._gesture_awaiting_release.add("GESTURE_TOGGLE")
+                            self._last_gesture_emitted_times["ROCK_ON"] = time.time()
+                            self._last_gesture_emitted_times["GESTURE_TOGGLE"] = time.time()
+                            logger.info("[GestureWorker] Tracking RESUMED via Rock On hold")
                             await self._dispatch_gesture("GESTURE_TOGGLE:RESUMED", toggle_conf)
                         await asyncio.sleep(self.interval)
                         continue
 
                     # 3. Detect gesture from numpy array
                     detected_gesture, confidence = self._evaluate_gesture_heuristic(frame_bgr)
-
                     now = time.time()
-                    if detected_gesture != "NONE" and confidence >= 0.50:
-                        # Volume dial gets faster cooldown for smooth feel
-                        is_volume_dial = detected_gesture.startswith("VOLUME_DIAL:")
-                        effective_cooldown = volume_dial_cooldown if is_volume_dial else cooldown_sec
 
-                        if detected_gesture != last_emitted_gesture or (now - last_emit_time) > effective_cooldown:
-                            # For volume dial, also throttle if value hasn't changed
-                            if is_volume_dial:
-                                try:
-                                    dial_val = int(detected_gesture.split(":")[1])
-                                except (ValueError, IndexError):
-                                    dial_val = -1
-                                if dial_val == self._last_volume_dial_value:
-                                    await asyncio.sleep(self.interval)
-                                    continue
-                                self._last_volume_dial_value = dial_val
+                    # Handle neutral/no pose or low confidence: reset streak and release hysteresis
+                    if detected_gesture == "NONE" or confidence < 0.50:
+                        self._none_streak += 1
+                        self._candidate_gesture = "NONE"
+                        self._candidate_streak = 0
+                        if self._none_streak >= 1:
+                            self._gesture_awaiting_release.clear()
+                        await asyncio.sleep(self.interval)
+                        continue
 
-                            last_emitted_gesture = detected_gesture
-                            last_emit_time = now
-                            self.state.last_gesture = detected_gesture
-                            self.state.confidence = confidence
+                    # Valid gesture detected
+                    self._none_streak = 0
+                    if detected_gesture == self._candidate_gesture:
+                        self._candidate_streak += 1
+                    else:
+                        self._candidate_gesture = detected_gesture
+                        self._candidate_streak = 1
 
-                            logger.info(f"[GestureWorker] Detected gesture: {detected_gesture} (conf: {confidence:.2f})")
-                            await self._dispatch_gesture(detected_gesture, confidence)
+                    # Plain ROCK_ON is an in-progress hold for lock toggle; do not emit until
+                    # it finishes 1.0s hold and becomes GESTURE_TOGGLE:PAUSED
+                    if detected_gesture == "ROCK_ON":
+                        await asyncio.sleep(self.interval)
+                        continue
+
+                    is_volume_dial = detected_gesture.startswith("VOLUME_DIAL:")
+                    is_thumb_volume = detected_gesture in ("THUMB_UP", "THUMB_DOWN", "VOLUME_UP", "VOLUME_DOWN")
+                    is_volume = is_volume_dial or is_thumb_volume
+
+                    # Streak confirmation requirement:
+                    # Swipe and volume dial have multi-frame accumulation already built-in.
+                    # Discrete static poses require 2 consecutive frames to prevent single-frame glitches.
+                    if is_volume_dial or detected_gesture in ("NEXT_TRACK", "PREV_TRACK") or detected_gesture.startswith("GESTURE_TOGGLE"):
+                        required_streak = 1
+                    else:
+                        required_streak = 2
+
+                    if self._candidate_streak < required_streak:
+                        await asyncio.sleep(self.interval)
+                        continue
+
+                    # Hysteresis / Release Requirement:
+                    # Non-volume gestures cannot be triggered repeatedly without releasing the hand back to NONE.
+                    # Volume gestures (VOLUME_DIAL, THUMB_UP, THUMB_DOWN) bypass release check to allow smooth continuous adjustment.
+                    base_gesture = detected_gesture.split(":")[0]
+                    if not is_volume:
+                        if base_gesture in self._gesture_awaiting_release or detected_gesture in self._gesture_awaiting_release:
+                            await asyncio.sleep(self.interval)
+                            continue
+
+                    # Per-gesture cooldown check
+                    target_cooldown = DEFAULT_GESTURE_COOLDOWNS.get(base_gesture, 1.5)
+                    last_time = self._last_gesture_emitted_times.get(base_gesture, 0.0)
+                    if (now - last_time) < target_cooldown:
+                        await asyncio.sleep(self.interval)
+                        continue
+
+                    # For volume dial, also throttle if value hasn't changed
+                    if is_volume_dial:
+                        try:
+                            dial_val = int(detected_gesture.split(":")[1])
+                        except (ValueError, IndexError):
+                            dial_val = -1
+                        if dial_val == self._last_volume_dial_value:
+                            await asyncio.sleep(self.interval)
+                            continue
+                        self._last_volume_dial_value = dial_val
+
+                    # Mark emitted and set release lock for non-volume gestures
+                    self._last_gesture_emitted_times[base_gesture] = now
+                    self._last_gesture_emitted_times[detected_gesture] = now
+                    last_emitted_gesture = detected_gesture
+                    last_emit_time = now
+
+                    if not is_volume:
+                        self._gesture_awaiting_release.clear()
+                        self._gesture_awaiting_release.add(base_gesture)
+                        self._gesture_awaiting_release.add(detected_gesture)
+
+                    if detected_gesture.startswith("GESTURE_TOGGLE"):
+                        self._toggle_lockout_until = now + 2.5
+
+                    self.state.last_gesture = detected_gesture
+                    self.state.confidence = confidence
+
+                    logger.info(f"[GestureWorker] Detected gesture: {detected_gesture} (conf: {confidence:.2f})")
+                    await self._dispatch_gesture(detected_gesture, confidence)
 
                 except asyncio.CancelledError:
                     break
@@ -412,7 +680,7 @@ class GestureWorker:
         return None
 
     def _check_toggle_gesture_only(self, frame: Any) -> Tuple[str, float]:
-        """When tracking is paused, only check for deliberate lock gesture (Rock On 🤟) to resume."""
+        """When tracking is paused, only check for deliberate lock gesture (Rock On / ILoveYou) to resume."""
         now = time.time()
         if now < self._toggle_lockout_until:
             return "NONE", 0.0
@@ -432,13 +700,14 @@ class GestureWorker:
                 top = result.gestures[0][0]
                 category = top.category_name
                 score = float(top.score)
-                # Rock On (ILoveYou 🤟) held for 1.0s toggles gesture lock state
+                # Rock On (ILoveYou) held for 1.0s toggles gesture lock state
                 if category == "ILoveYou" and score >= 0.50:
                     if self._toggle_gesture_start == 0.0:
                         self._toggle_gesture_start = now
                     elif (now - self._toggle_gesture_start) >= 1.0 and not self._toggle_gesture_fired:
                         self._toggle_gesture_fired = True
-                        self._toggle_lockout_until = now + 2.0
+                        self._toggle_lockout_until = now + 2.5
+                        self._toggle_gesture_start = 0.0
                         return "GESTURE_TOGGLE:RESUMED", score
                 else:
                     self._toggle_gesture_start = 0.0
@@ -454,7 +723,7 @@ class GestureWorker:
         """Evaluates hand gestures using MediaPipe GestureRecognizer and trajectory heuristics.
 
         Priority order:
-        1. Deliberate lock hold: Rock On (ILoveYou 🤟) held for 1.0s -> GESTURE_TOGGLE:PAUSED
+        1. Deliberate lock hold: Rock On (ILoveYou) held for 1.0s -> GESTURE_TOGGLE:PAUSED
         2. Pinch + Rotate -> VOLUME_DIAL:XX (ReflectOS-style, inverted to match natural turn)
         3. Horizontal swipe -> NEXT_TRACK / PREV_TRACK (mirrored, suppresses static play/pause while moving)
         4. Air Tap (quick pinch) -> AIR_TAP
@@ -503,7 +772,7 @@ class GestureWorker:
                         if dx_recent >= 0.035 or speed_recent >= 0.22:
                             is_hand_moving = True
 
-            # ── 1. Check for Deliberate Lock Gesture (Rock On 🤟 hold 1.0s) ─────
+            # ── 1. Check for Deliberate Lock Gesture (Rock On hold 1.0s) ─────
             if result.gestures and len(result.gestures) > 0:
                 top_gesture = result.gestures[0][0]
                 category = top_gesture.category_name
@@ -515,7 +784,8 @@ class GestureWorker:
                             self._toggle_gesture_start = now
                         elif (now - self._toggle_gesture_start) >= 1.0 and not self._toggle_gesture_fired:
                             self._toggle_gesture_fired = True
-                            self._toggle_lockout_until = now + 2.0
+                            self._toggle_lockout_until = now + 2.5
+                            self._toggle_gesture_start = 0.0
                             self._wrist_history.clear()
                             self._pinch_streak = 0
                             return "GESTURE_TOGGLE:PAUSED", score
@@ -710,16 +980,18 @@ class GestureWorker:
                     source_device_id="gesture_worker",
                 )
 
-            elif gesture.startswith("GESTURE_TOGGLE"):
+            elif gesture in ("ROCK_ON", "GESTURE_LOCK") or gesture.startswith("GESTURE_TOGGLE"):
                 # Explicit state assignment prevents toggle flapping
                 if ":PAUSED" in gesture:
                     self.state.tracking_paused = True
                 elif ":RESUMED" in gesture:
                     self.state.tracking_paused = False
-                else:
+                elif gesture.startswith("GESTURE_TOGGLE"):
                     self.state.tracking_paused = not self.state.tracking_paused
+                else:
+                    return
                 status = "PAUSED" if self.state.tracking_paused else "RESUMED"
-                logger.info(f"[GestureWorker] Gesture tracking {status}")
+                logger.info(f"[GestureWorker] Gesture tracking {status} via ROCK_ON")
 
         except Exception as sync_err:
             logger.debug(f"[GestureWorker] Direct sync update skipped: {sync_err}")

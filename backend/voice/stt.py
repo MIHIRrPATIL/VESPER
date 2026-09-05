@@ -90,6 +90,18 @@ class GroqSpeechToText:
 
             transcription = await self.client.audio.transcriptions.create(**kwargs)
             text = transcription.text.strip()
+
+            # Filter out known Whisper silence / background noise hallucinations
+            hallucination_phrases = {
+                "thank you.", "thank you", "thank you!", "thank you very much.",
+                "thanks for watching!", "thanks for watching.", "please subscribe.",
+                "you", "bye.", "bye", "thank you so much.", "thank you so much",
+                "[music]", "[applause]", "subtitles by", "translated by",
+            }
+            if text.lower() in hallucination_phrases:
+                logger.info(f"[STT] Filtered Whisper silence hallucination: \"{text}\"")
+                return ""
+
             logger.info(f"[STT] Transcribed: \"{text}\" ({len(wav_bytes)} bytes audio)")
             return text
 

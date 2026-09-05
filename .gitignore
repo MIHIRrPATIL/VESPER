@@ -102,6 +102,7 @@ env.bak/
 venv.bak/
 backend/venv/
 backend/.venv/
+.claude/
 
 # Spyder project settings
 .spyderproject
@@ -138,6 +139,10 @@ cython_debug/
 # Antigravity IDE
 .agents/
 .planning/
+.claude/
+agent/
+skills-lock.json
+
 
 # Secrets, Credentials, Tokens & Cache
 .env
@@ -155,3 +160,8 @@ output/
 *.wav
 *.mp3
 *.m4a
+
+# Large local TTS model files (>100MB)
+*high.onnx
+*high.onnx.json
+

@@ -15,6 +15,11 @@ from typing import Any, Dict, List, Optional
 import psutil
 
 from backend.agent.specialists.base import BaseSpecialist, SpecialistResult
+from backend.vision.gesture_service import (
+    _get_system_volume,
+    _set_system_mute,
+    _set_system_volume,
+)
 
 logger = logging.getLogger("vesper.agent.specialists.system")
 
@@ -274,7 +279,7 @@ class SystemSpecialist(BaseSpecialist):
     async def set_volume(self, volume_percent: int) -> SpecialistResult:
         """Sets master output volume (0-100)."""
         pct = max(0, min(100, volume_percent))
-        await asyncio.to_thread(self._run_pactl, ["set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"])
+        await asyncio.to_thread(_set_system_volume, pct)
 
         return SpecialistResult(
             success=True,
@@ -286,8 +291,7 @@ class SystemSpecialist(BaseSpecialist):
 
     async def set_mute(self, mute: bool) -> SpecialistResult:
         """Mutes or unmutes system audio output."""
-        arg = "1" if mute else "0"
-        await asyncio.to_thread(self._run_pactl, ["set-sink-mute", "@DEFAULT_SINK@", arg])
+        await asyncio.to_thread(_set_system_mute, mute)
         state = "muted" if mute else "unmuted"
 
         return SpecialistResult(
@@ -384,14 +388,15 @@ class SystemSpecialist(BaseSpecialist):
 
         elif act in ["volume_up", "volume_down"]:
             delta = int(params.get("delta") or (10 if act == "volume_up" else -10))
-            sign = "+" if delta > 0 else ""
-            await asyncio.to_thread(self._run_pactl, ["set-sink-volume", "@DEFAULT_SINK@", f"{sign}{delta}%"])
+            cur = _get_system_volume()
+            new_vol = max(0, min(100, cur + delta))
+            await asyncio.to_thread(_set_system_volume, new_vol)
             return SpecialistResult(
                 success=True,
                 action=act,
-                data={"delta": delta},
-                speech_summary=f"Adjusted volume by {delta}%, sir.",
-                card_payload={"type": "volume_card", "delta": delta},
+                data={"volume": new_vol, "delta": delta},
+                speech_summary=f"Adjusted volume by {delta}%, now at {new_vol}%, sir.",
+                card_payload={"type": "volume_card", "volume": new_vol, "delta": delta},
             )
 
         elif act in ["set_mute", "mute", "unmute"]:

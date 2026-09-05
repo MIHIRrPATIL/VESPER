@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Optional
 
 import httpx
@@ -23,6 +24,11 @@ from backend.shared.events import (
     ServerEnvelope,
 )
 from backend.sync import DeviceRegistration, sync_manager
+from backend.vision.gesture_service import (
+    _control_media_player,
+    _set_system_mute,
+    _set_system_volume,
+)
 
 logger = logging.getLogger("vesper.gateway.router")
 
@@ -155,9 +161,10 @@ class MessageRouter:
             await self.manager.send_envelope(session.session_id, ack)
 
         elif event_type == EventType.SET_VOLUME:
-            # Broadcast volume change to all connected clients
+            # Broadcast volume change to all connected clients and apply host OS volume
             vol = payload.get("volume", 50)
             logger.info(f"[ROUTER] Setting master volume to {vol}%")
+            _set_system_volume(vol)
             await sync_manager.update_state({"master_volume": vol}, source_device_id=session.client_id)
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
@@ -180,13 +187,65 @@ class MessageRouter:
             )
             await self.manager.broadcast(broadcast_envelope)
 
+        elif event_type in [EventType.WAKE_WORD_TOGGLE, EventType.WAKE_WORD_STATE]:
+            cur_state = sync_manager.get_snapshot().wakeword_active
+            if "active" in payload:
+                new_state = bool(payload["active"])
+            elif "enabled" in payload:
+                new_state = bool(payload["enabled"])
+            elif "wakeword_active" in payload:
+                new_state = bool(payload["wakeword_active"])
+            else:
+                new_state = not cur_state
+
+            await sync_manager.update_state({"wakeword_active": new_state}, source_device_id=session.client_id)
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.VOICE,
+                type=EventType.WAKE_WORD_STATE,
+                payload={"wakeword_active": new_state, "source": session.client_id},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+
 
     async def _handle_voice(self, session: ClientSession, envelope: ClientEnvelope) -> None:
-        """Handles incoming voice transcripts and commands."""
+        """Handles incoming voice transcripts, wake words, and commands."""
         event_type = envelope.type
-        command_text = envelope.payload.get("command", "")
 
+        # 1. Wake Word Detected Broadcast
+        if event_type == EventType.WAKE_WORD_DETECTED:
+            wake_word = envelope.payload.get("wake_word", "hey alfred")
+            conf = float(envelope.payload.get("confidence", 1.0))
+            logger.info(f"[VOICE] Wake word detected: '{wake_word}' (conf={conf:.2f}) from '{session.client_id}'")
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.VOICE,
+                type=EventType.WAKE_WORD_DETECTED,
+                payload={
+                    "wake_word": wake_word,
+                    "confidence": conf,
+                    "state": "LISTENING",
+                    "source": session.client_id,
+                },
+            )
+            await self.manager.broadcast(broadcast_envelope)
+            return
+
+        command_text = envelope.payload.get("command", "")
         logger.info(f"[VOICE] Command from '{session.client_id}': \"{command_text}\" (UUID: {envelope.uuid})")
+
+        # 2. Agent Activating Broadcast -> Notify cluster that LangGraph has started reasoning (THINKING)
+        activating_envelope = ServerEnvelope(
+            uuid=envelope.uuid,
+            channel=Channel.AGENT,
+            type=EventType.AGENT_ACTIVATING,
+            payload={
+                "command": command_text,
+                "state": "THINKING",
+                "session_id": session.session_id,
+            },
+        )
+        await self.manager.broadcast(activating_envelope)
 
         # Create background task for processing to never block the network loop
         async def _execute_voice_pipeline():
@@ -199,15 +258,33 @@ class MessageRouter:
                 latency_ms = 0.0
 
                 try:
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=2.0, read=45.0, write=5.0, pool=5.0)) as http_client:
-                        agent_res = await http_client.post(
-                            f"{AGENT_SERVICE_URL}/query",
-                            json={
-                                "query": command_text,
-                                "session_id": session.session_id,
-                                "client_id": session.client_id,
-                            },
-                        )
+                    target_url = f"{AGENT_SERVICE_URL}/query"
+                    timeout_config = httpx.Timeout(connect=5.0, read=35.0, write=5.0, pool=5.0)
+                    async with httpx.AsyncClient(timeout=timeout_config) as http_client:
+                        try:
+                            agent_res = await http_client.post(
+                                target_url,
+                                json={
+                                    "query": command_text,
+                                    "session_id": session.session_id,
+                                    "client_id": session.client_id,
+                                },
+                            )
+                        except (httpx.ConnectTimeout, httpx.ConnectError) as conn_err:
+                            fallback_url = "http://127.0.0.1:8001/query"
+                            if target_url != fallback_url:
+                                logger.warning(f"[VOICE] Agent connection to {target_url} failed ({conn_err}), retrying {fallback_url}")
+                                agent_res = await http_client.post(
+                                    fallback_url,
+                                    json={
+                                        "query": command_text,
+                                        "session_id": session.session_id,
+                                        "client_id": session.client_id,
+                                    },
+                                )
+                            else:
+                                raise conn_err
+
                         if agent_res.status_code == 200:
                             data = agent_res.json()
                             response_text = data.get("speech_text", response_text)
@@ -216,9 +293,17 @@ class MessageRouter:
                             fast_path = data.get("fast_path", False)
                             intent = data.get("plan_type", "CONVERSE")
                             latency_ms = data.get("latency_ms", 0.0)
+                        else:
+                            logger.error(f"[VOICE] Agent returned HTTP {agent_res.status_code}: {agent_res.text}")
+                            response_text = "I apologize, sir, but an error occurred within the cognitive swarm."
+                            markdown_body = f"**Cognitive Swarm Error**: HTTP {agent_res.status_code}\n\n```\n{agent_res.text[:400]}\n```"
                 except Exception as agent_err:
-                    logger.warning(f"[VOICE] Agent service call failed or unavailable ({agent_err}). Using fallback.")
+                    err_desc = str(agent_err) or type(agent_err).__name__
+                    logger.warning(f"[VOICE] Agent service call failed or unavailable ({err_desc}). Using fallback.")
+                    response_text = "I apologize, sir, but the cognitive agent swarm is currently unreachable."
+                    markdown_body = f"**Swarm Unreachable**: {err_desc}"
 
+                # 3. Agent Response Delivery -> Broadcast to all display interfaces (HUD, mobile)
                 response_envelope = ServerEnvelope(
                     uuid=envelope.uuid,
                     channel=Channel.VOICE,
@@ -234,9 +319,42 @@ class MessageRouter:
                         "latency_ms": latency_ms,
                     },
                 )
-                await self.manager.send_envelope(session.session_id, response_envelope)
+                await self.manager.broadcast(response_envelope)
+
+                # 4. Agent Speaking Broadcast
+                speaking_envelope = ServerEnvelope(
+                    uuid=envelope.uuid,
+                    channel=Channel.VOICE,
+                    type=EventType.AGENT_SPEAKING,
+                    payload={
+                        "command": command_text,
+                        "response": response_text,
+                        "state": "SPEAKING",
+                    },
+                )
+                await self.manager.broadcast(speaking_envelope)
+
+                # Maintain SPEAKING status briefly for UI visualizer animation
+                await asyncio.sleep(1.5)
+
+                # 5. Agent Idle Broadcast -> State transitions back to IDLE
+                idle_envelope = ServerEnvelope(
+                    uuid=envelope.uuid,
+                    channel=Channel.VOICE,
+                    type=EventType.AGENT_IDLE,
+                    payload={"state": "IDLE", "command": command_text},
+                )
+                await self.manager.broadcast(idle_envelope)
+
             except asyncio.CancelledError:
                 logger.info(f"[VOICE] Pipeline task cancelled for UUID={envelope.uuid}")
+                idle_envelope = ServerEnvelope(
+                    uuid=envelope.uuid,
+                    channel=Channel.VOICE,
+                    type=EventType.AGENT_IDLE,
+                    payload={"state": "IDLE", "reason": "INTERRUPTED"},
+                )
+                await self.manager.broadcast(idle_envelope)
                 raise
 
         pipeline_task = asyncio.create_task(_execute_voice_pipeline())
@@ -248,6 +366,12 @@ class MessageRouter:
         logger.info(f"[GESTURE] Received gesture '{gesture}' from '{session.client_id}'")
 
         if gesture in ("TOGGLE_ZEN", "PEACE_SIGN"):
+            now = time.time()
+            if getattr(self, "_last_zen_toggle", 0.0) and (now - self._last_zen_toggle < 2.0):
+                logger.info("[GESTURE] Ignored rapid Zen Mode toggle (cluster debounce)")
+                return
+            self._last_zen_toggle = now
+
             current_zen = sync_manager.get_snapshot().zen_mode
             new_zen = not current_zen
             await sync_manager.update_state({"zen_mode": new_zen}, source_device_id=session.client_id)
@@ -260,38 +384,101 @@ class MessageRouter:
             await self.manager.broadcast(broadcast_envelope)
 
         elif gesture in ("CLOSED_FIST", "MUTE", "PAUSE"):
-            # Instant Mute / Pause playback
+            # Instant Mute / Pause playback and Mute Wake Word Listener
+            _set_system_mute(True)
+            _control_media_player("pause")
             cur_state = sync_manager.get_snapshot()
             media_copy = dict(cur_state.current_media)
             media_copy["is_playing"] = False
-            await sync_manager.update_state({"master_volume": 0, "current_media": media_copy}, source_device_id=session.client_id)
+            await sync_manager.update_state(
+                {"master_volume": 0, "current_media": media_copy, "wakeword_active": False},
+                source_device_id=session.client_id,
+            )
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.SYSTEM,
                 type=EventType.SET_VOLUME,
-                payload={"volume": 0, "muted": True, "media_action": "pause"},
+                payload={"volume": 0, "muted": True, "media_action": "pause", "wakeword_active": False},
             )
             await self.manager.broadcast(broadcast_envelope)
 
+            ww_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.VOICE,
+                type=EventType.WAKE_WORD_STATE,
+                payload={"wakeword_active": False, "action": "pause", "source": "GESTURE:CLOSED_FIST"},
+            )
+            await self.manager.broadcast(ww_envelope)
+
         elif gesture in ("OPEN_PALM", "RESUME", "PLAY", "UNMUTE"):
-            # Resume playback / Unmute to default level
+            # Resume playback / Unmute to default level and Rearm Wake Word Listener
             current_vol = sync_manager.get_snapshot().master_volume
             restore_vol = current_vol if current_vol > 0 else 50
+            _set_system_mute(False)
+            _set_system_volume(restore_vol)
+            _control_media_player("play")
             cur_state = sync_manager.get_snapshot()
             media_copy = dict(cur_state.current_media)
             media_copy["is_playing"] = True
-            await sync_manager.update_state({"master_volume": restore_vol, "current_media": media_copy}, source_device_id=session.client_id)
+            await sync_manager.update_state(
+                {"master_volume": restore_vol, "current_media": media_copy, "wakeword_active": True},
+                source_device_id=session.client_id,
+            )
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.SYSTEM,
                 type=EventType.SET_VOLUME,
-                payload={"volume": restore_vol, "muted": False, "media_action": "play"},
+                payload={"volume": restore_vol, "muted": False, "media_action": "play", "wakeword_active": True},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+
+            ww_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.VOICE,
+                type=EventType.WAKE_WORD_STATE,
+                payload={"wakeword_active": True, "action": "resume", "source": "GESTURE:OPEN_PALM"},
+            )
+            await self.manager.broadcast(ww_envelope)
+
+        elif gesture in ("POINTING_UP", "TOGGLE_WAKEWORD", "WAKEWORD_TOGGLE"):
+            # Toggle active wake word listening state via Pointing Up gesture
+            cur_ww = sync_manager.get_snapshot().wakeword_active
+            new_ww = not cur_ww
+            await sync_manager.update_state({"wakeword_active": new_ww}, source_device_id=session.client_id)
+            ww_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.VOICE,
+                type=EventType.WAKE_WORD_STATE,
+                payload={"wakeword_active": new_ww, "toggle": True, "source": f"GESTURE:{gesture}"},
+            )
+            await self.manager.broadcast(ww_envelope)
+
+        elif gesture in ("ROCK_ON", "GESTURE_LOCK", "TOGGLE_GESTURES") or gesture.startswith("GESTURE_TOGGLE"):
+            # Toggle gesture tracking pause/lock via Rock On deliberate hold or explicit toggle
+            cur_paused = getattr(self, "_gestures_paused", False)
+            if ":PAUSED" in gesture:
+                new_paused = True
+            elif ":RESUMED" in gesture:
+                new_paused = False
+            elif gesture.startswith("GESTURE_TOGGLE"):
+                new_paused = not cur_paused
+            else:
+                return
+            self._gestures_paused = new_paused
+            status_str = "PAUSED" if new_paused else "RESUMED"
+            logger.info(f"[GESTURE] Toggled gesture tracking via ROCK_ON -> {status_str}")
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.GESTURE,
+                type=EventType.GESTURE_TOGGLE,
+                payload={"tracking_paused": new_paused, "status": status_str, "gesture": f"GESTURE_TOGGLE:{status_str}"},
             )
             await self.manager.broadcast(broadcast_envelope)
 
         elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT"):
             # Next Track playback control
             logger.info(f"[GESTURE] Triggered NEXT_TRACK media control from '{session.client_id}'")
+            _control_media_player("next")
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.SYSTEM,
@@ -303,6 +490,7 @@ class MessageRouter:
         elif gesture in ("PREV_TRACK", "PREVIOUS_TRACK", "SWIPE_LEFT"):
             # Previous Track playback control
             logger.info(f"[GESTURE] Triggered PREV_TRACK media control from '{session.client_id}'")
+            _control_media_player("previous")
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.SYSTEM,
@@ -315,6 +503,8 @@ class MessageRouter:
             # Step Volume Up (+10%)
             current_vol = sync_manager.get_snapshot().master_volume
             new_vol = min(100, current_vol + 10)
+            _set_system_mute(False)
+            _set_system_volume(new_vol)
             await sync_manager.update_state({"master_volume": new_vol}, source_device_id=session.client_id)
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
@@ -328,6 +518,9 @@ class MessageRouter:
             # Step Volume Down (-10%)
             current_vol = sync_manager.get_snapshot().master_volume
             new_vol = max(0, current_vol - 10)
+            _set_system_volume(new_vol)
+            if new_vol == 0:
+                _set_system_mute(True)
             await sync_manager.update_state({"master_volume": new_vol}, source_device_id=session.client_id)
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
@@ -337,7 +530,7 @@ class MessageRouter:
             )
             await self.manager.broadcast(broadcast_envelope)
 
-        elif gesture in ("POINTING_UP", "TOGGLE_FOCUS", "FOCUS_MODE"):
+        elif gesture in ("TOGGLE_FOCUS", "FOCUS_MODE"):
             # Toggle Focus Mode
             current_focus = sync_manager.get_snapshot().focus_mode
             new_focus = not current_focus

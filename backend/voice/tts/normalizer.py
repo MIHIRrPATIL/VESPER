@@ -82,7 +82,15 @@ class SpeechNormalizer:
         t = t.replace("—", ", ").replace("–", ", ")  # em/en dashes -> comma pause
         t = t.replace("“", "\"").replace("”", "\"").replace("‘", "'").replace("’", "'")
 
-        # 2. Markdown stripping
+        # 2. HTML & Code stripping (prevent reading raw HTML doctypes, tags, or scripts)
+        import html
+        t = re.sub(r"<!DOCTYPE[^>]*>", " ", t, flags=re.IGNORECASE)
+        t = re.sub(r"<(script|style|head|title)[^>]*>[\s\S]*?</\1>", " ", t, flags=re.IGNORECASE)
+        t = re.sub(r"<[^>]+>", " ", t)
+        t = html.unescape(t)
+        t = re.sub(r"[\u200b-\u200f\ufeff\u034f\u00ad]", "", t)
+
+        # 2b. Markdown stripping
         t = re.sub(r"```[a-zA-Z]*\n?.*?\n?```", "", t, flags=re.DOTALL)
         t = re.sub(r"`([^`]+)`", r"\1", t)
         t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
@@ -112,6 +120,28 @@ class SpeechNormalizer:
             spaced = " ".join(list(acr))
             t = re.sub(rf"\b{acr}\b", spaced, t)
 
+        # 7b. ISO Datetime and Time normalization (e.g. 2026-09-05T16:15:00+05:30 -> today at 4:15 PM)
+        def _format_iso(m: re.Match) -> str:
+            prefix = m.group(1) or ""
+            iso_str = m.group(2)
+            spoken = cls.format_spoken_datetime(iso_str)
+            if not spoken:
+                return m.group(0)
+            if spoken.startswith("today") or spoken.startswith("tomorrow") or spoken.startswith("yesterday") or spoken.startswith("this") or spoken.startswith("on"):
+                sp = " " if prefix and prefix.startswith(" ") else ""
+                return f"{sp}{spoken}"
+            return f"{prefix}{spoken}"
+
+        t = re.sub(
+            r"(\s*\bat\s+)?\b(\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?)\b",
+            _format_iso,
+            t,
+            flags=re.IGNORECASE,
+        )
+
+        # Strip any standalone residual timezone offsets like +05:30 or -07:00
+        t = re.sub(r"[+-]\d{2}:\d{2}\b", "", t)
+
         # 8. Long digit sequences (e.g. ISBNs, tracking numbers) -> group digits
         def _format_digits(m: re.Match) -> str:
             digits = m.group(0)
@@ -127,3 +157,55 @@ class SpeechNormalizer:
         t = re.sub(r"\(\s*([^)]+)\s*\)", r", \1, ", t)  # parentheticals into clause pauses
 
         return t
+
+    @classmethod
+    def format_spoken_datetime(cls, dt_str: str) -> str:
+        """Converts an ISO timestamp or date into articulate spoken English."""
+        if not dt_str:
+            return ""
+        try:
+            import datetime
+            if "T" in dt_str or " " in dt_str or len(dt_str) == 10:
+                dt = datetime.datetime.fromisoformat(dt_str)
+                now = datetime.datetime.now().astimezone()
+                today = now.date()
+                d = dt.date()
+                diff = (d - today).days
+
+                hour = dt.hour
+                minute = dt.minute
+                h12 = hour % 12 or 12
+                ampm = "AM" if hour < 12 else "PM"
+                time_str = f"{h12}:{minute:02d} {ampm}" if minute else f"{h12} {ampm}"
+
+                day = d.day
+                suffix = "th" if 11 <= day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+                month_name = d.strftime("%B")
+                weekday = d.strftime("%A")
+
+                # Date-only string (no time component)
+                if "T" not in dt_str and " " not in dt_str:
+                    if diff == 0:
+                        return "today"
+                    if diff == 1:
+                        return "tomorrow"
+                    if diff == -1:
+                        return "yesterday"
+                    if 2 <= diff <= 6:
+                        return f"this {weekday}"
+                    return f"on {weekday}, {month_name} {day}{suffix}"
+
+                # Datetime with time component
+                if diff == 0:
+                    return f"today at {time_str}"
+                elif diff == 1:
+                    return f"tomorrow at {time_str}"
+                elif diff == -1:
+                    return f"yesterday at {time_str}"
+                elif 2 <= diff <= 6:
+                    return f"this {weekday} at {time_str}"
+                else:
+                    return f"on {weekday}, {month_name} {day}{suffix} at {time_str}"
+        except Exception:
+            pass
+        return dt_str

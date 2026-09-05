@@ -103,6 +103,16 @@ class SyncManager:
                     self.state.focus_mode = diff["focus_mode"]
                     modified = True
 
+            if "wakeword_active" in diff and isinstance(diff["wakeword_active"], bool):
+                if self.state.wakeword_active != diff["wakeword_active"]:
+                    self.state.wakeword_active = diff["wakeword_active"]
+                    modified = True
+
+            if "optical_sensor_active" in diff and isinstance(diff["optical_sensor_active"], bool):
+                if self.state.optical_sensor_active != diff["optical_sensor_active"]:
+                    self.state.optical_sensor_active = diff["optical_sensor_active"]
+                    modified = True
+
             if "active_tasks_count" in diff and isinstance(diff["active_tasks_count"], int):
                 self.state.active_tasks_count = diff["active_tasks_count"]
                 modified = True

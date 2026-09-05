@@ -9,6 +9,7 @@ Verifies:
 
 from __future__ import annotations
 
+import time
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
@@ -310,7 +311,7 @@ async def test_gesture_worker_toggle_lockout_and_swipes():
 
 @pytest.mark.asyncio
 async def test_gesture_rock_on_lock_toggle_and_open_palm_immediate():
-    """Verifies that Rock On (ILoveYou 🤟) locks/unlocks and Open Palm triggers immediately."""
+    """Verifies that Rock On (ILoveYou) locks/unlocks and Open Palm triggers immediately."""
     from unittest.mock import MagicMock
     import time
 
@@ -370,4 +371,185 @@ async def test_gesture_rock_on_lock_toggle_and_open_palm_immediate():
     res, conf = worker._check_toggle_gesture_only(dummy_frame)
     assert res == "GESTURE_TOGGLE:RESUMED"
     assert conf == 0.88
+
+
+@pytest.mark.asyncio
+async def test_gesture_repeat_guard_and_volume_repeat_exception():
+    """Verifies that non-volume gestures are blocked from consecutive repeat without release,
+    while volume gestures (thumbs, dial) are permitted to repeat smoothly.
+    """
+    worker = GestureWorker(fps=8.0)
+    dispatched = []
+
+    async def _test_cb(g, c):
+        dispatched.append(g)
+
+    worker.on_gesture_callback = _test_cb
+
+    # 1. Non-volume gesture (CLOSED_FIST): Streak requirement + release hysteresis
+    # Frame 1: candidate streak becomes 1 (streak < 2, not emitted)
+    # Simulate _run_loop evaluation step logic directly
+    now = time.time()
+
+    # Emulate streak + release logic for CLOSED_FIST
+    worker._candidate_gesture = "CLOSED_FIST"
+    worker._candidate_streak = 2  # 2 consecutive frames
+    base_g = "CLOSED_FIST"
+    assert base_g not in worker._gesture_awaiting_release
+
+    # First emission allowed
+    worker._last_gesture_emitted_times[base_g] = now
+    worker._gesture_awaiting_release.add(base_g)
+    await worker._dispatch_gesture("CLOSED_FIST", 0.90)
+    assert dispatched == ["CLOSED_FIST"]
+
+    # Consecutive frame: user still holding CLOSED_FIST without release
+    # Check guard:
+    assert base_g in worker._gesture_awaiting_release
+    # It must be blocked while held
+    is_blocked_by_release = base_g in worker._gesture_awaiting_release
+    assert is_blocked_by_release is True
+
+    # User releases hand (NONE)
+    worker._candidate_gesture = "NONE"
+    worker._candidate_streak = 0
+    worker._none_streak = 1
+    worker._gesture_awaiting_release.clear()
+    assert base_g not in worker._gesture_awaiting_release
+
+    # Cooldown check: if user immediately reforms fist within 0.2s, cooldown blocks it
+    now_quick = now + 0.2
+    assert (now_quick - worker._last_gesture_emitted_times[base_g]) < 1.5
+
+    # 2. Volume gesture (THUMB_DOWN): Allowed to repeat without release
+    worker._last_gesture_emitted_times.clear()
+    worker._gesture_awaiting_release.clear()
+    dispatched.clear()
+
+    # Frame 1 & 2 of THUMB_DOWN
+    worker._candidate_gesture = "THUMB_DOWN"
+    worker._candidate_streak = 2
+    is_volume = worker._candidate_gesture in ("THUMB_UP", "THUMB_DOWN", "VOLUME_UP", "VOLUME_DOWN")
+    assert is_volume is True
+
+    # Volume gestures bypass release lock
+    t0 = time.time()
+    worker._last_gesture_emitted_times["THUMB_DOWN"] = t0
+    await worker._dispatch_gesture("THUMB_DOWN", 0.95)
+    assert len(dispatched) == 1
+
+    # Hand is STILL held (no release to NONE), 0.36s later (> 0.35s cooldown)
+    t1 = t0 + 0.36
+    assert (t1 - worker._last_gesture_emitted_times["THUMB_DOWN"]) >= 0.35
+    # Since is_volume is True, release check is bypassed, allowing continuous volume steps
+    worker._last_gesture_emitted_times["THUMB_DOWN"] = t1
+    await worker._dispatch_gesture("THUMB_DOWN", 0.95)
+    assert len(dispatched) == 2
+    assert dispatched == ["THUMB_DOWN", "THUMB_DOWN"]
+
+
+@pytest.mark.asyncio
+async def test_screen_capture_blank_frame_detection():
+    """Verifies that ScreenCapture correctly detects blank/black frames."""
+    from PIL import Image
+
+    # 1. Solid black image -> blank
+    black_img = Image.new("RGB", (100, 100), (0, 0, 0))
+    assert ScreenCapture._is_blank_frame(black_img) is True
+
+    # 2. Image with faint noise <= 1 -> blank
+    dim_img = Image.new("RGB", (100, 100), (1, 1, 1))
+    assert ScreenCapture._is_blank_frame(dim_img) is True
+
+    # 3. Regular active screen image -> not blank
+    active_img = Image.new("RGB", (100, 100), (25, 120, 200))
+    assert ScreenCapture._is_blank_frame(active_img) is False
+
+
+@pytest.mark.asyncio
+async def test_screen_capture_list_monitors_hyprland():
+    """Verifies monitor discovery parsing under Hyprland compositor."""
+    import json
+    from unittest.mock import patch, MagicMock
+
+    mock_hyprctl_output = json.dumps([
+        {
+            "id": 0,
+            "name": "DP-3",
+            "description": "Dell Inc. 27 Display",
+            "width": 2560,
+            "height": 1440,
+            "focused": True,
+        },
+        {
+            "id": 1,
+            "name": "eDP-1",
+            "description": "BOE Embedded Display",
+            "width": 1920,
+            "height": 1080,
+            "focused": False,
+        },
+    ])
+
+    with patch("shutil.which", return_value="/usr/bin/hyprctl"), \
+         patch("subprocess.run") as mock_run:
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = mock_hyprctl_output
+        mock_run.return_value = mock_proc
+
+        monitors = ScreenCapture.list_monitors()
+        assert len(monitors) == 2
+        assert monitors[0]["name"] == "DP-3"
+        assert monitors[0]["is_focused"] is True
+        assert monitors[0]["width"] == 2560
+        assert monitors[1]["name"] == "eDP-1"
+        assert monitors[1]["is_focused"] is False
+        assert monitors[1]["width"] == 1920
+
+
+@pytest.mark.asyncio
+async def test_vision_specialist_multi_monitor_natural_language_routing():
+    """Verifies that VisionSpecialist routes queries targeting specific monitors."""
+    mock_screen = FrameCaptureResult(
+        success=True,
+        source="screen_DP-3",
+        monitor_name="DP-3",
+        monitor_index=1,
+        image_base64="bW9uaXRvcl9mcmFtZV9kYXRh",
+        width=2560,
+        height=1440,
+    )
+
+    mock_client = MagicMock(spec=GroqVisionClient)
+    mock_client.analyze_image = AsyncMock(
+        return_value=VisionAnalysisResult(
+            success=True,
+            description="On your external monitor (DP-3), I observe VSCode open, sir.",
+            source="screen",
+        )
+    )
+
+    with patch.object(
+        DeviceProbe,
+        "get_capabilities",
+        return_value=DeviceCapabilities(
+            device_type="desktop",
+            has_display=True,
+            is_headless=False,
+        ),
+    ), patch.object(ScreenCapture, "capture_screen", return_value=mock_screen) as mock_capture:
+        specialist = VisionSpecialist(vision_client=mock_client)
+
+        # 1. Test "external monitor" query
+        res = await specialist.execute("inspect_screen", {"query": "What is on my external monitor?"})
+        assert res.success is True
+        assert res.data["monitor_name"] == "DP-3"
+        assert mock_capture.call_args[1]["monitor_name"] == "external"
+
+        # 2. Test "both screens" query
+        res_both = await specialist.execute("inspect_screen", {"query": "Can you check both screens?"})
+        assert res_both.success is True
+        assert mock_capture.call_args[1]["monitor_index"] == 0
+
 

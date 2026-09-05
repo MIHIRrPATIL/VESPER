@@ -10,6 +10,7 @@ Coordinates:
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import re
@@ -41,6 +42,9 @@ class AlfredResponse(BaseModel):
 ALFRED_SYNTHESIS_PROMPT = """You are Alfred, an intelligent, poised, and impeccably articulate British personal assistant inspired by J.A.R.V.I.S.
 Synthesize the specialist outcomes below into a seamless, natural response to the user's inquiry.
 
+Current Temporal Context:
+- Current Date & Time: {current_datetime} ({current_day})
+
 User Query: "{query}"
 
 Specialist Execution Outcomes:
@@ -49,6 +53,10 @@ Specialist Execution Outcomes:
 Persona Directives:
 - Speak with quiet confidence, British elegance, and subtle wit when appropriate.
 - State facts, financial figures, dates, and titles with absolute precision.
+- CRITICAL TEMPORAL GROUNDING & DATES:
+  * Current reference time: {current_datetime} ({current_day}).
+  * Interpret relative references ('today', 'yesterday', 'tomorrow', 'this evening', 'next week') strictly against this current date and time.
+  * Strictly distinguish between tasks or appointments scheduled for TODAY versus older backlog tasks or events from previous days. NEVER describe past backlog tasks as tasks scheduled for today.
 - CRITICAL FACTUAL GROUNDING & ANTI-HALLUCINATION:
   1. Base every factual claim STRICTLY and EXCLUSIVELY on the Specialist Execution Outcomes and Verified Web Sources above.
   2. NEVER contradict, alter, or 'correct' the specialist outcomes or search results with unsupported assumptions.
@@ -57,6 +65,7 @@ Persona Directives:
   5. SEQUENTIAL VISION → RESEARCH HIERARCHY: When the outcomes include both a vision/OCR step AND a research/web-search step (in that order), treat the RESEARCH RESULTS as ground truth and the vision description as an unverified hypothesis only. If the research results contradict the vision description, defer entirely to the research results. Never blend a vision model's guess with verified search facts as if they are equally reliable.
   6. MEDIUM-CONFIDENCE OCR WARNING: If an OCR step reports confidence="medium", acknowledge that the identification may be approximate and the research results are based on a partial read.
 - Do NOT read out raw URLs or table borders; describe what was done naturally.
+- CRITICAL SPEECH SAFETY: NEVER read out raw code, HTML tags, DOCTYPE declarations, CSS styles, JavaScript snippets, or tracking boilerplate. Always extract and speak only the human message, sender, date, and key subject in an articulate, polished manner.
 - Keep the response direct and free of generic AI apologies.
 - When referring to recent dialogue or previous actions, speak naturally as an attentive butler aware of active entities and conversation history.
 - When summarizing lists, chronological events, or conversation threads, present the progression of events and the latest update clearly.
@@ -412,6 +421,16 @@ class AlfredSupervisor:
             )
         )
 
+        # Check if specialist execution was purely system vitals / network cluster status
+        is_pure_system_status = (
+            bool(exec_result.specialist_results)
+            and all(
+                (getattr(r, "agent_name", "") == "system" or r.action in ("get_system_vitals", "scan_network_devices", "list_processes"))
+                for r in exec_result.specialist_results
+            )
+            and all(r.success for r in exec_result.specialist_results)
+        )
+
         # Check for sandbox data presence across all outcomes
         has_sandbox_data = any(
             isinstance(r.data, dict) and (
@@ -423,13 +442,21 @@ class AlfredSupervisor:
             for r in exec_result.specialist_results
         )
 
+        # Check if the user query is asking an inquiry/question where synthesis is needed
+        is_inquiry = any(
+            w in cleaned_query.lower()
+            for w in ("when", "what", "which", "who", "why", "how", "summarize", "tell me", "explain", "detail", "?")
+        )
+
         # Single-specialist action synthesis bypass (<2ms, 0 tokens)
         can_bypass_synthesis = (
             len(exec_result.specialist_results) == 1
             and exec_result.specialist_results[0].success
             and bool(exec_result.specialist_results[0].speech_summary)
+            and not is_inquiry
             and exec_result.specialist_results[0].action not in (
-                "web_search", "inspect_webcam", "inspect_screen", "quick_scrape", "scrape_and_summarize"
+                "web_search", "inspect_webcam", "inspect_screen", "quick_scrape", "scrape_and_summarize",
+                "read_email", "read_thread", "search_emails", "get_daily_agenda"
             )
             and not (isinstance(exec_result.specialist_results[0].data, dict) and exec_result.specialist_results[0].data.get("sources"))
         )
@@ -439,6 +466,10 @@ class AlfredSupervisor:
             eval_res = OutputEvaluator.evaluate(raw_response)
         elif is_pure_finance:
             # Guaranteed 100% numerical accuracy bypass: specialist speech_summary formatted without LLM rounding
+            raw_response = " ".join([r.speech_summary for r in exec_result.specialist_results if r.speech_summary])
+            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results)
+        elif is_pure_system_status:
+            # Guaranteed instantaneous (<5ms) system and cluster report: precise butler summaries without LLM delay
             raw_response = " ".join([r.speech_summary for r in exec_result.specialist_results if r.speech_summary])
             eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results)
         elif can_bypass_synthesis:
@@ -470,6 +501,18 @@ class AlfredSupervisor:
                             f"Album/Film='{r.data.get('album') or r.data.get('movie')}', "
                             f"Artist='{r.data.get('artist')}'"
                         )
+                    if "body" in r.data:
+                        extra_facts.append(
+                            f"  Email Content: Subject='{r.data.get('subject')}', From='{r.data.get('sender')}', Date='{r.data.get('date')}':\n"
+                            f"  {str(r.data.get('body'))[:350]}"
+                        )
+                    elif "emails" in r.data and isinstance(r.data["emails"], list):
+                        e_summaries = [
+                            f"    * [{e.get('date', 'Recent')} - {e.get('sender_name') or e.get('sender')}]: Subject='{e.get('subject')}' | Preview='{e.get('snippet', '')[:120]}'"
+                            for e in r.data["emails"][:3]
+                        ]
+                        if e_summaries:
+                            extra_facts.append("  Matching Emails Found:\n" + "\n".join(e_summaries))
                     if "messages" in r.data and isinstance(r.data["messages"], list):
                         t_msgs = [
                             f"    * [{m.get('date', 'Recent')} - {m.get('sender_name', m.get('sender'))}]: {m.get('body', '')[:160]}"
@@ -487,9 +530,14 @@ class AlfredSupervisor:
                 outcome_lines.append(f"- Action '{r.action}': {status} | Summary: {details_block}")
 
             outcomes_text = "\n".join(outcome_lines)
+            now_dt = datetime.datetime.now().astimezone()
+            current_datetime = now_dt.strftime("%A, %B %d, %Y, %I:%M %p %Z")
+            current_day = now_dt.strftime("%A")
             synthesis_prompt = ALFRED_SYNTHESIS_PROMPT.format(
                 query=cleaned_query,
                 outcomes=outcomes_text,
+                current_datetime=current_datetime,
+                current_day=current_day,
             )
 
             messages: List[Dict[str, str]] = [

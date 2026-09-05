@@ -66,9 +66,10 @@ from backend.shared.events import (
 )
 
 console = Console()
+logger = logging.getLogger("vesper.run_services")
 
-GATEWAY_URL = f"http://localhost:{GATEWAY_PORT}"
-GATEWAY_WS_URL = f"ws://localhost:{GATEWAY_PORT}/ws"
+GATEWAY_URL = f"http://127.0.0.1:{GATEWAY_PORT}"
+GATEWAY_WS_URL = f"ws://127.0.0.1:{GATEWAY_PORT}/ws"
 AGENT_URL = AGENT_SERVICE_URL
 VOICE_URL = VOICE_SERVICE_URL
 OUTPUT_DIR = PROJECT_ROOT / "output"
@@ -79,7 +80,22 @@ def play_audio_file(audio_path: Path, delete_after: bool = True) -> None:
     """Plays audio through system speakers via low-latency player."""
     p_str = str(audio_path)
     try:
-        for cmd in [["pw-play", p_str], ["paplay", p_str], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", p_str], ["mpv", "--no-terminal", p_str]]:
+        if sys.platform == "win32":
+            try:
+                import winsound
+                winsound.PlaySound(p_str, winsound.SND_FILENAME)
+                return
+            except Exception:
+                pass
+
+        candidate_cmds = [
+            ["afplay", p_str],
+            ["pw-play", p_str],
+            ["paplay", p_str],
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", p_str],
+            ["mpv", "--no-terminal", p_str],
+        ]
+        for cmd in candidate_cmds:
             if shutil.which(cmd[0]):
                 try:
                     subprocess.run(cmd, check=True, timeout=8, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -228,7 +244,11 @@ class ServiceSupervisor:
                 except Exception:
                     pass
 
-        time.sleep(0.8)
+        # Wait up to 1.2s for graceful microservice shutdown
+        t0 = time.time()
+        for name, proc in list(self.processes.items()):
+            while proc.poll() is None and (time.time() - t0 < 1.2):
+                time.sleep(0.05)
 
         for name, proc in list(self.processes.items()):
             try:
@@ -239,6 +259,10 @@ class ServiceSupervisor:
                     proc.kill()
                 except Exception:
                     pass
+            try:
+                proc.wait(timeout=0.5)
+            except Exception:
+                pass
 
         self.processes.clear()
         console.print("[bold green]All background services stopped cleanly.[/bold green]")
@@ -264,6 +288,7 @@ class TerminalDesktopHUD:
         self._gesture_worker = None
         self._gesture_task: Optional[asyncio.Task] = None
         self._wakeword_listener = None
+        self._wakeword_manually_muted = False
         self._is_handling_voice = False
 
         # Audio / TTS Playback Lock & Task Coordination
@@ -447,20 +472,104 @@ class TerminalDesktopHUD:
             sys.stdout.write("vesper> ")
             sys.stdout.flush()
 
-        elif envelope.type == EventType.GESTURE_EVENT:
+        elif envelope.type in (EventType.WAKE_WORD_STATE, EventType.WAKE_WORD_TOGGLE):
+            is_active = p.get("wakeword_active")
+            if is_active is None and p.get("toggle"):
+                is_active = self._wakeword_manually_muted
+
+            if is_active is False or p.get("action") == "pause":
+                self._wakeword_manually_muted = True
+                if self._wakeword_listener:
+                    self._wakeword_listener.pause()
+                console.print(f"\n[bold yellow][WAKE WORD] Listener PAUSED (Muted via {p.get('source', 'client')})[/bold yellow]")
+            elif is_active is True or p.get("action") == "resume":
+                self._wakeword_manually_muted = False
+                if self._wakeword_listener and self.is_running:
+                    self._wakeword_listener.resume()
+                console.print("\n[bold green][WAKE WORD] Listener ARMED[/bold green]")
+            sys.stdout.write("vesper> ")
+            sys.stdout.flush()
+
+        elif envelope.type in (EventType.GESTURE_EVENT, EventType.GESTURE_TOGGLE):
+            # Suppress self-echo to avoid duplicate terminal lines
+            if p.get("source") == self.client_id:
+                return
+
             gesture = p.get("gesture", "")
             conf = p.get("confidence", 1.0)
-            if gesture.startswith("GESTURE_TOGGLE"):
-                if ":PAUSED" in gesture or p.get("tracking_paused") is True:
-                    console.print("\n[dim yellow][GESTURE] Tracking is now PAUSED[/dim yellow]")
-                elif ":RESUMED" in gesture or p.get("tracking_paused") is False:
-                    console.print("\n[dim green][GESTURE] Tracking is now RESUMED[/dim green]")
+            if gesture in ("CLOSED_FIST", "MUTE"):
+                self._wakeword_manually_muted = True
+                if self._wakeword_listener:
+                    self._wakeword_listener.pause()
+                console.print(f"\n[bold yellow][WAKE WORD] Listener PAUSED (Gesture: {gesture})[/bold yellow]")
+            elif gesture in ("OPEN_PALM", "RESUME", "UNMUTE"):
+                self._wakeword_manually_muted = False
+                if self._wakeword_listener and self.is_running:
+                    self._wakeword_listener.resume()
+                console.print(f"\n[bold green][WAKE WORD] Listener ARMED (Gesture: {gesture})[/bold green]")
+            elif gesture in ("POINTING_UP", "TOGGLE_WAKEWORD", "WAKEWORD_TOGGLE"):
+                self._wakeword_manually_muted = not self._wakeword_manually_muted
+                if self._wakeword_manually_muted:
+                    if self._wakeword_listener:
+                        self._wakeword_listener.pause()
+                    console.print(f"\n[bold yellow][WAKE WORD] Listener PAUSED (Gesture: {gesture})[/bold yellow]")
+                else:
+                    if self._wakeword_listener and self.is_running:
+                        self._wakeword_listener.resume()
+                    console.print(f"\n[bold green][WAKE WORD] Listener ARMED (Gesture: {gesture})[/bold green]")
+
+            elif gesture in ("ROCK_ON", "GESTURE_LOCK", "TOGGLE_GESTURES") or gesture.startswith("GESTURE_TOGGLE"):
+                if self._gesture_worker:
+                    if ":PAUSED" in gesture:
+                        self._gesture_worker.state.tracking_paused = True
+                    elif ":RESUMED" in gesture:
+                        self._gesture_worker.state.tracking_paused = False
+                    elif gesture.startswith("GESTURE_TOGGLE"):
+                        self._gesture_worker.state.tracking_paused = not self._gesture_worker.state.tracking_paused
+                    else:
+                        return
+                    is_paused = self._gesture_worker.state.tracking_paused
+                    status = "PAUSED (Gestures Locked)" if is_paused else "RESUMED (Gestures Active)"
+                    color = "yellow" if is_paused else "green"
+                    console.print(f"\n[bold {color}][GESTURES] Tracking {status} via ROCK_ON[/bold {color}]")
+
             elif gesture.startswith("VOLUME_DIAL:"):
                 pass
             else:
                 console.print(f"\n[dim green][GESTURE] Recognized: {gesture} (conf={conf:.2f})[/dim green]")
             sys.stdout.write("vesper> ")
             sys.stdout.flush()
+
+        elif envelope.type == EventType.AGENT_ACTIVATING:
+            if self._wakeword_listener:
+                self._wakeword_listener.pause()
+            cmd = p.get("command", "")
+            console.print(f"\n[dim cyan][THINKING] Alfred is processing: \"{cmd}\"...[/dim cyan]")
+            sys.stdout.write("vesper> ")
+            sys.stdout.flush()
+
+        elif envelope.type == EventType.WAKE_WORD_DETECTED:
+            # Only print if originated from another cluster client (avoid echo from self)
+            if p.get("source") != self.client_id:
+                ww = p.get("wake_word", "hey alfred")
+                conf = float(p.get("confidence", 1.0))
+                console.print(f"\n[bold green][WAKE DETECTED] Wake word detected on cluster: '{ww}' (conf={conf:.2f}). Alfred is listening...[/bold green]")
+                sys.stdout.write("vesper> ")
+                sys.stdout.flush()
+
+        elif envelope.type == EventType.AGENT_SPEAKING:
+            console.print(f"\n[dim green][SPEAKING] Alfred is speaking...[/dim green]")
+            sys.stdout.write("vesper> ")
+            sys.stdout.flush()
+
+        elif envelope.type == EventType.AGENT_IDLE:
+            # Standby idle - re-arm microphone listener cleanly once speech finishes unless manually muted
+            if self._wakeword_listener and self.is_running and not self._wakeword_manually_muted:
+                async def _idle_resume():
+                    await asyncio.sleep(0.3)
+                    if self._wakeword_listener and self.is_running and not self._is_handling_voice and not self._current_tts_proc and not self._wakeword_manually_muted:
+                        self._wakeword_listener.resume()
+                asyncio.create_task(_idle_resume())
 
         elif envelope.type == EventType.ERROR:
             msg = p.get("message", "Unknown error")
@@ -513,11 +622,13 @@ class TerminalDesktopHUD:
         from backend.vision.gesture_service import GestureWorker
 
         async def _on_gesture_detected(gesture: str, conf: float):
+            if gesture == "ROCK_ON":
+                return
             if gesture.startswith("GESTURE_TOGGLE"):
                 if ":PAUSED" in gesture:
-                    console.print("\n[bold yellow][GESTURES] Tracking PAUSED (Rock On 🤟 hold 1s). Other gestures disabled.[/bold yellow]")
+                    console.print("\n[bold yellow][GESTURES] Tracking PAUSED (Rock On / ILoveYou hold 1s). Other gestures disabled.[/bold yellow]")
                 elif ":RESUMED" in gesture:
-                    console.print("\n[bold green][GESTURES] Tracking RESUMED (Rock On 🤟 hold 1s). Gestures active.[/bold green]")
+                    console.print("\n[bold green][GESTURES] Tracking RESUMED (Rock On / ILoveYou hold 1s). Gestures active.[/bold green]")
                 else:
                     console.print(f"\n[bold yellow][GESTURES] Tracking TOGGLED: {gesture}[/bold yellow]")
             elif gesture.startswith("VOLUME_DIAL:"):
@@ -531,7 +642,7 @@ class TerminalDesktopHUD:
             await self.send_envelope(
                 Channel.GESTURE,
                 EventType.GESTURE_EVENT,
-                {"gesture": gesture, "confidence": conf},
+                {"gesture": gesture, "confidence": conf, "source": self.client_id},
             )
             sys.stdout.write("vesper> ")
             sys.stdout.flush()
@@ -546,12 +657,47 @@ class TerminalDesktopHUD:
     def stop_gestures(self) -> None:
         """Disarms gesture tracker and releases camera hardware."""
         if self._gesture_worker:
-            asyncio.create_task(self._gesture_worker.stop())
+            try:
+                loop = self._loop or (asyncio.get_running_loop() if asyncio.get_event_loop().is_running() else None)
+                if loop and loop.is_running():
+                    loop.create_task(self._gesture_worker.stop())
+            except Exception:
+                pass
             self._gesture_worker = None
         if self._gesture_task:
             self._gesture_task.cancel()
             self._gesture_task = None
         console.print("[yellow][GESTURES] Disarmed touchless hand tracking (camera released).[/yellow]")
+
+    async def disconnect(self) -> None:
+        """Closes websocket connection, releases camera/mic peripherals, and cancels tasks cleanly."""
+        self.is_running = False
+        self.stop_wakeword()
+        if self._gesture_worker:
+            try:
+                await self._gesture_worker.stop()
+            except Exception:
+                pass
+            self._gesture_worker = None
+        if self._gesture_task:
+            self._gesture_task.cancel()
+            self._gesture_task = None
+        if self._current_tts_task and not self._current_tts_task.done():
+            self._current_tts_task.cancel()
+        if self._current_tts_proc:
+            try:
+                self._current_tts_proc.terminate()
+            except Exception:
+                pass
+            self._current_tts_proc = None
+        for t in self._bg_tasks:
+            t.cancel()
+        if self.websocket:
+            try:
+                await self.websocket.close()
+            except Exception:
+                pass
+        self.websocket = None
 
     async def _play_tts_response(self, text: str) -> None:
         """Synthesizes and plays Alfred's speech response through host speakers."""
@@ -620,12 +766,28 @@ class TerminalDesktopHUD:
                     except Exception:
                         pass
                 if self._wakeword_listener and self.is_running:
-                    self._wakeword_listener.resume()
+                    # Echo dissipation cooldown (500ms) before resuming mic listener
+                    await asyncio.sleep(0.5)
+                    if self._wakeword_listener and self.is_running and not self._is_handling_voice:
+                        self._wakeword_listener.resume()
 
     def _on_wake_detected(self, event: Any) -> None:
         """Invoked on the main asyncio thread when a wake word is detected."""
         console.print(f"\n[bold green][WAKE DETECTED][/bold green] ('{event.wake_word}', conf={event.confidence:.2f})")
         console.print("[dim cyan]Alfred is listening... (speak your command)[/dim cyan]")
+        if self.websocket:
+            asyncio.create_task(
+                self.send_envelope(
+                    Channel.VOICE,
+                    EventType.WAKE_WORD_DETECTED,
+                    {
+                        "wake_word": str(getattr(event, "wake_word", "hey alfred")),
+                        "confidence": float(getattr(event, "confidence", 1.0)),
+                        "state": "LISTENING",
+                        "source": self.client_id,
+                    },
+                )
+            )
 
     async def _on_utterance_recorded(self, pcm_bytes: bytes) -> None:
         """Invoked on the main asyncio thread when the user's spoken command is captured."""
@@ -633,6 +795,11 @@ class TerminalDesktopHUD:
             return
         self._is_handling_voice = True
 
+        # Immediately pause wake word listener so it does not self-trigger while thinking/speaking
+        if self._wakeword_listener:
+            self._wakeword_listener.pause()
+
+        command_sent = False
         try:
             from backend.voice.audio_utils import pack_pcm_to_wav
             from backend.voice.stt import GroqSpeechToText
@@ -641,15 +808,33 @@ class TerminalDesktopHUD:
             stt = GroqSpeechToText()
             transcript = await stt.transcribe_wav(wav_bytes)
 
-            if transcript.strip():
-                console.print(f'[bold green]You (Voice):[/bold green] "{transcript}"')
-                await self.send_envelope(Channel.VOICE, EventType.VOICE_COMMAND, {"command": transcript})
+            hallucination_phrases = {
+                "thank you.", "thank you", "thank you!", "thank you very much.",
+                "thanks for watching!", "thanks for watching.", "please subscribe.",
+                "you", "bye.", "bye", "thank you so much.", "thank you so much",
+                "[music]", "[applause]", "subtitles by", "translated by",
+            }
+            clean_text = transcript.strip()
+            if clean_text and clean_text.lower() not in hallucination_phrases:
+                console.print(f'[bold green]You (Voice):[/bold green] "{clean_text}"')
+                await self.send_envelope(Channel.VOICE, EventType.VOICE_COMMAND, {"command": clean_text})
+                command_sent = True
             else:
-                console.print("[dim yellow][Voice] Could not decipher speech.[/dim yellow]")
+                if clean_text:
+                    logger.info(f"[Voice] Suppressed ambient silence hallucination: \"{clean_text}\"")
+                else:
+                    console.print("[dim yellow][Voice] Could not decipher speech.[/dim yellow]")
         except Exception as e:
             console.print(f"[dim red][Voice Error] {e}[/dim red]")
         finally:
             self._is_handling_voice = False
+            # If no command was dispatched (silence or hallucination), re-arm listener after brief cooldown
+            if not command_sent and self._wakeword_listener and self.is_running:
+                async def _unpause():
+                    await asyncio.sleep(0.3)
+                    if self._wakeword_listener and self.is_running and not self._is_handling_voice:
+                        self._wakeword_listener.resume()
+                asyncio.create_task(_unpause())
             sys.stdout.write("vesper> ")
             sys.stdout.flush()
 
@@ -731,12 +916,20 @@ class TerminalDesktopHUD:
             sys.stdout.write(prompt)
             sys.stdout.flush()
             while self.is_running:
-                r, _, _ = select.select([sys.stdin], [], [], 0.1)
-                if r:
-                    line = sys.stdin.readline()
-                    if not line:
+                try:
+                    r, _, _ = select.select([sys.stdin], [], [], 0.1)
+                except (InterruptedError, select.error, OSError):
+                    if not self.is_running:
                         return None
-                    return line.rstrip("\r\n")
+                    continue
+                if r:
+                    try:
+                        line = sys.stdin.readline()
+                        if not line:
+                            return None
+                        return line.rstrip("\r\n")
+                    except (EOFError, KeyboardInterrupt, OSError):
+                        return None
                 await asyncio.sleep(0.05)
             return None
 
@@ -798,20 +991,10 @@ class TerminalDesktopHUD:
                     console.print(f"[dim]Processing query through Cognitive Swarm...[/dim]")
                     await self.send_envelope(Channel.VOICE, EventType.VOICE_COMMAND, {"command": line})
 
-            except (EOFError, KeyboardInterrupt):
+            except (EOFError, KeyboardInterrupt, InterruptedError):
                 break
 
-        self.is_running = False
-        self.stop_gestures()
-        self.stop_wakeword()
-
-        for t in self._bg_tasks:
-            t.cancel()
-        if self.websocket:
-            try:
-                await self.websocket.close()
-            except Exception:
-                pass
+        await self.disconnect()
 
     def _print_help(self) -> None:
         """Displays available REPL commands."""
@@ -942,20 +1125,30 @@ def main():
     parser = argparse.ArgumentParser(description="VESPER All Services Launcher & Terminal Desktop HUD")
     parser.add_argument("--services-only", action="store_true", help="Start background services without launching the interactive HUD")
     parser.add_argument("--client-only", action="store_true", help="Launch the terminal HUD client only (connects to existing Gateway)")
+    parser.add_argument("--desktop", action="store_true", help="Launch the Tauri v2 Desktop GUI companion alongside background services")
     parser.add_argument("--with-gestures", action="store_true", help="Also arm live webcam touchless gesture tracker")
     parser.add_argument("--with-wakeword", action="store_true", help="Also arm live microphone 'Hey Alfred' wake word listener")
     args = parser.parse_args()
 
     supervisor = ServiceSupervisor()
+    active_hud: Optional[TerminalDesktopHUD] = None
 
     def signal_handler(sig, frame):
-        supervisor.stop_all()
+        if active_hud:
+            try:
+                active_hud.stop_gestures()
+                active_hud.stop_wakeword()
+            except Exception:
+                pass
+        if not args.client_only:
+            supervisor.stop_all()
         os._exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     async def _run():
+        nonlocal active_hud
         if not args.client_only:
             ok = await supervisor.start_all()
             if not ok:
@@ -963,23 +1156,72 @@ def main():
                 return
 
         if args.services_only:
-            console.print("[bold green]Services running in background. Press Ctrl+C to stop.[/bold green]")
+            # If peripheral daemons (gestures or wake word) are requested, arm them via background gateway link
+            peripheral_hud = None
+            if args.with_gestures or args.with_wakeword:
+                peripheral_hud = TerminalDesktopHUD()
+                active_hud = peripheral_hud
+                console.print("[dim]Connecting peripheral daemons to Gateway WebSocket...[/dim]")
+                connected = await peripheral_hud.connect()
+                if connected:
+                    peripheral_hud._loop = asyncio.get_running_loop()
+                    peripheral_hud._bg_tasks.append(asyncio.create_task(peripheral_hud._receive_loop()))
+                    peripheral_hud._bg_tasks.append(asyncio.create_task(peripheral_hud._heartbeat_loop()))
+                    if args.with_gestures:
+                        peripheral_hud.start_gestures()
+                    if args.with_wakeword:
+                        peripheral_hud.start_wakeword()
+                else:
+                    console.print("[bold red]Failed to connect peripheral daemons to Gateway.[/bold red]")
+
+            console.print("[bold green]VESPER services and peripheral daemons running in background. Press Ctrl+C to stop.[/bold green]")
             try:
                 while True:
                     await asyncio.sleep(1.0)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 pass
             finally:
-                supervisor.stop_all()
+                if peripheral_hud:
+                    await peripheral_hud.disconnect()
+                if not args.client_only:
+                    supervisor.stop_all()
+            return
+
+        if args.desktop:
+            desktop_dir = PROJECT_ROOT / "desktop"
+            console.print("[bold cyan]Launching VESPER Desktop HUD companion...[/bold cyan]")
+            desktop_cmd = ["npm", "run", "tauri", "dev"]
+            console.print(f"[dim]Spawning desktop process: {' '.join(desktop_cmd)} in {desktop_dir}[/dim]")
+            desktop_proc = await asyncio.create_subprocess_exec(
+                *desktop_cmd,
+                cwd=str(desktop_dir),
+            )
+            try:
+                await desktop_proc.wait()
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
+            finally:
+                if desktop_proc.returncode is None:
+                    try:
+                        desktop_proc.terminate()
+                        await asyncio.sleep(0.5)
+                        if desktop_proc.returncode is None:
+                            desktop_proc.kill()
+                    except Exception:
+                        pass
+                if not args.client_only:
+                    supervisor.stop_all()
             return
 
         # Launch Terminal Desktop HUD
         hud = TerminalDesktopHUD()
+        active_hud = hud
         console.print(f"[dim]Connecting to Gateway at {GATEWAY_WS_URL}...[/dim]")
         connected = await hud.connect()
         if not connected:
             console.print("[bold red]Failed to connect to Gateway WebSocket. Exiting.[/bold red]")
-            supervisor.stop_all()
+            if not args.client_only:
+                supervisor.stop_all()
             return
 
         try:
@@ -994,7 +1236,9 @@ def main():
     try:
         asyncio.run(_run())
     except (KeyboardInterrupt, SystemExit):
-        supervisor.stop_all()
+        if not args.client_only:
+            supervisor.stop_all()
+    sys.exit(0)
 
 
 if __name__ == "__main__":

@@ -31,10 +31,10 @@ HEARTBEAT_TIMEOUT_SECONDS: float = float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", 
 MAX_PAYLOAD_SIZE_BYTES: int = int(os.getenv("MAX_PAYLOAD_SIZE_BYTES", str(10 * 1024 * 1024)))
 
 # ── Service Discovery URLs ───────────────────────────────────────────────
-AGENT_SERVICE_URL: str = os.getenv("AGENT_SERVICE_URL", "http://localhost:8001")
-VOICE_SERVICE_URL: str = os.getenv("VOICE_SERVICE_URL", "http://localhost:8002")
-VISION_SERVICE_URL: str = os.getenv("VISION_SERVICE_URL", "http://localhost:8003")
-SYNC_SERVICE_URL: str = os.getenv("SYNC_SERVICE_URL", "http://localhost:8004")
+AGENT_SERVICE_URL: str = os.getenv("AGENT_SERVICE_URL", "http://127.0.0.1:8001")
+VOICE_SERVICE_URL: str = os.getenv("VOICE_SERVICE_URL", "http://127.0.0.1:8002")
+VISION_SERVICE_URL: str = os.getenv("VISION_SERVICE_URL", "http://127.0.0.1:8003")
+SYNC_SERVICE_URL: str = os.getenv("SYNC_SERVICE_URL", "http://127.0.0.1:8004")
 
 # ── Supabase (Cloud PostgreSQL + pgvector) ──────────────────────────────
 SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")

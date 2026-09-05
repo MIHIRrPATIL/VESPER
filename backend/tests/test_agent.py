@@ -12,6 +12,7 @@ Verifies:
 from __future__ import annotations
 
 import pytest
+import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from httpx import ASGITransport, AsyncClient
 
@@ -403,6 +404,7 @@ class MockTaskRepository(TaskRepository):
             done=False,
             priority=task.priority,
             metadata=task.metadata or {},
+            created_at=datetime.datetime.now().astimezone(),
         )
         self._tasks.append(t)
         return t
@@ -430,7 +432,7 @@ class MockGoogleCalendarTool(GoogleCalendarTool):
     def is_configured(self) -> bool:
         return True
 
-    async def list_upcoming_events(self, max_results: int = 5) -> List[Dict[str, Any]]:
+    async def list_upcoming_events(self, max_results: int = 5, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
         return [
             {
                 "id": "mock_event_1",
@@ -655,6 +657,68 @@ async def test_task_specialist_reminders_and_events():
     list_after = await spec.execute("list_reminders", {})
     assert list_after.success is True
     assert list_after.data.get("count", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_task_specialist_calendar_date_filtering():
+    """Verifies that TaskSpecialist filters calendar events by date and speaks natural times."""
+    import datetime
+    from backend.agent.specialists.task_specialist import TaskSpecialist
+
+    class FilterableMockCalendar(GoogleCalendarTool):
+        def __init__(self) -> None:
+            pass
+
+        def is_configured(self) -> bool:
+            return True
+
+        async def list_upcoming_events(
+            self,
+            max_results: int = 10,
+            time_min: Any = None,
+            time_max: Any = None,
+            *args: Any,
+            **kwargs: Any,
+        ) -> List[Dict[str, Any]]:
+            now = datetime.datetime.now().astimezone()
+            today_str = now.strftime("%Y-%m-%d")
+            next_week_str = (now + datetime.timedelta(days=4)).strftime("%Y-%m-%d")
+
+            all_events = [
+                {
+                    "id": "ev_1",
+                    "summary": "Meeting with hemanshu sir regarding NDA Points",
+                    "start": f"{today_str}T16:15:00+05:30",
+                    "location": "Office",
+                },
+                {
+                    "id": "ev_2",
+                    "summary": "BTC Dashboard Weekly Sync-Up",
+                    "start": f"{next_week_str}T11:35:00+05:30",
+                    "location": "Meet",
+                },
+            ]
+
+            if time_max:
+                # Filter events before time_max
+                return [e for e in all_events if e["start"].startswith(today_str)]
+            return all_events
+
+    spec = TaskSpecialist(repo=MockTaskRepository(), calendar_tool=FilterableMockCalendar())
+
+    # Daily agenda should filter strictly for today
+    agenda = await spec.execute("get_daily_agenda", {"date": "today"})
+    assert agenda.success is True
+    assert len(agenda.data["calendar_events"]) == 1
+    assert "Meeting with hemanshu" in agenda.speech_summary
+    assert "+05:30" not in agenda.speech_summary
+    assert "4:15 PM" in agenda.speech_summary
+
+    # Query with date range
+    events_res = await spec.execute("list_calendar_events", {"date": "this week"})
+    assert events_res.success is True
+    assert "+05:30" not in events_res.speech_summary
+
 
 
 @pytest.mark.asyncio

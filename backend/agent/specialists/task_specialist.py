@@ -18,14 +18,197 @@ from typing import Any, Dict, List, Optional
 from backend.agent.specialists.base import BaseSpecialist, SpecialistResult
 from backend.agent.specialists.task_triage import AsyncTaskTriageWorker
 from backend.agent.tools.calendar_tool import GoogleCalendarTool
+from backend.agent.title_normalizer import classify_action_type, extract_time_phrase, normalize_title
 from backend.data.models import PriorityLevel, TaskCreate, TaskModel
 from backend.data.repositories.tasks import TaskRepository
+from backend.voice.tts.normalizer import SpeechNormalizer
 
 logger = logging.getLogger("vesper.agent.specialists.tasks")
 
 
 class TaskSpecialist(BaseSpecialist):
     """Specialist sub-agent managing tasks, time-anchored reminders, and Google Calendar events."""
+
+    @staticmethod
+    def _format_spoken_datetime(dt_str: Optional[str]) -> str:
+        if not dt_str:
+            return ""
+        return SpeechNormalizer.format_spoken_datetime(dt_str)
+
+    @classmethod
+    def _format_event_list_speech(
+        cls, events: List[Dict[str, Any]], context_label: Optional[str] = None
+    ) -> str:
+        """Formats upcoming events into articulate, natural spoken English without robotic repetition."""
+        if not events:
+            filter_label = f" for {context_label}" if context_label else ""
+            return f"Your calendar has no events scheduled{filter_label}, sir."
+
+        # Group events by summary to prevent repeating identical titles (e.g. recurring syncs)
+        groups: Dict[str, List[str]] = {}
+        for ev in events[:5]:
+            title = ev.get("summary") or "Scheduled Event"
+            time_str = ev.get("spoken_time") or cls._format_spoken_datetime(ev.get("start") or ev.get("time"))
+            groups.setdefault(title, []).append(time_str)
+
+        entries = []
+        for title, times in groups.items():
+            if len(times) == 1:
+                entries.append(f"'{title}' {times[0]}")
+            elif len(times) == 2:
+                entries.append(f"'{title}' {times[0]} and {times[1]}")
+            else:
+                formatted_times = ", ".join(times[:-1]) + f", and {times[-1]}"
+                entries.append(f"'{title}' {formatted_times}")
+
+        if len(entries) == 1:
+            joined = entries[0]
+        elif len(entries) == 2:
+            joined = f"{entries[0]}, and {entries[1]}"
+        else:
+            joined = ", ".join(entries[:-1]) + f", and {entries[-1]}"
+
+        if context_label:
+            return f"On your schedule for {context_label}: {joined}."
+        return f"Upcoming on your calendar: {joined}."
+
+    @staticmethod
+    def _resolve_filter_range(
+        date_val: Optional[str] = None,
+        start_val: Optional[str] = None,
+        end_val: Optional[str] = None,
+    ) -> tuple[Optional[datetime.datetime], Optional[datetime.datetime]]:
+        """Resolves conversational date filters or ranges into timezone-aware datetimes."""
+        import re
+
+        now = datetime.datetime.now().astimezone()
+        today = now.date()
+        local_tz = now.tzinfo
+
+        def parse_single_date(s: str) -> datetime.date:
+            s_clean = s.lower().strip()
+            if s_clean in ["today", "now"]:
+                return today
+            if s_clean == "tomorrow":
+                return today + datetime.timedelta(days=1)
+            if s_clean == "yesterday":
+                return today - datetime.timedelta(days=1)
+            days_map = {
+                "monday": 0, "tuesday": 1, "wednesday": 2,
+                "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
+            }
+            for day_name, day_idx in days_map.items():
+                if day_name in s_clean:
+                    days_ahead = (day_idx - today.weekday() + 7) % 7
+                    if days_ahead == 0 and "next" in s_clean:
+                        days_ahead = 7
+                    return today + datetime.timedelta(days=days_ahead)
+            m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", s_clean)
+            if m:
+                try:
+                    return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    pass
+            return today
+
+        if start_val or end_val:
+            d_start = parse_single_date(start_val) if start_val else today
+            d_end = parse_single_date(end_val) if end_val else d_start + datetime.timedelta(days=7)
+            t_min = datetime.datetime.combine(d_start, datetime.time.min, tzinfo=local_tz)
+            t_max = datetime.datetime.combine(d_end, datetime.time.max, tzinfo=local_tz)
+            return t_min, t_max
+
+        if date_val:
+            s_clean = date_val.lower().strip()
+            if "this week" in s_clean:
+                days_to_sunday = 6 - today.weekday()
+                t_min = datetime.datetime.combine(today, datetime.time.min, tzinfo=local_tz)
+                t_max = datetime.datetime.combine(today + datetime.timedelta(days=days_to_sunday), datetime.time.max, tzinfo=local_tz)
+                return t_min, t_max
+            elif "next week" in s_clean:
+                next_mon = today + datetime.timedelta(days=(7 - today.weekday()))
+                next_sun = next_mon + datetime.timedelta(days=6)
+                t_min = datetime.datetime.combine(next_mon, datetime.time.min, tzinfo=local_tz)
+                t_max = datetime.datetime.combine(next_sun, datetime.time.max, tzinfo=local_tz)
+                return t_min, t_max
+            else:
+                d = parse_single_date(s_clean)
+                t_min = datetime.datetime.combine(d, datetime.time.min, tzinfo=local_tz)
+                t_max = datetime.datetime.combine(d, datetime.time.max, tzinfo=local_tz)
+                return t_min, t_max
+
+        return None, None
+
+    @staticmethod
+    def _classify_task_timing(
+        task: Any,
+        t_min: Optional[datetime.datetime],
+        t_max: Optional[datetime.datetime],
+        local_tz: Any,
+    ) -> str:
+        """Classifies a task's timing relative to a time window [t_min, t_max].
+
+        Returns:
+            - 'scheduled': task.deadline falls within [t_min, t_max]
+            - 'created_window': task has no deadline, but task.created_at falls within [t_min, t_max]
+            - 'overdue': task.deadline < t_min
+            - 'backlog': task has no deadline, but task.created_at < t_min
+            - 'future': task.deadline > t_max or task.created_at > t_max
+            - 'current': when no filter window is specified or dates are absent
+        """
+        if not t_min or not t_max:
+            return "current"
+
+        def _to_tz(dt_val: Any) -> Optional[datetime.datetime]:
+            if not dt_val:
+                return None
+            if isinstance(dt_val, str):
+                try:
+                    dt_val = datetime.datetime.fromisoformat(dt_val)
+                except Exception:
+                    return None
+            if isinstance(dt_val, datetime.date) and not isinstance(dt_val, datetime.datetime):
+                dt_val = datetime.datetime.combine(dt_val, datetime.time.min)
+            if isinstance(dt_val, datetime.datetime):
+                if dt_val.tzinfo is None:
+                    return dt_val.replace(tzinfo=local_tz)
+                return dt_val.astimezone(local_tz)
+            return None
+
+        deadline = _to_tz(getattr(task, "deadline", None))
+        created = _to_tz(getattr(task, "created_at", None))
+
+        if deadline is not None:
+            if t_min <= deadline <= t_max:
+                return "scheduled"
+            elif deadline < t_min:
+                return "overdue"
+            else:
+                return "future"
+
+        if created is not None:
+            if t_min <= created <= t_max:
+                return "created_window"
+            elif created < t_min:
+                return "backlog"
+            else:
+                return "future"
+
+        return "created_window"
+
+    async def _fetch_calendar_events(
+        self,
+        max_results: int = 10,
+        time_min: Optional[datetime.datetime] = None,
+        time_max: Optional[datetime.datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Safely queries calendar events supporting both time-filtered and legacy/mock signatures."""
+        try:
+            return await self.calendar.list_upcoming_events(
+                max_results=max_results, time_min=time_min, time_max=time_max
+            )
+        except TypeError:
+            return await self.calendar.list_upcoming_events(max_results=max_results)
 
     def __init__(
         self,
@@ -130,11 +313,23 @@ class TaskSpecialist(BaseSpecialist):
             },
             {
                 "name": "list_calendar_events",
-                "description": "Lists upcoming scheduled appointments and events from Google Calendar.",
+                "description": "Lists scheduled appointments and events from Google Calendar. Can filter by day (e.g. 'today', 'tomorrow', 'this week', 'next week') or date range (start_date, end_date).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "max_results": {"type": "integer", "description": "Maximum events to fetch (default: 5)."},
+                        "date": {
+                            "type": "string",
+                            "description": "Optional single day or relative term (e.g. 'today', 'tomorrow', 'this week', 'next week', 'YYYY-MM-DD').",
+                        },
+                        "start_date": {
+                            "type": "string",
+                            "description": "Optional start of date filter range (e.g. 'today', 'Monday', '2026-09-05').",
+                        },
+                        "end_date": {
+                            "type": "string",
+                            "description": "Optional end of date filter range (e.g. 'Friday', '2026-09-12').",
+                        },
+                        "max_results": {"type": "integer", "description": "Maximum events to fetch (default: 10)."},
                     },
                 },
             },
@@ -167,8 +362,16 @@ class TaskSpecialist(BaseSpecialist):
             },
             {
                 "name": "get_daily_agenda",
-                "description": "Retrieves the consolidated daily briefing: today's calendar events, active reminders, and pending tasks.",
-                "parameters": {"type": "object", "properties": {}},
+                "description": "Retrieves the consolidated daily briefing: today's calendar events, active reminders, and pending tasks. Supports querying a specific target day.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "date": {
+                            "type": "string",
+                            "description": "Target date for the daily briefing (e.g. 'today', 'tomorrow', 'YYYY-MM-DD'). Defaults to 'today'.",
+                        },
+                    },
+                },
             },
         ]
 
@@ -187,6 +390,9 @@ class TaskSpecialist(BaseSpecialist):
 
                 if not reminder_text:
                     return SpecialistResult(success=False, action=action, error="Reminder content is required.")
+
+                # Clean and normalize reminder text, stripping duplicate trailing times or filler
+                reminder_text = normalize_title(reminder_text)
                 if not time_str:
                     time_str = "today"
 
@@ -215,7 +421,7 @@ class TaskSpecialist(BaseSpecialist):
                     )
                 )
 
-                time_display = cal_event.get("start") or time_str
+                time_display = self._format_spoken_datetime(cal_event.get("start")) or time_str
                 speech = f"Very well, sir. I have set a reminder for {time_display}: '{reminder_text}', and logged it onto your calendar."
                 return SpecialistResult(
                     success=True,
@@ -241,13 +447,19 @@ class TaskSpecialist(BaseSpecialist):
                 if not title:
                     return SpecialistResult(success=False, action=action, error="Task title is required.")
 
-                # If the title clearly requests a reminder with a time anchor, delegate to set_reminder!
-                import re
-                time_match = re.search(r"(?:at|by|for)\s+(\d{1,2}[:.]?\d{0,2}\s*(?:am|pm)?\s*(?:today|tomorrow)?)", title, re.IGNORECASE)
-                if ("remind" in title.lower() or "reminder" in title.lower()) and time_match:
-                    reminder_clean = re.sub(r"(?:remind me to|add a reminder (?:at|to|that)?|reminder:?)", "", title, flags=re.IGNORECASE).strip()
-                    time_found = time_match.group(1).strip()
-                    return await self.execute("set_reminder", {"reminder": reminder_clean, "time": time_found, "priority": params.get("priority")})
+                # If the title clearly requests a reminder with a time anchor, or is classified as reminder, delegate to set_reminder!
+                action_type = classify_action_type(title)
+                extracted_time = extract_time_phrase(title)
+
+                if action_type == "reminder" or (action_type == "event" and extracted_time):
+                    norm_title = normalize_title(title)
+                    time_found = str(params.get("time") or extracted_time or "today").strip()
+                    if action_type == "event":
+                        return await self.execute("schedule_event", {"summary": norm_title, "time": time_found})
+                    return await self.execute("set_reminder", {"reminder": norm_title, "time": time_found, "priority": params.get("priority")})
+
+                # Clean conversational noise and trailing dates
+                title = normalize_title(title)
 
                 p_str = params.get("priority", "normal").lower()
                 priority = PriorityLevel.NORMAL
@@ -292,6 +504,7 @@ class TaskSpecialist(BaseSpecialist):
                 if not start_time:
                     return SpecialistResult(success=False, action=action, error="Start time is required.")
 
+                summary = normalize_title(summary)
                 end_time = params.get("end_time")
                 location = params.get("location")
                 description = params.get("description")
@@ -304,8 +517,8 @@ class TaskSpecialist(BaseSpecialist):
                     location=location,
                 )
 
-                time_display = cal_event.get("start", start_time)
-                speech = f"Scheduled '{summary}' for {time_display} on your Google Calendar, sir."
+                time_display = self._format_spoken_datetime(cal_event.get("start")) or start_time
+                speech = f"Scheduled '{summary}' {time_display} on your Google Calendar, sir."
                 return SpecialistResult(
                     success=True,
                     action="schedule_event",
@@ -357,16 +570,33 @@ class TaskSpecialist(BaseSpecialist):
             # ── 5. List Tasks ─────────────────────────────────────────────────
             elif act in ["list_tasks", "get_tasks", "list", "show_tasks"]:
                 include_done = params.get("include_completed", False)
-                limit = params.get("limit", 5)
+                limit = int(params.get("limit", 5))
+                date_param = str(params.get("date") or "").strip().lower()
+                query_param = str(params.get("query") or (context or {}).get("query") or "").strip().lower()
+                is_today = date_param == "today" or "today" in query_param
 
-                tasks = self.repo.list(include_completed=include_done, limit=limit)
-                task_items = [{"id": t.id, "title": t.title, "priority": t.priority, "done": t.done} for t in tasks]
-
-                if not task_items:
-                    speech = "You have no pending tasks on your list at the moment, sir."
+                all_tasks = self.repo.list(include_completed=include_done, limit=50)
+                if is_today:
+                    local_tz = datetime.datetime.now().astimezone().tzinfo
+                    t_min, t_max = self._resolve_filter_range(date_val="today")
+                    filtered = [
+                        t for t in all_tasks
+                        if self._classify_task_timing(t, t_min, t_max, local_tz) in ("scheduled", "created_window")
+                    ][:limit]
+                    task_items = [{"id": t.id, "title": t.title, "priority": t.priority, "done": t.done} for t in filtered]
+                    if not task_items:
+                        speech = "You have no tasks scheduled for today, sir."
+                    else:
+                        titles = ", ".join([f"'{t['title']}'" for t in task_items[:3]])
+                        speech = f"You have {len(task_items)} task{'s' if len(task_items) != 1 else ''} scheduled for today: {titles}."
                 else:
-                    titles = ", ".join([f"'{t['title']}'" for t in task_items[:3]])
-                    speech = f"You have {len(task_items)} pending tasks, including {titles}."
+                    tasks = all_tasks[:limit]
+                    task_items = [{"id": t.id, "title": t.title, "priority": t.priority, "done": t.done} for t in tasks]
+                    if not task_items:
+                        speech = "You have no pending tasks on your list at the moment, sir."
+                    else:
+                        titles = ", ".join([f"'{t['title']}'" for t in task_items[:3]])
+                        speech = f"You have {len(task_items)} pending tasks, including {titles}."
 
                 return SpecialistResult(
                     success=True,
@@ -377,17 +607,34 @@ class TaskSpecialist(BaseSpecialist):
                 )
 
             # ── 6. List Calendar Events ───────────────────────────────────────
-            elif act in ["list_calendar_events", "get_calendar_events", "list_events", "calendar"]:
-                max_res = int(params.get("max_results", 5))
-                events = await self.calendar.list_upcoming_events(max_results=max_res)
-                is_sandbox = any(e.get("source") == "sandbox" for e in events)
-                if not events:
-                    speech = "Your calendar has no upcoming events scheduled, sir."
-                else:
-                    ev_strings = [f"'{e['summary']}' at {e['start']}" for e in events[:2]]
-                    speech = f"Upcoming on your calendar: {', '.join(ev_strings)}."
+            elif act in ["list_calendar_events", "get_calendar_events", "list_events", "calendar", "events"]:
+                max_res = int(params.get("max_results", 10))
+                date_filter = params.get("date") or params.get("day")
+                start_filter = params.get("start_date") or params.get("from") or params.get("start")
+                end_filter = params.get("end_date") or params.get("to") or params.get("end")
 
-                res_data: dict[str, Any] = {"events": events, "count": len(events)}
+                t_min, t_max = self._resolve_filter_range(date_val=date_filter, start_val=start_filter, end_val=end_filter)
+                events = await self._fetch_calendar_events(max_results=max_res, time_min=t_min, time_max=t_max)
+                is_sandbox = any(e.get("source") == "sandbox" for e in events)
+
+                formatted_events = [
+                    {
+                        "id": e.get("id"),
+                        "summary": e.get("summary"),
+                        "start": e.get("start"),
+                        "spoken_time": self._format_spoken_datetime(e.get("start")),
+                        "location": e.get("location", ""),
+                    }
+                    for e in events
+                ]
+
+                if not formatted_events:
+                    filter_label = f" for {date_filter}" if date_filter else ""
+                    speech = f"Your calendar has no events scheduled{filter_label}, sir."
+                else:
+                    speech = self._format_event_list_speech(formatted_events)
+
+                res_data: dict[str, Any] = {"events": formatted_events, "count": len(formatted_events)}
                 if is_sandbox:
                     res_data["source"] = "sandbox"
 
@@ -396,7 +643,7 @@ class TaskSpecialist(BaseSpecialist):
                     action="list_calendar_events",
                     data=res_data,
                     speech_summary=speech,
-                    card_payload={"type": "calendar_events_list", "events": events},
+                    card_payload={"type": "calendar_events_list", "events": formatted_events},
                 )
 
             # ── 7. Complete Task ──────────────────────────────────────────────
@@ -465,30 +712,105 @@ class TaskSpecialist(BaseSpecialist):
 
             # ── 8. Consolidated Daily Agenda ──────────────────────────────────
             elif act in ["get_daily_agenda", "daily_agenda", "agenda", "schedule"]:
-                pending_tasks = self.repo.list(include_completed=False, limit=5)
-                events = await self.calendar.list_upcoming_events(max_results=3)
+                target_date_str = str(params.get("date") or "").strip()
+                if not target_date_str or target_date_str.lower() == "today":
+                    # Check if query or context specifies a different date/range
+                    q_ctx = str(params.get("query") or (context or {}).get("query") or "").lower()
+                    if "next week" in q_ctx:
+                        target_date_str = "next week"
+                    elif "this week" in q_ctx:
+                        target_date_str = "this week"
+                    elif "tomorrow" in q_ctx:
+                        target_date_str = "tomorrow"
+                    elif "yesterday" in q_ctx:
+                        target_date_str = "yesterday"
+                    else:
+                        for day_name in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+                            if day_name in q_ctx:
+                                target_date_str = f"next {day_name}" if "next" in q_ctx else day_name
+                                break
+                    target_date_str = target_date_str or "today"
+
+                t_min, t_max = self._resolve_filter_range(date_val=target_date_str)
+                local_tz = datetime.datetime.now().astimezone().tzinfo
+
+                all_pending = self.repo.list(include_completed=False, limit=50)
+                # Fetch events specifically within target date window
+                events = await self._fetch_calendar_events(max_results=10, time_min=t_min, time_max=t_max)
                 is_sandbox = any(e.get("source") == "sandbox" for e in events)
 
-                reminders = [t for t in pending_tasks if (t.metadata and t.metadata.get("item_type") == "reminder")]
-                pure_tasks = [t for t in pending_tasks if not (t.metadata and t.metadata.get("item_type") == "reminder")]
+                reminders = [t for t in all_pending if (t.metadata and t.metadata.get("item_type") == "reminder")]
+                pure_tasks = [t for t in all_pending if not (t.metadata and t.metadata.get("item_type") == "reminder")]
 
-                task_list = [{"title": t.title, "priority": t.priority} for t in pure_tasks]
-                reminder_list = [{"title": r.title} for r in reminders]
-                event_list = [{"summary": e.get("summary"), "time": e.get("start")} for e in events]
+                today_tasks = [
+                    t for t in pure_tasks
+                    if self._classify_task_timing(t, t_min, t_max, local_tz) in ("scheduled", "created_window")
+                ][:5]
+                overdue_tasks = [
+                    t for t in pure_tasks
+                    if self._classify_task_timing(t, t_min, t_max, local_tz) == "overdue"
+                ]
+                backlog_tasks = [
+                    t for t in pure_tasks
+                    if self._classify_task_timing(t, t_min, t_max, local_tz) == "backlog"
+                ]
+                today_reminders = [
+                    r for r in reminders
+                    if self._classify_task_timing(r, t_min, t_max, local_tz) in ("scheduled", "created_window")
+                ][:5]
+
+                task_list = [{"title": t.title, "priority": t.priority} for t in today_tasks]
+                reminder_list = [{"title": r.title} for r in today_reminders]
+                event_list = [
+                    {
+                        "summary": e.get("summary"),
+                        "time": e.get("start"),
+                        "spoken_time": self._format_spoken_datetime(e.get("start")),
+                    }
+                    for e in events
+                ]
 
                 speech_parts = []
+                day_label = "today" if target_date_str.lower() in ["today", ""] else target_date_str
+                prep = "for " if day_label in ["next week", "this week"] else ""
                 if event_list:
-                    ev = event_list[0]
-                    speech_parts.append(f"Your next scheduled event is '{ev['summary']}' at {ev['time']}.")
+                    agenda_speech = self._format_event_list_speech(event_list, context_label=day_label)
+                    speech_parts.append(agenda_speech)
+                else:
+                    # Look ahead beyond this date window for the next upcoming event so Alfred can inform user
+                    next_events = await self._fetch_calendar_events(max_results=1, time_min=t_max)
+                    if next_events:
+                        nxt = next_events[0]
+                        nxt_spoken = self._format_spoken_datetime(nxt.get("start"))
+                        speech_parts.append(f"You have no events scheduled {prep}{day_label}, sir. Your next event is '{nxt['summary']}' {nxt_spoken}.")
+                    else:
+                        speech_parts.append(f"You have no events scheduled {prep}{day_label}, sir.")
+
                 if reminder_list:
-                    speech_parts.append(f"You have {len(reminder_list)} active reminder{'s' if len(reminder_list) != 1 else ''}.")
+                    speech_parts.append(f"You have {len(reminder_list)} active reminder{'s' if len(reminder_list) != 1 else ''} for {day_label}.")
                 if task_list:
-                    speech_parts.append(f"You have {len(task_list)} pending task{'s' if len(task_list) != 1 else ''} on your agenda.")
-                elif not speech_parts:
-                    speech_parts.append("Your schedule and task list are currently all clear, sir.")
+                    titles = ", ".join([f"'{t['title']}'" for t in task_list[:3]])
+                    speech_parts.append(f"You have {len(task_list)} pending task{'s' if len(task_list) != 1 else ''} scheduled for {day_label}: {titles}.")
+                    if overdue_tasks:
+                        speech_parts.append(f"You also have {len(overdue_tasks)} overdue task{'s' if len(overdue_tasks) != 1 else ''}.")
+                    elif backlog_tasks:
+                        speech_parts.append(f"Additionally, you have {len(backlog_tasks)} older task{'s' if len(backlog_tasks) != 1 else ''} in your general backlog.")
+                else:
+                    if overdue_tasks:
+                        speech_parts.append(f"You have no tasks scheduled for {day_label}, sir, though you have {len(overdue_tasks)} overdue task{'s' if len(overdue_tasks) != 1 else ''}.")
+                    elif backlog_tasks:
+                        speech_parts.append(f"You have no tasks scheduled for {day_label}, sir (with {len(backlog_tasks)} older task{'s' if len(backlog_tasks) != 1 else ''} in your general backlog).")
+                    elif not speech_parts:
+                        speech_parts.append(f"Your schedule and task list for {day_label} are currently all clear, sir.")
 
                 speech = " ".join(speech_parts)
-                agenda_data: dict[str, Any] = {"tasks": task_list, "reminders": reminder_list, "calendar_events": event_list}
+                agenda_data: dict[str, Any] = {
+                    "tasks": task_list,
+                    "reminders": reminder_list,
+                    "calendar_events": event_list,
+                    "overdue_count": len(overdue_tasks),
+                    "backlog_count": len(backlog_tasks),
+                }
                 if is_sandbox:
                     agenda_data["source"] = "sandbox"
 
@@ -502,6 +824,8 @@ class TaskSpecialist(BaseSpecialist):
                         "tasks": task_list,
                         "reminders": reminder_list,
                         "events": event_list,
+                        "overdue_count": len(overdue_tasks),
+                        "backlog_count": len(backlog_tasks),
                     },
                 )
 

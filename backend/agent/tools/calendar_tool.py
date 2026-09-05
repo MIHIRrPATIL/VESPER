@@ -34,8 +34,13 @@ class GoogleCalendarTool:
         """Returns True if Google Calendar credentials are present."""
         return bool(self.client_id and self.client_secret) or self.credentials_file.exists()
 
-    async def list_upcoming_events(self, max_results: int = 5) -> List[Dict[str, Any]]:
-        """Lists upcoming calendar events."""
+    async def list_upcoming_events(
+        self,
+        max_results: int = 10,
+        time_min: Optional[datetime.datetime] = None,
+        time_max: Optional[datetime.datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Lists upcoming calendar events with optional time boundaries."""
         if not self.is_configured():
             return []
 
@@ -67,15 +72,26 @@ class GoogleCalendarTool:
                         token.write(creds.to_json())
 
                 service: Any = build("calendar", "v3", credentials=creds)
-                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-                events_result = service.events().list(
-                    calendarId="primary",
-                    timeMin=now_iso,
-                    maxResults=max_results,
-                    singleEvents=True,
-                    orderBy="startTime",
-                ).execute()
+                local_tz = datetime.datetime.now().astimezone().tzinfo
+                if time_min:
+                    t_min = time_min if time_min.tzinfo else time_min.replace(tzinfo=local_tz)
+                    time_min_iso = t_min.astimezone(datetime.timezone.utc).isoformat()
+                else:
+                    time_min_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+                params: dict[str, Any] = {
+                    "calendarId": "primary",
+                    "timeMin": time_min_iso,
+                    "maxResults": max_results,
+                    "singleEvents": True,
+                    "orderBy": "startTime",
+                }
+                if time_max:
+                    t_max = time_max if time_max.tzinfo else time_max.replace(tzinfo=local_tz)
+                    params["timeMax"] = t_max.astimezone(datetime.timezone.utc).isoformat()
+
+                events_result = service.events().list(**params).execute()
 
                 items = events_result.get("items", [])
                 parsed = []

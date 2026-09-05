@@ -95,7 +95,24 @@ def play_audio_file(audio_path: Path, delete_after: bool = True):
     """Plays audio through system speakers via available low-latency audio player and cleans up."""
     p_str = str(audio_path)
     try:
-        for cmd in [["pw-play", p_str], ["paplay", p_str], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", p_str], ["mpv", "--no-terminal", p_str]]:
+        # 1. Windows native winsound playback
+        if sys.platform == "win32":
+            try:
+                import winsound
+                winsound.PlaySound(p_str, winsound.SND_FILENAME)
+                return
+            except Exception:
+                pass
+
+        # 2. Command-line players (Linux, macOS, Windows)
+        candidate_cmds = [
+            ["afplay", p_str],  # macOS built-in
+            ["pw-play", p_str], # Linux PipeWire
+            ["paplay", p_str],  # Linux PulseAudio
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", p_str],
+            ["mpv", "--no-terminal", p_str],
+        ]
+        for cmd in candidate_cmds:
             if shutil.which(cmd[0]):
                 try:
                     subprocess.run(cmd, check=False)
@@ -536,7 +553,7 @@ def run_gesture_monitor(fps: float = 6.0):
     print(f"  • {CYAN}Thumbs Up{RESET}       -> Volume Up (+10%)")
     print(f"  • {CYAN}Thumbs Down{RESET}     -> Volume Down (-10%)")
     print(f"  • {CYAN}Pointing Up{RESET}     -> Toggle Focus Mode")
-    print(f"  • {CYAN}Rock On 🤟{RESET}      -> Lock / Unlock Gestures (Hold 1s)")
+    print(f"  • {CYAN}Rock On{RESET}          -> Lock / Unlock Gestures (Hold 1s)")
     print(f"  • {CYAN}Air Tap / Pinch{RESET} -> Select Widget\n")
     print(f"{YELLOW}Hold your hand 1-3 feet in front of your webcam to trigger gestures.{RESET}")
     print(f"{DIM}(Press Ctrl+C to exit monitor){RESET}\n")
@@ -547,12 +564,33 @@ def run_gesture_monitor(fps: float = 6.0):
         print(f"{RED}[FAIL] Could not load MediaPipe gesture recognizer model.{RESET}")
         return
 
-    last_gesture_time = 0.0
+    last_gesture_times: dict[str, float] = {}
     last_gesture_name = "NONE"
-    cooldown = 1.0
+    last_gesture_time = 0.0
+    candidate_gesture = "NONE"
+    candidate_streak = 0
+    none_streak = 0
+    gesture_awaiting_release: set[str] = set()
+
+    gesture_cooldowns = {
+        "VOLUME_DIAL": 0.12,
+        "THUMB_UP": 0.35,
+        "THUMB_DOWN": 0.35,
+        "VOLUME_UP": 0.35,
+        "VOLUME_DOWN": 0.35,
+        "CLOSED_FIST": 1.5,
+        "OPEN_PALM": 1.5,
+        "PEACE_SIGN": 2.0,
+        "POINTING_UP": 2.0,
+        "NEXT_TRACK": 1.6,
+        "PREV_TRACK": 1.6,
+        "AIR_TAP": 1.2,
+        "GESTURE_TOGGLE": 2.5,
+        "ROCK_ON": 2.5,
+    }
 
     async def _async_monitor():
-        nonlocal last_gesture_time, last_gesture_name
+        nonlocal last_gesture_time, last_gesture_name, candidate_gesture, candidate_streak, none_streak
         loop_interval = 1.0 / max(fps, 1.0)
         frames_count = 0
         t_start = time.time()
@@ -565,42 +603,120 @@ def run_gesture_monitor(fps: float = 6.0):
                     await asyncio.sleep(loop_interval)
                     continue
 
-                gesture, conf = worker._evaluate_gesture_heuristic(frame)
                 now = time.time()
 
-                if gesture != "NONE" and conf >= 0.65:
-                    if gesture != last_gesture_name or (now - last_gesture_time) > cooldown:
+                # If tracking is paused, check only for deliberate resume hold
+                if worker.state.tracking_paused:
+                    toggle_gesture, toggle_conf = worker._check_toggle_gesture_only(frame)
+                    if toggle_gesture.startswith("GESTURE_TOGGLE"):
+                        worker.state.tracking_paused = False
+                        worker._toggle_lockout_until = now + 2.5
+                        gesture_awaiting_release.add("ROCK_ON")
+                        gesture_awaiting_release.add("GESTURE_TOGGLE")
+                        await worker._dispatch_gesture("GESTURE_TOGGLE:RESUMED", toggle_conf)
+                        last_gesture_name = "GESTURE_TOGGLE:RESUMED"
                         last_gesture_time = now
-                        last_gesture_name = gesture
-                        await worker._dispatch_gesture(gesture, conf)
-
-                        # Action badge
-                        act_str = ""
-                        snap = sync_manager.get_snapshot()
-                        if gesture in ("CLOSED_FIST", "MUTE"):
-                            act_str = f"{RED}[MUTE: Vol=0%]{RESET}"
-                        elif gesture in ("OPEN_PALM", "RESUME", "PLAY"):
-                            act_str = f"{GREEN}[PLAY: Vol={snap.master_volume}%]{RESET}"
-                        elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT"):
-                            act_str = f"{CYAN}[NEXT TRACK]{RESET}"
-                        elif gesture in ("PREV_TRACK", "SWIPE_LEFT"):
-                            act_str = f"{CYAN}[PREV TRACK]{RESET}"
-                        elif gesture in ("PEACE_SIGN", "TOGGLE_ZEN"):
-                            act_str = f"{MAGENTA}[ZEN MODE: {'ON' if snap.zen_mode else 'OFF'}]{RESET}"
-                        elif gesture in ("THUMB_UP", "VOLUME_UP"):
-                            act_str = f"{GREEN}[VOL UP: {snap.master_volume}%]{RESET}"
-                        elif gesture in ("THUMB_DOWN", "VOLUME_DOWN"):
-                            act_str = f"{YELLOW}[VOL DOWN: {snap.master_volume}%]{RESET}"
-                        elif gesture in ("POINTING_UP", "TOGGLE_FOCUS"):
-                            act_str = f"{CYAN}[FOCUS: {'ON' if snap.focus_mode else 'OFF'}]{RESET}"
-                        elif gesture == "AIR_TAP":
-                            act_str = f"{GREEN}[AIR TAP SELECT]{RESET}"
-
-                        # Clear status line and print persistent trigger log
                         sys.stdout.write("\r" + " " * 95 + "\r")
                         sys.stdout.flush()
                         t_str = time.strftime("%H:%M:%S")
-                        print(f"  {GREEN}[GESTURE]{RESET} {t_str} | {BOLD}{gesture:<14}{RESET} (conf: {conf:.2f}) -> {act_str}")
+                        print(f"  {GREEN}[GESTURE]{RESET} {t_str} | {BOLD}{'RESUMED':<14}{RESET} (conf: {toggle_conf:.2f}) -> {YELLOW}[GESTURES: ACTIVE]{RESET}")
+                    await asyncio.sleep(loop_interval)
+                    continue
+
+                gesture, conf = worker._evaluate_gesture_heuristic(frame)
+
+                if gesture == "NONE" or conf < 0.55:
+                    none_streak += 1
+                    candidate_gesture = "NONE"
+                    candidate_streak = 0
+                    if none_streak >= 1:
+                        gesture_awaiting_release.clear()
+                    await asyncio.sleep(loop_interval)
+                    continue
+
+                none_streak = 0
+                if gesture == candidate_gesture:
+                    candidate_streak += 1
+                else:
+                    candidate_gesture = gesture
+                    candidate_streak = 1
+
+                # Plain ROCK_ON is an in-progress hold; wait for 1.0s to complete
+                if gesture == "ROCK_ON":
+                    await asyncio.sleep(loop_interval)
+                    continue
+
+                is_volume_dial = gesture.startswith("VOLUME_DIAL:")
+                is_thumb_volume = gesture in ("THUMB_UP", "THUMB_DOWN", "VOLUME_UP", "VOLUME_DOWN")
+                is_volume = is_volume_dial or is_thumb_volume
+
+                # Streak confirmation
+                if is_volume_dial or gesture in ("NEXT_TRACK", "PREV_TRACK") or gesture.startswith("GESTURE_TOGGLE"):
+                    req_streak = 1
+                else:
+                    req_streak = 2
+
+                if candidate_streak < req_streak:
+                    await asyncio.sleep(loop_interval)
+                    continue
+
+                # Hysteresis / Release requirement for non-volume gestures
+                base_g = gesture.split(":")[0]
+                if not is_volume:
+                    if base_g in gesture_awaiting_release or gesture in gesture_awaiting_release:
+                        await asyncio.sleep(loop_interval)
+                        continue
+
+                # Per-gesture cooldown
+                g_cooldown = gesture_cooldowns.get(base_g, 1.5)
+                if (now - last_gesture_times.get(base_g, 0.0)) < g_cooldown:
+                    await asyncio.sleep(loop_interval)
+                    continue
+
+                last_gesture_times[base_g] = now
+                last_gesture_times[gesture] = now
+                last_gesture_time = now
+                last_gesture_name = gesture
+
+                if not is_volume:
+                    gesture_awaiting_release.clear()
+                    gesture_awaiting_release.add(base_g)
+                    gesture_awaiting_release.add(gesture)
+
+                if gesture.startswith("GESTURE_TOGGLE"):
+                    worker._toggle_lockout_until = now + 2.5
+
+                await worker._dispatch_gesture(gesture, conf)
+
+                # Action badge
+                act_str = ""
+                snap = sync_manager.get_snapshot()
+                if gesture in ("CLOSED_FIST", "MUTE"):
+                    act_str = f"{RED}[MUTE: Vol=0%]{RESET}"
+                elif gesture in ("OPEN_PALM", "RESUME", "PLAY"):
+                    act_str = f"{GREEN}[PLAY: Vol={snap.master_volume}%]{RESET}"
+                elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT"):
+                    act_str = f"{CYAN}[NEXT TRACK]{RESET}"
+                elif gesture in ("PREV_TRACK", "SWIPE_LEFT"):
+                    act_str = f"{CYAN}[PREV TRACK]{RESET}"
+                elif gesture in ("PEACE_SIGN", "TOGGLE_ZEN"):
+                    act_str = f"{MAGENTA}[ZEN MODE: {'ON' if snap.zen_mode else 'OFF'}]{RESET}"
+                elif gesture in ("THUMB_UP", "VOLUME_UP"):
+                    act_str = f"{GREEN}[VOL UP: {snap.master_volume}%]{RESET}"
+                elif gesture in ("THUMB_DOWN", "VOLUME_DOWN"):
+                    act_str = f"{YELLOW}[VOL DOWN: {snap.master_volume}%]{RESET}"
+                elif gesture in ("POINTING_UP", "TOGGLE_FOCUS"):
+                    act_str = f"{CYAN}[FOCUS: {'ON' if snap.focus_mode else 'OFF'}]{RESET}"
+                elif gesture in ("ROCK_ON", "GESTURE_LOCK") or gesture.startswith("GESTURE_TOGGLE"):
+                    act_str = f"{YELLOW}[GESTURES: {'PAUSED' if worker.state.tracking_paused else 'ACTIVE'}]{RESET}"
+                elif gesture == "AIR_TAP":
+                    act_str = f"{GREEN}[AIR TAP SELECT]{RESET}"
+
+                # Clear status line and print persistent trigger log
+                sys.stdout.write("\r" + " " * 95 + "\r")
+                sys.stdout.flush()
+                t_str = time.strftime("%H:%M:%S")
+                print(f"  {GREEN}[GESTURE]{RESET} {t_str} | {BOLD}{gesture:<14}{RESET} (conf: {conf:.2f}) -> {act_str}")
 
                 frames_count += 1
                 curr_fps = frames_count / max(0.1, (now - t_start))

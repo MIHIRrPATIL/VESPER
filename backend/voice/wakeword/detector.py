@@ -197,8 +197,6 @@ class WakeWordDetector:
                 rms_amplitude=rms,
                 timestamp=time.time(),
             )
-            if self.on_wake_word:
-                self.on_wake_word(evt)
             return evt
 
         return WakeWordEvent(

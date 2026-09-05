@@ -22,6 +22,7 @@ class Channel(str, Enum):
     SYSTEM = "SYSTEM"
     AGENT = "AGENT"
     SYNC = "SYNC"
+    VISION = "VISION"
 
 
 # ── Client Types ─────────────────────────────────────────────────────────
@@ -43,13 +44,25 @@ class EventType(str, Enum):
     PING = "PING"
     PONG = "PONG"
 
-    # Voice & Speech
+    # Voice & Speech Lifecycle
+    WAKE_WORD_DETECTED = "WAKE_WORD_DETECTED"
+    WAKE_WORD_TOGGLE = "WAKE_WORD_TOGGLE"
+    WAKE_WORD_STATE = "WAKE_WORD_STATE"
     VOICE_COMMAND = "VOICE_COMMAND"
     VOICE_AUDIO_CHUNK = "VOICE_AUDIO_CHUNK"
+    AGENT_ACTIVATING = "AGENT_ACTIVATING"
     AGENT_RESPONSE = "AGENT_RESPONSE"
+    AGENT_SPEAKING = "AGENT_SPEAKING"
+    AGENT_IDLE = "AGENT_IDLE"
 
     # Gestures
     GESTURE_EVENT = "GESTURE_EVENT"
+    GESTURE_TOGGLE = "GESTURE_TOGGLE"
+
+    # Vision & Remote Display
+    SCREEN_CAPTURE_REQUEST = "SCREEN_CAPTURE_REQUEST"
+    SCREEN_CAPTURE_RESPONSE = "SCREEN_CAPTURE_RESPONSE"
+    CAMERA_FRAME_STREAM = "CAMERA_FRAME_STREAM"
 
     # Mobile Notifications
     NOTIFICATION_RELAY = "NOTIFICATION_RELAY"

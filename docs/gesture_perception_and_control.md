@@ -52,7 +52,7 @@ VESPER supports an expanded, touchless gesture vocabulary designed for immediate
 | **`THUMB_DOWN`** | **Volume Down (-10%)** | `Channel.SYSTEM` : `SET_VOLUME` (`volume=cur-10`) | Decrements system master volume by -10% |
 | **`PEACE_SIGN`** | **Toggle Zen Mode** | `Channel.SYSTEM` : `ZEN_MODE_STATE` (`toggle=True`) | Toggles ambient distraction-free Zen Mode across the cluster |
 | **`POINTING_UP`** | **Toggle Focus Mode** | `Channel.SYSTEM` : `FOCUS_MODE_STATE` (`toggle=True`) | Toggles high-productivity Focus Mode across the cluster |
-| **`ROCK_ON` 🤟 (`ILoveYou`)** | **Lock / Unlock Gesture Tracking** | `Channel.GESTURE` : `GESTURE_TOGGLE` (`:PAUSED` / `:RESUMED`) | Deliberate hold for 1.0s locks or unlocks gesture tracking with a 2.0s anti-flapping buffer |
+| **`ROCK_ON` (`ILoveYou`)** | **Lock / Unlock Gesture Tracking** | `Channel.GESTURE` : `GESTURE_TOGGLE` (`:PAUSED` / `:RESUMED`) | Deliberate hold for 1.0s locks or unlocks gesture tracking with a 2.0s anti-flapping buffer |
 | **`AIR_TAP`** | **Select / Activate Widget** | `Channel.GESTURE` : `AIR_TAP` | Quick pinch tap in the air for desk UI interaction |
 
 ---
@@ -142,22 +142,33 @@ Hand tracking is susceptible to jitter and flicker when moving hands across the 
 
 1. **Confidence Threshold Gating**:
    Static poses require `confidence >= 0.50` (or 0.55 for edge poses).
-2. **Horizontal Velocity Motion Gating (`is_hand_moving`)**:
+2. **Candidate Streak Requirement**:
+   A detected pose must persist for at least $N = 2$ consecutive frames before being considered valid. Single-frame blips and transient hand transitions are discarded.
+3. **Release Requirement & Hysteresis Lock (`_gesture_awaiting_release`)**:
+   Non-volume gestures (`CLOSED_FIST`, `PEACE_SIGN`, `POINTING_UP`, `ROCK_ON`, `AIR_TAP`) cannot be triggered repeatedly without releasing the hand back to `NONE`. Once emitted, the gesture is placed in `_gesture_awaiting_release`, preventing repetitive firing while the user holds their hand steady.
+4. **Volume Repeat Exception**:
+   Volume adjustment gestures (`THUMB_UP`, `THUMB_DOWN`, `VOLUME_DIAL`) bypass the release requirement to enable continuous, smooth volume ramping across frames with a shortened 0.35s throttle.
+5. **Continuous Volume Dial Tracking**:
+   When the thumb tip and index tip pinch together, hand rotation angle (10° to 170°) is mapped linearly to master volume percentage $[0, 100]\%$. Throttles emissions if the dial value has not changed.
+6. **Horizontal Velocity Motion Gating (`is_hand_moving`)**:
    When the user's hand is in active lateral motion across frames ($\Delta x \ge 0.035$ or speed $\ge 0.22$), static pose emissions (`OPEN_PALM` and `CLOSED_FIST`) are strictly suppressed. This ensures that swiping left or right never accidentally mutes or resumes playback.
-3. **Mirrored Coordinate Geometry**:
+7. **Mirrored Coordinate Geometry**:
    The camera X axis is mirrored (`mirrored_x = 1.0 - wrist.x`) so that moving the physical hand to the user's right produces $\Delta x > 0$ (`NEXT_TRACK`), and moving to the user's left produces $\Delta x < 0$ (`PREV_TRACK`).
-4. **Deliberate Lock Toggle (Rock On 🤟 / `ILoveYou`)**:
-   Holding Rock On for 1.0s toggles gesture tracking on or off. A 2.0-second lockout window (`_toggle_lockout_until`) prevents toggle flapping while holding the hand steady.
-5. **Real Hardware Player Control (`playerctl`)**:
+8. **Deliberate Lock Toggle (Rock On / `ILoveYou`)**:
+   Holding Rock On for 1.0s toggles gesture tracking on or off (`GESTURE_TOGGLE:PAUSED` / `GESTURE_TOGGLE:RESUMED`). A 2.5-second lockout window (`_toggle_lockout_until`) prevents toggle flapping while holding the hand steady.
+9. **Zero-CPU Standby & Privacy Hardware Release**:
+   On headless SBCs or nodes without optical sensors, the worker enters zero-CPU standby (`asyncio.sleep(5.0)`). When gestures are disabled or cameras are idle, the OpenCV video capture device is immediately released (`cap.release()`), turning off the camera privacy LED.
+10. **Real Hardware Player Control (`playerctl`)**:
    Gesture events interface directly with running Linux media sessions via `/usr/bin/playerctl` (`play`, `pause`, `next`, `previous`), controlling Spotify, VLC, and browser tabs with zero desktop UI latency.
 
 ---
 
 ## 6. Verification & Automated Testing
 
-The gesture perception suite is covered by 10 automated unit tests in [`backend/tests/test_vision.py`](file:///home/mihir/Codes/VESPER/backend/tests/test_vision.py) and [`backend/tests/test_gateway.py`](file:///home/mihir/Codes/VESPER/backend/tests/test_gateway.py):
+The gesture perception suite is covered by automated unit tests in [`backend/tests/test_vision.py`](file:///home/mihir/Codes/VESPER/backend/tests/test_vision.py) and [`backend/tests/test_gateway.py`](file:///home/mihir/Codes/VESPER/backend/tests/test_gateway.py):
 
 - `test_gesture_rock_on_lock_toggle_and_open_palm_immediate`: Validates instantaneous `OPEN_PALM` triggers without hold delay, `ILoveYou` 1.0s hold lock/unlock, and paused state resume.
 - `test_gesture_worker_toggle_lockout_and_swipes`: Validates lockout suppression and trajectory calculation for mirrored swipes.
 - `test_gesture_worker_lifecycle_and_dispatch`: Validates real-time side-effects for mute, volume dial, peace sign (Zen), thumb up/down, and `GESTURE_TOGGLE`.
 - `test_gesture_broadcast_closed_fist_and_open_palm`: Validates Gateway WebSocket broadcasting and cluster state sync.
+- `test_gesture_repeat_guard_and_volume_repeat_exception`: Validates that non-volume gestures are blocked until hand release, while volume gestures smoothly repeat.

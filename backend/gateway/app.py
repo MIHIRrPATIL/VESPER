@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.gateway.connection_manager import ConnectionManager
 from backend.gateway.router import MessageRouter
+from backend.gateway.routes.camera import router as camera_router
 from backend.gateway.routes.health import router as health_router
 from backend.gateway.routes.sync import router as sync_router
 from backend.gateway.routes.ws import router as ws_router
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(ws_router)
     app.include_router(sync_router)
+    app.include_router(camera_router)
 
     return app
 

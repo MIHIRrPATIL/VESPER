@@ -389,7 +389,12 @@ class MediaSpecialist(BaseSpecialist):
         """Finds a playlist (smartly prioritizing user-owned playlists and fuzzy matching) and starts playback."""
         token = await self._get_user_token()
         if not token:
-            return SpecialistResult(success=False, action="play_playlist", error="Spotify user token unavailable.")
+            return SpecialistResult(
+                success=False,
+                action="play_playlist",
+                speech_summary="Sir, your Spotify account is not yet connected. Please authenticate with Spotify or configure your refresh token in the environment so I may access your playlists.",
+                error="Spotify user token unavailable. Please authenticate with Spotify.",
+            )
 
         headers = {"Authorization": f"Bearer {token}"}
         try:

@@ -184,3 +184,55 @@ async def test_tts_manager_piper_priority():
     assert len(chunks) > 0
     total_bytes = sum(len(c) for c in chunks)
     assert total_bytes > 1000
+
+
+@pytest.mark.asyncio
+async def test_piper_emotive_tags_and_dsp():
+    """Verifies that Piper TTS applies Alan Sample 2 defaults (0.85 speed), parses emotive tags, and applies DSP."""
+    from backend.voice.tts.piper_tts import PiperTTSProvider, apply_studio_dsp
+
+    provider = PiperTTSProvider()
+    assert provider.length_scale == 0.85
+    assert provider.noise_scale == 0.65
+    assert provider.noise_w_scale == 0.75
+
+    # Test emotive tag extraction
+    clean_text, params = provider._extract_emotive_config("[calm] Hello sir.")
+    assert clean_text == "Hello sir."
+    assert params["length_scale"] == 1.10
+    assert params["noise_scale"] == 0.55
+
+    clean_urgent, params_urgent = provider._extract_emotive_config("[urgent] System alert.")
+    assert clean_urgent == "System alert."
+    assert params_urgent["length_scale"] == 0.74
+
+    # Test DSP filter on sample PCM
+    raw_pcm = b"\x00\x10\x00\x20" * 200
+    dsp_pcm = apply_studio_dsp(raw_pcm, sample_rate=22050)
+    assert len(dsp_pcm) == len(raw_pcm)
+
+    # Test synthesis with tag
+    chunks = []
+    async for c in provider.synthesize_stream("[calm] System test."):
+        chunks.append(c)
+    assert len(chunks) > 0
+    assert sum(len(c) for c in chunks) > 500
+
+
+def test_speech_normalizer_iso_datetime_and_time():
+    """Verifies that SpeechNormalizer converts ISO timestamps and timezone offsets into natural spoken English."""
+    from backend.voice.tts.normalizer import SpeechNormalizer
+
+    raw = (
+        "Your next scheduled event is 'Meeting with hemanshu sir regarding NDA Points' "
+        "at 2026-09-05T16:15:00+05:30. You have 5 pending tasks on your agenda."
+    )
+    spoken = SpeechNormalizer.normalize_for_speech(raw)
+
+    assert "+05:30" not in spoken
+    assert "2026-09-05" not in spoken
+    assert "16:15:00" not in spoken
+    assert "4:15 PM" in spoken
+    assert "at at" not in spoken
+
+
