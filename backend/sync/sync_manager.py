@@ -125,15 +125,34 @@ class SyncManager:
                 self.state.last_speech_summary = str(diff["last_speech_summary"])
                 modified = True
 
+            if "unread_notifications_count" in diff and isinstance(diff["unread_notifications_count"], int):
+                self.state.unread_notifications_count = diff["unread_notifications_count"]
+                modified = True
+
+            if "recent_notifications" in diff and isinstance(diff["recent_notifications"], list):
+                self.state.recent_notifications = diff["recent_notifications"]
+                modified = True
+
             if modified:
                 self.state.version += 1
                 self.state.updated_at = time.time()
                 logger.info(
                     f"[SyncManager] State updated (v{self.state.version}) by '{source_device_id}': "
-                    f"Vol={self.state.master_volume}% | Zen={self.state.zen_mode} | Focus={self.state.focus_mode}"
+                    f"Vol={self.state.master_volume}% | Zen={self.state.zen_mode} | Focus={self.state.focus_mode} | "
+                    f"Notifs={self.state.unread_notifications_count}"
                 )
                 await self._notify_listeners(diff)
 
+            return self.state
+
+    async def sync_notifications(self, unread_count: int, recent: List[Dict[str, Any]]) -> SynchronizedState:
+        """Syncs notification counts and recent preview list from NotificationService."""
+        async with self._lock:
+            self.state.unread_notifications_count = unread_count
+            self.state.recent_notifications = recent[:5]
+            self.state.version += 1
+            self.state.updated_at = time.time()
+            await self._notify_listeners({"notifications_updated": unread_count})
             return self.state
 
     def get_state_snapshot(self) -> SynchronizedState:

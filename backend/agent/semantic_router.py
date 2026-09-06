@@ -24,6 +24,7 @@ class SemanticIntent(str, Enum):
     DAILY_AGENDA = "daily_agenda"
     FINANCE_BALANCE = "finance_balance"
     SYSTEM_STATUS = "system_status"
+    MOBILE_NOTIFICATIONS = "mobile_notifications"
     NONE = "none"
 
 
@@ -124,6 +125,20 @@ INTENT_PROTOTYPES: Dict[SemanticIntent, List[str]] = {
         "cluster status report",
         "how is the cluster running",
     ],
+    SemanticIntent.MOBILE_NOTIFICATIONS: [
+        "what notifications did I get on my phone",
+        "check my phone notifications",
+        "do I have any notifications on my phone",
+        "show my mobile notifications",
+        "any new alerts on my phone",
+        "check my mobile alerts",
+        "what alerts arrived on my phone",
+        "any messages or notifications on my phone",
+        "summarize my phone notifications",
+        "check notifications from my phone",
+        "did I get any notifications",
+        "any alerts on whatsapp or slack",
+    ],
 }
 
 # Similarity thresholds for matching (empirically calibrated)
@@ -136,6 +151,7 @@ DEFAULT_THRESHOLDS: Dict[SemanticIntent, float] = {
     SemanticIntent.DAILY_AGENDA: 0.60,
     SemanticIntent.FINANCE_BALANCE: 0.60,
     SemanticIntent.SYSTEM_STATUS: 0.60,
+    SemanticIntent.MOBILE_NOTIFICATIONS: 0.58,
 }
 
 

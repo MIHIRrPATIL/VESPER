@@ -373,6 +373,18 @@ class TaskSpecialist(BaseSpecialist):
                     },
                 },
             },
+            {
+                "name": "list_mobile_notifications",
+                "description": "Retrieves recent, urgent, or unread notifications received from the mobile companion app (WhatsApp, Slack, Telegram, Gmail, server alerts).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "description": "Maximum number of notifications to return (default: 5)"},
+                        "unread_only": {"type": "boolean", "description": "Whether to return unread alerts only (default: false)"},
+                        "app": {"type": "string", "description": "Optional app name or package filter (e.g. 'whatsapp', 'slack', 'gmail')"},
+                    },
+                },
+            },
         ]
 
     async def execute(
@@ -826,6 +838,66 @@ class TaskSpecialist(BaseSpecialist):
                         "events": event_list,
                         "overdue_count": len(overdue_tasks),
                         "backlog_count": len(backlog_tasks),
+                    },
+                )
+
+            # ── 8. List Mobile Notifications ──────────────────────────────────
+            elif act in [
+                "list_mobile_notifications",
+                "get_mobile_notifications",
+                "check_notifications",
+                "list_notifications",
+                "mobile_notifications",
+                "phone_notifications",
+            ]:
+                from backend.sync.notification_service import notification_service
+
+                limit = int(params.get("limit") or 5)
+                unread_only = bool(params.get("unread_only", False))
+                app_filter = params.get("app") or params.get("app_filter")
+
+                notifs = notification_service.get_recent_notifications(
+                    limit=limit,
+                    unread_only=unread_only,
+                    app_filter=app_filter,
+                )
+
+                if not notifs:
+                    speech = "You have no pending mobile notifications at present, sir."
+                    return SpecialistResult(
+                        success=True,
+                        action=action,
+                        speech_summary=speech,
+                        data={"notifications": [], "unread_count": 0},
+                        card_payload={
+                            "type": "NOTIFICATION_DIGEST",
+                            "title": "Mobile Notifications",
+                            "count": 0,
+                            "items": [],
+                        },
+                    )
+
+                urgent_or_high = [n for n in notifs if n.priority in ("URGENT", "HIGH")]
+                if urgent_or_high:
+                    top_n = urgent_or_high[0]
+                    speech = f"You have {len(notifs)} recent alerts, sir. Notably, a high-priority notification from {top_n.app_name}: '{top_n.title}' - {top_n.text}."
+                else:
+                    top_n = notifs[0]
+                    speech = f"You have {len(notifs)} mobile notifications, sir. Most recently from {top_n.app_name}: '{top_n.title}'."
+
+                return SpecialistResult(
+                    success=True,
+                    action=action,
+                    speech_summary=speech,
+                    data={
+                        "notifications": [n.to_dict() for n in notifs],
+                        "unread_count": notification_service.get_unread_count(),
+                    },
+                    card_payload={
+                        "type": "NOTIFICATION_DIGEST",
+                        "title": "Mobile Alerts",
+                        "count": len(notifs),
+                        "items": [n.to_dict() for n in notifs],
                     },
                 )
 

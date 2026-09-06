@@ -509,6 +509,20 @@ class SwarmPlanner:
                 steps=steps,
             )
 
+        if intent == SemanticIntent.MOBILE_NOTIFICATIONS:
+            logger.info(f"[Planner.PreFilter] Semantic match: MOBILE_NOTIFICATIONS (conf={conf:.2f}) -> tasks:list_mobile_notifications")
+            unread_only = "unread" in q_lower or "new" in q_lower
+            app_filter = None
+            for app in ["whatsapp", "slack", "telegram", "gmail", "discord"]:
+                if app in q_lower:
+                    app_filter = app
+                    break
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "tasks", "action": "list_mobile_notifications", "params": {"unread_only": unread_only, "app": app_filter}}],
+            )
+
         return None
 
     def _select_candidate_specialists(

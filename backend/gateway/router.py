@@ -580,10 +580,23 @@ class MessageRouter:
 
     async def _handle_notify(self, session: ClientSession, envelope: ClientEnvelope) -> None:
         """Handles mobile companion notification ingestion."""
+        from backend.sync.notification_service import notification_service
         payload = envelope.payload
-        logger.info(
-            f"[NOTIFY] Ingested alert from {payload.get('package_name', 'app')}: "
-            f"\"{payload.get('title')}\" - {payload.get('text')}"
+        source_dev = sync_manager.state.active_devices.get(session.client_id)
+        dev_name = payload.get("device_name") or (source_dev.device_name if source_dev else session.client_id)
+
+        # Ingest and triage alert
+        notif = notification_service.ingest_notification(
+            payload=payload,
+            source_device_id=session.client_id,
+            source_device_name=dev_name,
+        )
+
+        # Synchronize notification state across cluster
+        recent = [n.to_dict() for n in notification_service.get_recent_notifications(limit=5)]
+        await sync_manager.sync_notifications(
+            unread_count=notification_service.get_unread_count(),
+            recent=recent,
         )
 
         # Broadcast ambient card update to Desk HUD
@@ -593,7 +606,9 @@ class MessageRouter:
             type=EventType.NOTIFICATION_DIGEST,
             payload={
                 "source_client": session.client_id,
-                "notification": payload,
+                "device_name": dev_name,
+                "notification": notif.to_dict(),
+                "unread_count": notification_service.get_unread_count(),
             },
         )
         await self.manager.broadcast(hud_envelope)
@@ -615,6 +630,9 @@ class MessageRouter:
                 "has_camera": payload.get("has_camera", False),
                 "has_display": payload.get("has_display", False),
                 "has_microphone": payload.get("has_microphone", True),
+                "battery_level": payload.get("battery_level"),
+                "is_charging": payload.get("is_charging"),
+                "network_type": payload.get("network_type", "wifi"),
             }
             reg = DeviceRegistration(**reg_data)
             current_state = await sync_manager.register_device(reg)
