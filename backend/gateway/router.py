@@ -383,9 +383,13 @@ class MessageRouter:
             )
             await self.manager.broadcast(broadcast_envelope)
 
-        elif gesture in ("CLOSED_FIST", "MUTE", "PAUSE"):
-            # Instant Mute / Pause playback and Mute Wake Word Listener
+        elif gesture in ("CLOSED_FIST", "MUTE", "PAUSE", "STOP", "INTERRUPT"):
+            # Out-of-band gesture interrupt: instantly stop assistant speech & active research pipelines
+            cancelled_count = self.tasks.cancel_all()
+            logger.info(f"[GESTURE] CLOSED_FIST interrupt aborted {cancelled_count} active task(s)")
+
             _set_system_mute(True)
+            _set_system_volume(0)
             _control_media_player("pause")
             cur_state = sync_manager.get_snapshot()
             media_copy = dict(cur_state.current_media)
@@ -394,21 +398,34 @@ class MessageRouter:
                 {"master_volume": 0, "current_media": media_copy, "wakeword_active": False},
                 source_device_id=session.client_id,
             )
-            broadcast_envelope = ServerEnvelope(
+
+            # 1. SET_VOLUME broadcast
+            vol_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.SYSTEM,
                 type=EventType.SET_VOLUME,
                 payload={"volume": 0, "muted": True, "media_action": "pause", "wakeword_active": False},
             )
-            await self.manager.broadcast(broadcast_envelope)
+            await self.manager.broadcast(vol_envelope)
 
+            # 2. WAKE_WORD_STATE broadcast
             ww_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.VOICE,
                 type=EventType.WAKE_WORD_STATE,
-                payload={"wakeword_active": False, "action": "pause", "source": "GESTURE:CLOSED_FIST"},
+                payload={"wakeword_active": False, "reason": "GESTURE_CLOSED_FIST"},
             )
             await self.manager.broadcast(ww_envelope)
+
+            # 3. High-priority INTERRUPT signal across all connected sessions if tasks were cancelled
+            if cancelled_count > 0:
+                interrupt_envelope = ServerEnvelope(
+                    uuid=envelope.uuid,
+                    channel=Channel.SYSTEM,
+                    type=EventType.INTERRUPT,
+                    payload={"source": f"GESTURE:{gesture}", "reason": "USER_GESTURE_INTERRUPT", "cancelled_tasks": cancelled_count},
+                )
+                await self.manager.broadcast(interrupt_envelope)
 
         elif gesture in ("OPEN_PALM", "RESUME", "PLAY", "UNMUTE"):
             # Resume playback / Unmute to default level and Rearm Wake Word Listener
@@ -432,6 +449,7 @@ class MessageRouter:
             )
             await self.manager.broadcast(broadcast_envelope)
 
+            # Rearm wake word listener
             ww_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.VOICE,
@@ -475,9 +493,9 @@ class MessageRouter:
             )
             await self.manager.broadcast(broadcast_envelope)
 
-        elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT"):
+        elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT", "GUN_RIGHT", "GUN_POINT_RIGHT"):
             # Next Track playback control
-            logger.info(f"[GESTURE] Triggered NEXT_TRACK media control from '{session.client_id}'")
+            logger.info(f"[GESTURE] Triggered NEXT_TRACK media control from '{session.client_id}' ({gesture})")
             _control_media_player("next")
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
@@ -487,9 +505,9 @@ class MessageRouter:
             )
             await self.manager.broadcast(broadcast_envelope)
 
-        elif gesture in ("PREV_TRACK", "PREVIOUS_TRACK", "SWIPE_LEFT"):
+        elif gesture in ("PREV_TRACK", "PREVIOUS_TRACK", "SWIPE_LEFT", "GUN_LEFT", "GUN_POINT_LEFT"):
             # Previous Track playback control
-            logger.info(f"[GESTURE] Triggered PREV_TRACK media control from '{session.client_id}'")
+            logger.info(f"[GESTURE] Triggered PREV_TRACK media control from '{session.client_id}' ({gesture})")
             _control_media_player("previous")
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
@@ -499,8 +517,28 @@ class MessageRouter:
             )
             await self.manager.broadcast(broadcast_envelope)
 
-        elif gesture in ("THUMB_UP", "VOLUME_UP"):
-            # Step Volume Up (+10%)
+        elif gesture in ("THUMB_UP", "CONFIRM", "VOLUME_UP"):
+            # Check if there is an active proactive staged recommendation awaiting confirmation
+            from backend.agent.proactive.action_queue import action_queue
+            recent_prompted = action_queue.get_recent_prompted_action(max_age_sec=15.0)
+            if recent_prompted:
+                action_queue.resolve_action(recent_prompted.id, "confirmed", confirmed_by="gesture_thumb_up")
+                logger.info(f"[GESTURE] Confirmed staged action '{recent_prompted.id}' via THUMB_UP")
+                confirm_env = ServerEnvelope(
+                    uuid=envelope.uuid,
+                    channel=Channel.SYSTEM,
+                    type=EventType.NOTIFICATION_DIGEST,
+                    payload={
+                        "title": "Action Confirmed",
+                        "speech": f"Confirmed via gesture, sir. Executing {recent_prompted.action}.",
+                        "proactive": True,
+                        "resolved_action": recent_prompted.model_dump(),
+                    },
+                )
+                await self.manager.broadcast(confirm_env)
+                return
+
+            # Otherwise Step Volume Up (+10%)
             current_vol = sync_manager.get_snapshot().master_volume
             new_vol = min(100, current_vol + 10)
             _set_system_mute(False)
@@ -514,8 +552,28 @@ class MessageRouter:
             )
             await self.manager.broadcast(broadcast_envelope)
 
-        elif gesture in ("THUMB_DOWN", "VOLUME_DOWN"):
-            # Step Volume Down (-10%)
+        elif gesture in ("THUMB_DOWN", "REJECT", "VOLUME_DOWN"):
+            # Check if there is an active proactive staged recommendation awaiting confirmation
+            from backend.agent.proactive.action_queue import action_queue
+            recent_prompted = action_queue.get_recent_prompted_action(max_age_sec=15.0)
+            if recent_prompted:
+                action_queue.resolve_action(recent_prompted.id, "rejected", confirmed_by="gesture_thumb_down")
+                logger.info(f"[GESTURE] Rejected staged action '{recent_prompted.id}' via THUMB_DOWN")
+                reject_env = ServerEnvelope(
+                    uuid=envelope.uuid,
+                    channel=Channel.SYSTEM,
+                    type=EventType.NOTIFICATION_DIGEST,
+                    payload={
+                        "title": "Action Discarded",
+                        "speech": "Understood, sir. I have discarded that proposal.",
+                        "proactive": True,
+                        "rejected_action": recent_prompted.model_dump(),
+                    },
+                )
+                await self.manager.broadcast(reject_env)
+                return
+
+            # Otherwise Step Volume Down (-10%)
             current_vol = sync_manager.get_snapshot().master_volume
             new_vol = max(0, current_vol - 10)
             _set_system_volume(new_vol)
@@ -585,12 +643,29 @@ class MessageRouter:
         source_dev = sync_manager.state.active_devices.get(session.client_id)
         dev_name = payload.get("device_name") or (source_dev.device_name if source_dev else session.client_id)
 
+        # Handle direct telephony CALL_STATE events
+        if envelope.type == EventType.CALL_STATE:
+            call_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.NOTIFY,
+                type=EventType.CALL_STATE,
+                payload={
+                    "source_client": session.client_id,
+                    "device_name": dev_name,
+                    **payload,
+                },
+            )
+            await self.manager.broadcast(call_envelope)
+            return
+
         # Ingest and triage alert
         notif = notification_service.ingest_notification(
             payload=payload,
             source_device_id=session.client_id,
             source_device_name=dev_name,
         )
+        if not notif:
+            return
 
         # Synchronize notification state across cluster
         recent = [n.to_dict() for n in notification_service.get_recent_notifications(limit=5)]
@@ -608,10 +683,22 @@ class MessageRouter:
                 "source_client": session.client_id,
                 "device_name": dev_name,
                 "notification": notif.to_dict(),
+                "is_update": getattr(notif, "is_in_place_update", False),
+                "is_ongoing": getattr(notif, "is_ongoing", False),
+                "is_call": getattr(notif, "is_call", False),
+                "call_phase": getattr(notif, "call_phase", None),
                 "unread_count": notification_service.get_unread_count(),
             },
         )
         await self.manager.broadcast(hud_envelope)
+
+        # Trigger Proactive Agent VIP triage for HIGH/URGENT notifications
+        if notif.priority in ("URGENT", "HIGH"):
+            try:
+                from backend.agent.proactive_agent import proactive_agent
+                asyncio.create_task(proactive_agent.evaluate_notification(notif))
+            except Exception as e:
+                logger.warning(f"[ROUTER] Proactive VIP triage trigger failed: {e}")
 
     async def _handle_sync(self, session: ClientSession, envelope: ClientEnvelope) -> None:
         """Handles cross-device state synchronization and topology registration."""

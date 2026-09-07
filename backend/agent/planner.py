@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from backend.agent.llm import LLMClient
+from backend.agent.proactive.action_queue import action_queue
+from backend.agent.proactive.audit_logger import audit_logger
 from backend.agent.registry import SpecialistRegistry
 from backend.agent.semantic_router import SemanticIntent, SemanticIntentRouter
 from backend.agent.specialists.base import SpecialistResult
@@ -122,6 +124,48 @@ class SwarmPlanner:
         self.llm = llm_client or LLMClient()
         self.semantic_router = semantic_router or SemanticIntentRouter.get_instance()
 
+    def _match_staged_action_by_phrase(self, query: str) -> Tuple[List[Any], List[Any]]:
+        """Matches active staged actions against entity or domain keywords in query.
+
+        Returns (positive_matches, negative_matches).
+        """
+        q_lower = query.lower()
+        active = action_queue.get_active_actions()
+        if not active:
+            return [], []
+
+        pos_candidates = []
+        neg_candidates = []
+
+        is_neg = bool(re.search(r"\b(no|don't|dont|cancel|reject|never mind|nevermind|forget it|stop|discard)\b", q_lower))
+
+        for item in active:
+            matched = False
+            # Check domain
+            if item.domain.lower() in q_lower:
+                matched = True
+
+            # Check merchant or key tokens from verbatim text or params
+            v_lower = item.verbatim_text.lower()
+            tokens = [t.strip(",.:'\"") for t in v_lower.split() if len(t) > 3 and t not in ("under", "with", "from", "that", "this", "your")]
+            for tok in tokens:
+                if tok in q_lower:
+                    matched = True
+                    break
+
+            # Check specific params (e.g. description or title)
+            desc = str(item.params.get("description") or item.params.get("title") or "").lower()
+            if desc and any(w in q_lower for w in desc.split() if len(w) > 3 and w not in ("under", "with", "from")):
+                matched = True
+
+            if matched:
+                if is_neg:
+                    neg_candidates.append(item)
+                else:
+                    pos_candidates.append(item)
+
+        return pos_candidates, neg_candidates
+
     def _check_deterministic_prefilter(
         self,
         query: str,
@@ -136,12 +180,133 @@ class SwarmPlanner:
 
         # ── TIER 1: DETERMINISTIC EXACT CACHE & HARDWARE RETRIEVAL (<1ms, 0 tokens) ──
 
-        # 0. Pending Email Draft Confirmation or Cancellation:
+        # 0a. Proactive Undo / Rollback Handler:
+        is_undo = bool(
+            re.search(
+                r"\b(undo|rollback|reverse|revert)\s*(the\s+|my\s+|that\s+)?(last\s+)?(transaction|expense|payment|action|change)?\b",
+                q_lower,
+            )
+        )
+        if is_undo:
+            last_action = audit_logger.get_last_action()
+            if last_action and last_action.get("domain") == "finance":
+                target_txn = (last_action.get("rollback_data") or {}).get("transaction_id")
+                audit_logger.record_undo(last_action.get("action_id", ""), success=True)
+                logger.info(f"[Planner.PreFilter] Proactive undo triggered for finance action: {last_action.get('action_id')}")
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{
+                        "agent": "finance",
+                        "action": "undo_transaction",
+                        "params": {"transaction_id": target_txn} if target_txn else {},
+                    }],
+                )
+            elif any(w in q_lower for w in ["transaction", "expense", "payment", "money", "rupees", "inr"]):
+                logger.info("[Planner.PreFilter] Undo transaction requested -> finance:undo_transaction")
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{"agent": "finance", "action": "undo_transaction", "params": {}}],
+                )
+
+        # 0b. Proactive Staged Action Review / Inquiry:
+        if any(p in q_lower for p in ["pending actions", "staged actions", "review pending", "pending matters", "what's staged", "what is staged"]):
+            active = action_queue.get_active_actions()
+            if not active:
+                return SwarmPlan(
+                    plan_type="direct",
+                    provider_used="prefilter",
+                    direct_response="You have no pending matters staged for review, sir.",
+                )
+            lines = [f"{i+1}. {a.verbatim_text}" for i, a in enumerate(active)]
+            return SwarmPlan(
+                plan_type="direct",
+                provider_used="prefilter",
+                direct_response=f"You have {len(active)} matter(s) staged for review, sir: " + "; ".join(lines),
+            )
+
+        # 0c. Proactive Confirmation & Disambiguation (3-Tier):
+        pos_matches, neg_matches = self._match_staged_action_by_phrase(query)
+        if len(neg_matches) == 1:
+            target = neg_matches[0]
+            action_queue.resolve_action(target.id, "rejected", confirmed_by="voice_domain_anchored")
+            logger.info(f"[Planner.PreFilter] Domain-anchored rejection of staged action: {target.id}")
+            return SwarmPlan(
+                plan_type="direct",
+                provider_used="prefilter",
+                direct_response=f"Very well, sir. I have dismissed the proposal: {target.verbatim_text}.",
+            )
+        elif len(neg_matches) > 1:
+            return SwarmPlan(
+                plan_type="direct",
+                provider_used="prefilter",
+                direct_response="Sir, you have multiple matching matters staged. Would you care to specify which one to cancel?",
+            )
+
+        if len(pos_matches) == 1:
+            target = pos_matches[0]
+            action_queue.resolve_action(target.id, "confirmed", confirmed_by="voice_domain_anchored")
+            audit_logger.log_action(target, confirmed_by="voice_domain_anchored")
+            logger.info(f"[Planner.PreFilter] Domain-anchored confirmation of staged action: {target.id}")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{
+                    "agent": target.domain,
+                    "action": target.action,
+                    "params": target.params,
+                }],
+            )
+        elif len(pos_matches) > 1:
+            return SwarmPlan(
+                plan_type="direct",
+                provider_used="prefilter",
+                direct_response="Sir, you have multiple pending matters staged. Would you care to specify which one you wish to confirm?",
+            )
+
+        # Fallback to strict 15s window for bare affirmative/negative without domain keyword
+        recent_prompted = action_queue.get_recent_prompted_action(max_age_sec=15.0)
+        if recent_prompted:
+            is_affirmative = any(
+                re.search(rf"\b{w}\b", q_lower)
+                for w in ["yes", "yeah", "sure", "confirm", "proceed", "go ahead", "do it", "log it", "record it", "add it", "create it", "pause it", "play it", "resume it"]
+            ) and not any(w in q_lower for w in ["don't", "dont", "no", "cancel", "stop", "nevermind", "forget"])
+
+            is_negative = any(
+                re.search(rf"\b{w}\b", q_lower)
+                for w in ["no", "don't", "dont", "cancel", "reject", "never mind", "nevermind", "forget it", "stop", "discard"]
+            )
+
+            if is_affirmative:
+                action_queue.resolve_action(recent_prompted.id, "confirmed", confirmed_by="voice_15s_window")
+                audit_logger.log_action(recent_prompted, confirmed_by="voice_15s_window")
+                logger.info(f"[Planner.PreFilter] Strict 15s window confirmation for staged action: {recent_prompted.id}")
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{
+                        "agent": recent_prompted.domain,
+                        "action": recent_prompted.action,
+                        "params": recent_prompted.params,
+                    }],
+                )
+            elif is_negative:
+                action_queue.resolve_action(recent_prompted.id, "rejected", confirmed_by="voice_15s_window")
+                logger.info(f"[Planner.PreFilter] Strict 15s window rejection for staged action: {recent_prompted.id}")
+                return SwarmPlan(
+                    plan_type="direct",
+                    provider_used="prefilter",
+                    direct_response="Understood, sir. I have discarded that proposal.",
+                )
+
+        # 0d. Pending Email Draft Confirmation or Cancellation:
         pending_draft = None
         if session_context:
             pending_draft = session_context.get("pending_email_draft")
-            if not pending_draft and "entities" in session_context:
-                pending_draft = session_context["entities"].get("email_draft")
+            entities = session_context.get("entities")
+            if not pending_draft and isinstance(entities, dict):
+                pending_draft = entities.get("email_draft")
 
         if pending_draft:
             cur_to = str(pending_draft.get("to", "")).strip()
@@ -176,6 +341,111 @@ class SwarmPlanner:
                     provider_used="prefilter",
                     direct_response=f"I have set the recipient address to {merged_email}, sir. Would you like me to dispatch the email now?",
                 )
+
+            # 0c. Check if user modifies subject: e.g. "change subject to Meeting Tomorrow [and send it]"
+            subject_match = re.search(
+                r"(?:change|set|update)\s+(?:the\s+)?subject\s+(?:to|as)\s+[\"']?(.*?)[\"']?$",
+                query,
+                re.IGNORECASE,
+            )
+            if subject_match:
+                raw_subj = subject_match.group(1).strip()
+                send_in_subj = re.search(r"(?:,\s*|\s+)(?:and\s+|then\s+|now\s+)?(?:send\s+it|send|dispatch)\s*[.!]?$", raw_subj, re.IGNORECASE)
+                if send_in_subj:
+                    new_subject = raw_subj[:send_in_subj.start()].strip()
+                    dispatch_now = True
+                else:
+                    new_subject = raw_subj.rstrip(".! ")
+                pending_draft["subject"] = new_subject
+                if session_context:
+                    ctx_entities = session_context.get("entities")
+                    if isinstance(ctx_entities, dict) and isinstance(ctx_entities.get("email_draft"), dict):
+                        ctx_entities["email_draft"]["subject"] = new_subject
+                if dispatch_now:
+                    from backend.agent.specialists.email_specialist import is_valid_email
+                    if not is_valid_email(cur_to):
+                        return SwarmPlan(
+                            plan_type="direct",
+                            provider_used="prefilter",
+                            direct_response=f"I have updated the subject to '{new_subject}', sir. However, '{cur_to}' is not a complete email address with a domain. What is the recipient's full email address?",
+                        )
+                    return SwarmPlan(
+                        plan_type="parallel",
+                        provider_used="prefilter",
+                        steps=[{
+                            "agent": "email",
+                            "action": "send_email",
+                            "params": {
+                                "to": cur_to,
+                                "subject": new_subject,
+                                "body": pending_draft.get("body", ""),
+                            }
+                        }],
+                    )
+                else:
+                    return SwarmPlan(
+                        plan_type="direct",
+                        provider_used="prefilter",
+                        direct_response=f"I have updated the subject to '{new_subject}', sir. Would you like me to dispatch the email now?",
+                    )
+
+            # 0d. Check if user adds or updates message content/body (with optional immediate send)
+            send_suffix = re.search(
+                r"(?:,\s*|\s+)(?:and\s+|then\s+|now\s+)?(?:send\s+it|send\s+that(?:\s+email)?|send|dispatch(?:\s+it)?|shoot(?:\s+it)?|fire\s+it)\s*[.!]?$",
+                query,
+                re.IGNORECASE,
+            )
+            has_send_suffix = bool(send_suffix)
+            query_without_send = query[:send_suffix.start()].strip() if send_suffix else query.strip()
+
+            body_match = re.search(
+                r"^\s*(?:please\s+)?(?:add\s+that\s+saying|add\s+saying|add\s+that|saying|write\s+that|write|tell\s+(?:him|her|them)\s+that|tell\s+(?:him|her|them)|the\s+body\s+(?:is|should\s+be)|the\s+message\s+(?:is|should\s+be)|the\s+content\s+(?:is|should\s+be)|put\s+(?:in\s+the\s+body|as\s+body)|say|add|include\s+that|include)\s*[:,\-]?\s*[\"']?(.*?)[\"']?\s*$",
+                query_without_send,
+                re.IGNORECASE,
+            )
+            if body_match and body_match.group(1).strip():
+                new_text = body_match.group(1).strip()
+                cur_body = pending_draft.get("body", "").strip()
+                if cur_body and re.search(r"^\s*add", query, re.IGNORECASE):
+                    merged_body = f"{cur_body}\n{new_text}"
+                else:
+                    merged_body = new_text
+
+                pending_draft["body"] = merged_body
+                if session_context:
+                    ctx_entities = session_context.get("entities")
+                    if isinstance(ctx_entities, dict) and isinstance(ctx_entities.get("email_draft"), dict):
+                        ctx_entities["email_draft"]["body"] = merged_body
+
+                logger.info(f"[Planner.PreFilter] Updated pending email draft body: '{merged_body[:60]}' (send_now={has_send_suffix})")
+
+                if has_send_suffix:
+                    from backend.agent.specialists.email_specialist import is_valid_email
+                    if not is_valid_email(cur_to):
+                        return SwarmPlan(
+                            plan_type="direct",
+                            provider_used="prefilter",
+                            direct_response=f"I have added the message to the draft, sir. However, '{cur_to}' is not a complete email address with a domain. What is the recipient's full email address?",
+                        )
+                    return SwarmPlan(
+                        plan_type="parallel",
+                        provider_used="prefilter",
+                        steps=[{
+                            "agent": "email",
+                            "action": "send_email",
+                            "params": {
+                                "to": cur_to,
+                                "subject": pending_draft.get("subject", "A brief note"),
+                                "body": merged_body,
+                            }
+                        }],
+                    )
+                else:
+                    return SwarmPlan(
+                        plan_type="direct",
+                        provider_used="prefilter",
+                        direct_response=f"I have added your message to the draft for {cur_to}, sir. Would you like me to dispatch the email now?",
+                    )
 
             is_confirmation = any(
                 re.search(rf"\b{w}\b", q_lower)
@@ -521,6 +791,14 @@ class SwarmPlanner:
                 plan_type="parallel",
                 provider_used="prefilter",
                 steps=[{"agent": "tasks", "action": "list_mobile_notifications", "params": {"unread_only": unread_only, "app": app_filter}}],
+            )
+
+        if intent == SemanticIntent.BATTERY_STATUS:
+            logger.info(f"[Planner.PreFilter] Semantic match: BATTERY_STATUS (conf={conf:.2f}) -> system:check_battery_status")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "system", "action": "check_battery_status", "params": {}}],
             )
 
         return None

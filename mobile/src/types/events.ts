@@ -50,9 +50,10 @@ export enum EventType {
   SCREEN_CAPTURE_RESPONSE = "SCREEN_CAPTURE_RESPONSE",
   CAMERA_FRAME_STREAM = "CAMERA_FRAME_STREAM",
 
-  // Mobile Notifications
+  // Mobile Notifications & Telephony
   NOTIFICATION_RELAY = "NOTIFICATION_RELAY",
   NOTIFICATION_DIGEST = "NOTIFICATION_DIGEST",
+  CALL_STATE = "CALL_STATE",
 
   // System & Interruption
   SET_VOLUME = "SET_VOLUME",
@@ -135,4 +136,7 @@ export interface MobileNotificationPayload {
   subtext?: string;
   priority?: "URGENT" | "HIGH" | "MEDIUM" | "LOW";
   post_time?: number;
+  device_id?: string;
+  device_name?: string;
 }
+

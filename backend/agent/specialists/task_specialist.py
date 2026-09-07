@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from backend.agent.specialists.base import BaseSpecialist, SpecialistResult
@@ -850,54 +851,107 @@ class TaskSpecialist(BaseSpecialist):
                 "mobile_notifications",
                 "phone_notifications",
             ]:
-                from backend.sync.notification_service import notification_service
-
                 limit = int(params.get("limit") or 5)
                 unread_only = bool(params.get("unread_only", False))
                 app_filter = params.get("app") or params.get("app_filter")
 
-                notifs = notification_service.get_recent_notifications(
-                    limit=limit,
-                    unread_only=unread_only,
-                    app_filter=app_filter,
-                )
+                raw_notifications = []
+                unread_count = 0
 
-                if not notifs:
-                    speech = "You have no pending mobile notifications at present, sir."
+                # 1. First attempt: Query live Gateway REST API across cluster
+                gateway_url = os.getenv("GATEWAY_URL", "http://127.0.0.1:8000")
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=1.5) as client:
+                        resp = await client.get(
+                            f"{gateway_url}/api/notifications",
+                            params={"limit": limit, "unread_only": unread_only, "app_filter": app_filter},
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            raw_notifications = data.get("notifications", [])
+                            unread_count = data.get("unread_count", len(raw_notifications))
+                except Exception as net_err:
+                    logger.debug(f"[Tasks] Direct Gateway query notice: {net_err}; checking local store.")
+
+                # 2. Fallback: Query local in-memory notification service
+                if not raw_notifications:
+                    from backend.sync.notification_service import notification_service
+                    local_notifs = notification_service.get_recent_notifications(
+                        limit=limit,
+                        unread_only=unread_only,
+                        app_filter=app_filter,
+                    )
+                    raw_notifications = [n.to_dict() for n in local_notifs]
+                    unread_count = notification_service.get_unread_count()
+
+                # 3. Cross-reference unread emails for complete communication situational awareness
+                email_brief = ""
+                unread_email_count = 0
+                try:
+                    from backend.agent.specialists.email_specialist import EmailSpecialist
+                    email_spec = EmailSpecialist()
+                    email_res = await email_spec.list_unread_emails(max_results=3)
+                    if email_res.success and email_res.data:
+                        unread_email_count = int(email_res.data.get("count", 0))
+                        email_list = email_res.data.get("emails", [])
+                        if unread_email_count > 0:
+                            senders = ", ".join([str(it.get("sender", "")).split("<")[0].strip() for it in email_list[:2] if it.get("sender")])
+                            email_brief = f" Additionally, you have {unread_email_count} unread emails in your inbox, notably from {senders}."
+                except Exception as em_err:
+                    logger.debug(f"[Tasks] Email cross-reference notice: {em_err}")
+
+                # 4. Synthesize British butler speech summary
+                if not raw_notifications:
+                    if unread_email_count > 0:
+                        speech = f"You have no pending mobile notifications at present, sir.{email_brief}"
+                    else:
+                        speech = "You have no pending mobile notifications or unread communications at present, sir."
+
                     return SpecialistResult(
                         success=True,
                         action=action,
                         speech_summary=speech,
-                        data={"notifications": [], "unread_count": 0},
+                        data={"notifications": [], "unread_count": 0, "unread_emails": unread_email_count},
                         card_payload={
                             "type": "NOTIFICATION_DIGEST",
                             "title": "Mobile Notifications",
                             "count": 0,
                             "items": [],
+                            "unread_emails": unread_email_count,
                         },
                     )
 
-                urgent_or_high = [n for n in notifs if n.priority in ("URGENT", "HIGH")]
+                urgent_or_high = [n for n in raw_notifications if n.get("priority") in ("URGENT", "HIGH")]
                 if urgent_or_high:
                     top_n = urgent_or_high[0]
-                    speech = f"You have {len(notifs)} recent alerts, sir. Notably, a high-priority notification from {top_n.app_name}: '{top_n.title}' - {top_n.text}."
+                    speech = (
+                        f"You have {len(raw_notifications)} mobile notifications awaiting your attention, sir. "
+                        f"Notably, a high-priority alert from {top_n.get('app_name', 'Mobile')}: "
+                        f"'{top_n.get('title', '')}' - {top_n.get('text', '')[:90]}.{email_brief}"
+                    )
                 else:
-                    top_n = notifs[0]
-                    speech = f"You have {len(notifs)} mobile notifications, sir. Most recently from {top_n.app_name}: '{top_n.title}'."
+                    top_n = raw_notifications[0]
+                    speech = (
+                        f"You have {len(raw_notifications)} mobile notifications, sir. "
+                        f"Most recently from {top_n.get('app_name', 'Mobile')}: '{top_n.get('title', '')}'.{email_brief}"
+                    )
 
                 return SpecialistResult(
                     success=True,
                     action=action,
                     speech_summary=speech,
                     data={
-                        "notifications": [n.to_dict() for n in notifs],
-                        "unread_count": notification_service.get_unread_count(),
+                        "notifications": raw_notifications,
+                        "unread_count": unread_count,
+                        "unread_emails": unread_email_count,
                     },
                     card_payload={
                         "type": "NOTIFICATION_DIGEST",
                         "title": "Mobile Alerts",
-                        "count": len(notifs),
-                        "items": [n.to_dict() for n in notifs],
+                        "count": len(raw_notifications),
+                        "items": raw_notifications,
+                        "unread_emails": unread_email_count,
                     },
                 )
 

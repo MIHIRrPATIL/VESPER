@@ -228,11 +228,22 @@ class LLMClient:
         raw_text = ""
         elapsed_ms = 0.0
 
+        # Ensure 'json' appears in messages to comply with Groq API requirement
+        groq_messages = list(messages)
+        if not any("json" in m.get("content", "").lower() for m in groq_messages):
+            if groq_messages and groq_messages[0].get("role") == "system":
+                groq_messages[0] = {
+                    "role": "system",
+                    "content": groq_messages[0]["content"] + " Output valid JSON format.",
+                }
+            else:
+                groq_messages.insert(0, {"role": "system", "content": "Output valid JSON format."})
+
         # Try Groq LPU first with JSON format
         if self.groq_key:
             try:
                 raw_text, elapsed_ms = await self._call_groq(
-                    messages,
+                    groq_messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     response_format={"type": "json_object"},

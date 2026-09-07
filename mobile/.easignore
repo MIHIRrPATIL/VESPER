@@ -1,0 +1,11 @@
+node_modules
+.expo
+dist
+web-build
+.git
+.claude
+android
+ios
+npm-debug.*
+yarn-debug.*
+yarn-error.*

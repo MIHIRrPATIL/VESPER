@@ -14,8 +14,8 @@ Key Architectural Guarantees:
    - CLOSED_FIST: Instant Mute / Media Pause
    - OPEN_PALM: Resume Audio / Play / Unmute
    - OPEN_PALM (held 2s): Toggle gesture tracking on/off
-   - NEXT_TRACK / SWIPE_RIGHT: Skip to Next Media Track
-   - PREV_TRACK / SWIPE_LEFT: Return to Previous Media Track
+   - GUN_RIGHT / NEXT_TRACK: Point Finger Gun Right -> Skip to Next Media Track
+   - GUN_LEFT / PREV_TRACK: Point Finger Gun Left -> Return to Previous Media Track
    - PEACE_SIGN: Toggle Ambient Zen Mode
    - THUMB_UP: Volume Step Up (+10%) / Confirm
    - THUMB_DOWN: Volume Step Down (-10%) / Dismiss
@@ -283,6 +283,8 @@ DEFAULT_GESTURE_COOLDOWNS: Dict[str, float] = {
     "POINTING_UP": 2.0,
     "NEXT_TRACK": 1.6,
     "PREV_TRACK": 1.6,
+    "GUN_RIGHT": 1.6,
+    "GUN_LEFT": 1.6,
     "AIR_TAP": 1.2,
     "GESTURE_TOGGLE": 2.5,
     "ROCK_ON": 2.5,
@@ -434,6 +436,7 @@ class GestureWorker:
         try:
             while self.is_running:
                 loop_start = time.time()
+                frame_bgr: Optional[Any] = None
 
                 # 1. Hardware capability check
                 caps = DeviceProbe.get_capabilities()
@@ -483,7 +486,9 @@ class GestureWorker:
                             continue
                     try:
                         if cap is not None:
-                            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                            fourcc_fn = getattr(cv2, "VideoWriter_fourcc", getattr(getattr(cv2, "VideoWriter", None), "fourcc", None))
+                            if fourcc_fn is not None:
+                                cap.set(cv2.CAP_PROP_FOURCC, fourcc_fn(*"MJPG"))
                             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                     except Exception:
@@ -584,9 +589,9 @@ class GestureWorker:
                     is_volume = is_volume_dial or is_thumb_volume
 
                     # Streak confirmation requirement:
-                    # Swipe and volume dial have multi-frame accumulation already built-in.
-                    # Discrete static poses require 2 consecutive frames to prevent single-frame glitches.
-                    if is_volume_dial or detected_gesture in ("NEXT_TRACK", "PREV_TRACK") or detected_gesture.startswith("GESTURE_TOGGLE"):
+                    # Volume dial has continuous frame accumulation built-in; GESTURE_TOGGLE has 1.0s internal timer.
+                    # Discrete static poses (including Finger Gun track skips) require 2 consecutive frames.
+                    if is_volume_dial or detected_gesture.startswith("GESTURE_TOGGLE"):
                         required_streak = 1
                     else:
                         required_streak = 2
@@ -719,13 +724,103 @@ class GestureWorker:
             pass
         return "NONE", 0.0
 
+    @staticmethod
+    def _detect_finger_gun(hand_lms: Any) -> Tuple[str, float]:
+        """Classifies an intentional Finger Gun (Pistol) hand pose pointing left or right.
+
+        Anatomy of a Finger Gun:
+        - Index Finger (Barrel): Fully extended and straight.
+        - Thumb (Hammer): Extended away from palm and elevated.
+        - Ring & Pinky: Tightly curled/folded into palm.
+        - Middle Finger: Folded into palm (classic pistol) or extended with index (double-barrel).
+        - Barrel orientation: Dominantly horizontal (|dx| > 1.2 * |dy| and |dx| >= 0.08).
+
+        Returns:
+            ("GUN_RIGHT", 0.90) if pointing to user's right (NEXT_TRACK)
+            ("GUN_LEFT", 0.90) if pointing to user's left (PREV_TRACK)
+            ("NONE", 0.0) otherwise
+        """
+        if not hand_lms or len(hand_lms) < 21:
+            return "NONE", 0.0
+
+        def get_pt(p: Any) -> Tuple[float, float, float]:
+            if hasattr(p, "x"):
+                return float(p.x), float(p.y), float(getattr(p, "z", 0.0))
+            elif isinstance(p, dict):
+                return float(p.get("x", 0.0)), float(p.get("y", 0.0)), float(p.get("z", 0.0))
+            return float(p[0]), float(p[1]), float(p[2]) if len(p) > 2 else 0.0
+
+        def dist_2d(p1: Any, p2: Any) -> float:
+            x1, y1, _ = get_pt(p1)
+            x2, y2, _ = get_pt(p2)
+            return math.hypot(x1 - x2, y1 - y2)
+
+        wrist = hand_lms[0]
+        thumb_mcp = hand_lms[2]
+        thumb_tip = hand_lms[4]
+        index_mcp = hand_lms[5]
+        index_pip = hand_lms[6]
+        index_dip = hand_lms[7]
+        index_tip = hand_lms[8]
+        middle_pip = hand_lms[10]
+        middle_tip = hand_lms[12]
+        ring_pip = hand_lms[14]
+        ring_tip = hand_lms[16]
+        pinky_pip = hand_lms[18]
+        pinky_tip = hand_lms[20]
+
+        # 1. Ring and Pinky MUST be folded into the palm
+        ring_folded = dist_2d(ring_tip, wrist) < dist_2d(ring_pip, wrist) * 1.15
+        pinky_folded = dist_2d(pinky_tip, wrist) < dist_2d(pinky_pip, wrist) * 1.15
+        if not (ring_folded and pinky_folded):
+            return "NONE", 0.0
+
+        # 2. Middle finger: folded (single-barrel pistol) or extended (double-barrel pistol)
+        middle_folded = dist_2d(middle_tip, wrist) < dist_2d(middle_pip, wrist) * 1.15
+        middle_extended = dist_2d(middle_tip, wrist) > dist_2d(middle_pip, wrist) * 1.20
+        if not (middle_folded or middle_extended):
+            return "NONE", 0.0
+
+        # 3. Index finger MUST be extended and straight
+        index_extended = dist_2d(index_tip, wrist) > dist_2d(index_pip, wrist) * 1.20
+        segment_sum = dist_2d(index_pip, index_mcp) + dist_2d(index_dip, index_pip) + dist_2d(index_tip, index_dip)
+        total_len = dist_2d(index_tip, index_mcp)
+        index_straight = (total_len / max(0.001, segment_sum)) > 0.75
+        if not (index_extended and index_straight):
+            return "NONE", 0.0
+
+        # 4. Thumb extended (cocked hammer)
+        thumb_extended = dist_2d(thumb_tip, wrist) > dist_2d(thumb_mcp, wrist) * 1.05
+        if not thumb_extended:
+            return "NONE", 0.0
+
+        # 5. Orientation check: Index finger barrel vector from MCP (5) to TIP (8)
+        # In mirrored screen coordinates: user's right has x_mirrored > 0
+        # x_mirrored = 1.0 - x
+        # dx_mirrored = (1.0 - index_tip.x) - (1.0 - index_mcp.x) = index_mcp.x - index_tip.x
+        imcp_x, imcp_y, _ = get_pt(index_mcp)
+        itip_x, itip_y, _ = get_pt(index_tip)
+        dx_mirrored = imcp_x - itip_x
+        dy = itip_y - imcp_y
+
+        # Dominantly horizontal pointing
+        if abs(dx_mirrored) < 0.08:
+            return "NONE", 0.0
+        if abs(dx_mirrored) <= 1.20 * abs(dy):
+            return "NONE", 0.0
+
+        if dx_mirrored > 0:
+            return "GUN_RIGHT", 0.90
+        else:
+            return "GUN_LEFT", 0.90
+
     def _evaluate_gesture_heuristic(self, frame: Any) -> Tuple[str, float]:
         """Evaluates hand gestures using MediaPipe GestureRecognizer and trajectory heuristics.
 
         Priority order:
         1. Deliberate lock hold: Rock On (ILoveYou) held for 1.0s -> GESTURE_TOGGLE:PAUSED
         2. Pinch + Rotate -> VOLUME_DIAL:XX (ReflectOS-style, inverted to match natural turn)
-        3. Horizontal swipe -> NEXT_TRACK / PREV_TRACK (mirrored, suppresses static play/pause while moving)
+        3. Finger Gun Pointing -> GUN_RIGHT / NEXT_TRACK or GUN_LEFT / PREV_TRACK
         4. Air Tap (quick pinch) -> AIR_TAP
         5. Static poses (fist, thumb up/down, peace, pointing, open palm) - immediate when hand is steady
         """
@@ -839,19 +934,12 @@ class GestureWorker:
                 else:
                     self._pinch_streak = 0
 
-                # ── 2b. Horizontal Swipe Trajectory → NEXT/PREV TRACK ─────
-                # Evaluates displacement across recent wrist points
-                if len(self._wrist_history) >= 2:
-                    for past_t, past_x, past_y in list(self._wrist_history)[:-1]:
-                        dt = now - past_t
-                        if 0.08 <= dt <= 0.85:
-                            dx = mirrored_x - past_x
-                            dy = wrist_y - past_y
-                            if abs(dx) >= 0.06 and abs(dx) > 1.20 * abs(dy):
-                                self._wrist_history.clear()
-                                self._toggle_gesture_start = 0.0
-                                gesture = "NEXT_TRACK" if dx > 0 else "PREV_TRACK"
-                                return gesture, 0.88
+                # ── 2b. Finger Gun Pointing → NEXT/PREV TRACK (GUN_RIGHT / GUN_LEFT) ──
+                gun_gesture, gun_conf = self._detect_finger_gun(hand_lms)
+                if gun_gesture != "NONE":
+                    self._wrist_history.clear()
+                    self._toggle_gesture_start = 0.0
+                    return gun_gesture, gun_conf
 
             else:
                 self._pinch_streak = 0
@@ -863,10 +951,6 @@ class GestureWorker:
                 score = float(top_gesture.score)
 
                 if score >= 0.50:
-                    # If hand is in active horizontal motion (swiping), suppress static play/mute poses!
-                    if is_hand_moving and category in ("Open_Palm", "Closed_Fist"):
-                        return "NONE", 0.0
-
                     if category == "Open_Palm":
                         return "OPEN_PALM", score
                     elif category == "Closed_Fist":
@@ -925,12 +1009,12 @@ class GestureWorker:
                 await asyncio.to_thread(_set_system_volume, restore_vol)
                 await asyncio.to_thread(_control_media_player, "play")
 
-            elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT"):
-                logger.info("[GestureWorker] Dispatched NEXT_TRACK media action")
+            elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT", "GUN_RIGHT", "GUN_POINT_RIGHT"):
+                logger.info(f"[GestureWorker] Dispatched NEXT_TRACK media action ({gesture})")
                 await asyncio.to_thread(_control_media_player, "next")
 
-            elif gesture in ("PREV_TRACK", "PREVIOUS_TRACK", "SWIPE_LEFT"):
-                logger.info("[GestureWorker] Dispatched PREV_TRACK media action")
+            elif gesture in ("PREV_TRACK", "PREVIOUS_TRACK", "SWIPE_LEFT", "GUN_LEFT", "GUN_POINT_LEFT"):
+                logger.info(f"[GestureWorker] Dispatched PREV_TRACK media action ({gesture})")
                 await asyncio.to_thread(_control_media_player, "previous")
 
             elif gesture in ("THUMB_UP", "VOLUME_UP"):

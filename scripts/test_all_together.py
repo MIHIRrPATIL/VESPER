@@ -545,11 +545,11 @@ def run_gesture_monitor(fps: float = 6.0):
 
     print(f"{BOLD}Active Sensors:{RESET} Camera indices {caps.available_cameras} | Sampling: {fps} FPS")
     print(f"{BOLD}Gesture Vocabulary:{RESET}")
-    print(f"  • {CYAN}Closed Fist{RESET}     -> Mute Volume / Pause Playback")
-    print(f"  • {CYAN}Open Palm{RESET}       -> Resume Audio / Unmute")
-    print(f"  • {CYAN}Swipe Right{RESET}     -> Next Track (NEXT_TRACK)")
-    print(f"  • {CYAN}Swipe Left{RESET}      -> Previous Track (PREV_TRACK)")
-    print(f"  • {CYAN}Peace Sign{RESET}      -> Toggle Ambient Zen Mode")
+    print(f"  • {CYAN}Closed Fist{RESET}      -> Mute Volume / Pause Playback")
+    print(f"  • {CYAN}Open Palm{RESET}        -> Resume Audio / Unmute")
+    print(f"  • {CYAN}Finger Gun Right{RESET} -> Next Track (GUN_RIGHT)")
+    print(f"  • {CYAN}Finger Gun Left{RESET}  -> Previous Track (GUN_LEFT)")
+    print(f"  • {CYAN}Peace Sign{RESET}       -> Toggle Ambient Zen Mode")
     print(f"  • {CYAN}Thumbs Up{RESET}       -> Volume Up (+10%)")
     print(f"  • {CYAN}Thumbs Down{RESET}     -> Volume Down (-10%)")
     print(f"  • {CYAN}Pointing Up{RESET}     -> Toggle Focus Mode")
@@ -695,9 +695,9 @@ def run_gesture_monitor(fps: float = 6.0):
                     act_str = f"{RED}[MUTE: Vol=0%]{RESET}"
                 elif gesture in ("OPEN_PALM", "RESUME", "PLAY"):
                     act_str = f"{GREEN}[PLAY: Vol={snap.master_volume}%]{RESET}"
-                elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT"):
+                elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT", "GUN_RIGHT", "GUN_POINT_RIGHT"):
                     act_str = f"{CYAN}[NEXT TRACK]{RESET}"
-                elif gesture in ("PREV_TRACK", "SWIPE_LEFT"):
+                elif gesture in ("PREV_TRACK", "SWIPE_LEFT", "GUN_LEFT", "GUN_POINT_LEFT"):
                     act_str = f"{CYAN}[PREV TRACK]{RESET}"
                 elif gesture in ("PEACE_SIGN", "TOGGLE_ZEN"):
                     act_str = f"{MAGENTA}[ZEN MODE: {'ON' if snap.zen_mode else 'OFF'}]{RESET}"

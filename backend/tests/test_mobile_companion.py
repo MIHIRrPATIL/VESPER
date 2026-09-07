@@ -101,6 +101,8 @@ def test_notification_service_ingestion_and_filters(notif_service: NotificationS
         source_device_name="Mihir's Pixel",
     )
 
+    assert n1 is not None
+    assert n2 is not None
     assert notif_service.get_unread_count() == 2
 
     # Query recent

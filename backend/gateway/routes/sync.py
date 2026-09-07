@@ -6,7 +6,8 @@ and submit state diffs without maintaining a continuous WebSocket connection.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -52,6 +53,7 @@ async def register_device(reg: DeviceRegistration) -> Dict[str, Any]:
     return {"status": "registered", "device_id": reg.device_id, "cluster_version": state.version}
 
 
+@router.get("/devices/heartbeat", response_model=Dict[str, Any])
 @router.post("/devices/heartbeat", response_model=Dict[str, Any])
 async def heartbeat(req: HeartbeatRequest) -> Dict[str, Any]:
     """Records a heartbeat pulse for an edge device."""
@@ -59,6 +61,34 @@ async def heartbeat(req: HeartbeatRequest) -> Dict[str, Any]:
     if not success:
         raise HTTPException(status_code=404, detail=f"Device '{req.device_id}' not found.")
     return {"status": "ok", "device_id": req.device_id}
+
+
+@router.get("/profile", response_model=DeviceRegistration)
+async def get_gateway_profile() -> DeviceRegistration:
+    """Returns the host workstation gateway hardware and capability profile."""
+    from backend.vision.device_probe import DeviceProbe
+    caps = DeviceProbe.get_capabilities()
+    return DeviceRegistration(
+        device_id="vesper-host-workstation",
+        device_type="desktop",
+        device_name=f"VESPER Host ({caps.hostname or 'Desktop'})",
+        hostname=caps.hostname,
+        os_name=caps.os_name,
+        architecture=caps.architecture,
+        is_headless=caps.is_headless,
+        has_camera=caps.has_camera,
+        has_display=caps.has_display,
+        has_microphone=caps.has_microphone,
+        has_speaker=True,
+        cpu_cores=caps.cpu_cores_logical,
+        cpu_usage_pct=caps.cpu_usage_pct,
+        ram_total_gb=caps.ram_total_gb,
+        ram_available_gb=caps.ram_available_gb,
+        registered_at=time.time(),
+        last_heartbeat=time.time(),
+        is_online=True,
+    )
+
 
 
 @router.post("/scan", response_model=Dict[str, Any])
@@ -77,3 +107,31 @@ async def scan_network_devices() -> Dict[str, Any]:
         "cluster_role_allocations": allocations,
         "cluster_version": snapshot.version,
     }
+
+
+@router.get("/proactive/actions/recent", response_model=Dict[str, Any])
+async def get_recent_proactive_action(max_age: float = 15.0) -> Dict[str, Any]:
+    """Returns the most recently prompted proactive action awaiting confirmation."""
+    from backend.agent.proactive.action_queue import action_queue
+    act = action_queue.get_recent_prompted_action(max_age_sec=max_age)
+    if act:
+        return {"found": True, "action": act.model_dump()}
+    return {"found": False, "action": None}
+
+
+@router.get("/proactive/actions/active", response_model=List[Dict[str, Any]])
+async def get_active_proactive_actions(domain: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Returns active staged proactive actions."""
+    from backend.agent.proactive.action_queue import action_queue
+    acts = action_queue.get_active_actions(domain=domain)
+    return [a.model_dump() for a in acts]
+
+
+@router.post("/proactive/actions/{action_id}/resolve", response_model=Dict[str, Any])
+async def resolve_proactive_action(action_id: str, new_status: str, confirmed_by: str = "voice") -> Dict[str, Any]:
+    """Resolves a staged proactive action across the cluster."""
+    from backend.agent.proactive.action_queue import action_queue
+    res = action_queue.resolve_action(action_id, resolution=new_status, confirmed_by=confirmed_by)
+    if res:
+        return {"success": True, "action": res.model_dump()}
+    return {"success": False, "error": f"Action '{action_id}' not found"}

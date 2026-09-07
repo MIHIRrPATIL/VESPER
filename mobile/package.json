@@ -7,9 +7,18 @@
     "expo": "~57.0.20",
     "expo-battery": "~57.0.2",
     "expo-device": "~57.0.1",
+    "expo-network": "~57.0.1",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
-    "react-native": "0.86.3"
+    "react-native": "0.86.3",
+    "react-native-android-notification-listener": "^5.0.1",
+    "react-native-safe-area-context": "~5.7.0",
+    "alfred-service": "file:./modules/alfred-service"
+  },
+  "overrides": {
+    "react-native-android-notification-listener": {
+      "react": "$react"
+    }
   },
   "devDependencies": {
     "@types/react": "~19.2.2",

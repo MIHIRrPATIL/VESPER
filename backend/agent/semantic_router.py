@@ -25,6 +25,7 @@ class SemanticIntent(str, Enum):
     FINANCE_BALANCE = "finance_balance"
     SYSTEM_STATUS = "system_status"
     MOBILE_NOTIFICATIONS = "mobile_notifications"
+    BATTERY_STATUS = "battery_status"
     NONE = "none"
 
 
@@ -139,6 +140,18 @@ INTENT_PROTOTYPES: Dict[SemanticIntent, List[str]] = {
         "did I get any notifications",
         "any alerts on whatsapp or slack",
     ],
+    SemanticIntent.BATTERY_STATUS: [
+        "what is my phone battery",
+        "check battery on my devices",
+        "how much battery does my phone have",
+        "is my phone charging",
+        "what is the battery level on my laptop",
+        "check battery status",
+        "how much charge is left on my phone",
+        "battery levels across my devices",
+        "are any of my devices low on battery",
+        "is my phone plugged in",
+    ],
 }
 
 # Similarity thresholds for matching (empirically calibrated)
@@ -152,6 +165,7 @@ DEFAULT_THRESHOLDS: Dict[SemanticIntent, float] = {
     SemanticIntent.FINANCE_BALANCE: 0.60,
     SemanticIntent.SYSTEM_STATUS: 0.60,
     SemanticIntent.MOBILE_NOTIFICATIONS: 0.58,
+    SemanticIntent.BATTERY_STATUS: 0.58,
 }
 
 

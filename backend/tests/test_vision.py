@@ -224,7 +224,7 @@ async def test_gesture_worker_inference_and_dispatch():
     # 2. Verify dummy frame evaluation
     dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
     gesture, conf = worker._evaluate_gesture_heuristic(dummy_frame)
-    assert gesture in ("NONE", "CLOSED_FIST", "OPEN_PALM", "PEACE_SIGN", "NEXT_TRACK", "PREV_TRACK")
+    assert gesture in ("NONE", "CLOSED_FIST", "OPEN_PALM", "PEACE_SIGN", "NEXT_TRACK", "PREV_TRACK", "GUN_RIGHT", "GUN_LEFT")
     assert isinstance(conf, float)
 
     # 3. Verify CLOSED_FIST mute dispatch
@@ -264,12 +264,12 @@ async def test_gesture_worker_inference_and_dispatch():
     assert s.master_volume == 45
 
     # 9. Verify GESTURE_TOGGLE:PAUSED and GESTURE_TOGGLE:RESUMED
-    assert worker.state.tracking_paused is False
+    assert not worker.state.tracking_paused
     await worker._dispatch_gesture("GESTURE_TOGGLE:PAUSED", 0.90)
-    assert worker.state.tracking_paused is True
+    assert worker.state.tracking_paused
 
     await worker._dispatch_gesture("GESTURE_TOGGLE:RESUMED", 0.90)
-    assert worker.state.tracking_paused is False
+    assert not worker.state.tracking_paused
 
     # 10. Verify callback was executed
     assert len(callback_events) >= 8
@@ -278,35 +278,65 @@ async def test_gesture_worker_inference_and_dispatch():
 
 
 @pytest.mark.asyncio
-async def test_gesture_worker_toggle_lockout_and_swipes():
-    """Verifies that toggle lockout prevents flapping and trajectory correctly differentiates swipes."""
-    import time
+async def test_gesture_worker_finger_gun_detection():
+    """Verifies that intentional Finger Gun poses trigger GUN_RIGHT / GUN_LEFT and casual movements return NONE."""
+    class MockPt:
+        def __init__(self, x: float, y: float, z: float = 0.0):
+            self.x = x
+            self.y = y
+            self.z = z
 
-    worker = GestureWorker(fps=6.0)
-    worker.state.tracking_paused = True
-    worker._toggle_lockout_until = time.time() + 10.0
+    def make_gun_landmarks(direction: str = "right") -> list:
+        lms = [MockPt(0.5, 0.7) for _ in range(21)]
+        lms[0] = MockPt(0.5, 0.7)       # Wrist
+        lms[2] = MockPt(0.45, 0.62)     # Thumb MCP
+        lms[4] = MockPt(0.42, 0.50)     # Thumb TIP (extended up)
+        lms[5] = MockPt(0.50, 0.55)     # Index MCP
+        lms[6] = MockPt(0.45 if direction == "right" else 0.55, 0.55)  # Index PIP
+        lms[7] = MockPt(0.40 if direction == "right" else 0.60, 0.55)  # Index DIP
+        lms[8] = MockPt(0.35 if direction == "right" else 0.65, 0.55)  # Index TIP (pointing horizontally)
+        lms[9] = MockPt(0.52, 0.55)     # Middle MCP
+        lms[10] = MockPt(0.52, 0.62)    # Middle PIP
+        lms[12] = MockPt(0.51, 0.66)    # Middle TIP (folded)
+        lms[13] = MockPt(0.54, 0.57)    # Ring MCP
+        lms[14] = MockPt(0.54, 0.63)    # Ring PIP
+        lms[16] = MockPt(0.53, 0.67)    # Ring TIP (folded)
+        lms[17] = MockPt(0.56, 0.60)    # Pinky MCP
+        lms[18] = MockPt(0.56, 0.64)    # Pinky PIP
+        lms[20] = MockPt(0.55, 0.68)    # Pinky TIP (folded)
+        return lms
 
-    # Under lockout, _check_toggle_gesture_only should return NONE immediately
-    res, conf = worker._check_toggle_gesture_only(None)
-    assert res == "NONE"
-    assert conf == 0.0
+    # 1. Finger Gun pointing Right -> GUN_RIGHT (Next Track)
+    gun_right_lms = make_gun_landmarks("right")
+    res_right, conf_right = GestureWorker._detect_finger_gun(gun_right_lms)
+    assert res_right == "GUN_RIGHT"
+    assert conf_right >= 0.85
 
-    # Verify swipe trajectory logic with simulated wrist history
-    now = time.time()
-    # Mirrored X: Moving to user's right (from x=0.4 to x=0.6)
-    worker._wrist_history.append((now - 0.2, 0.40, 0.50))
-    worker._wrist_history.append((now, 0.60, 0.50))
+    # 2. Finger Gun pointing Left -> GUN_LEFT (Prev Track)
+    gun_left_lms = make_gun_landmarks("left")
+    res_left, conf_left = GestureWorker._detect_finger_gun(gun_left_lms)
+    assert res_left == "GUN_LEFT"
+    assert conf_left >= 0.85
 
-    # Evaluate trajectory across history manually
-    dx = 0.60 - 0.40
-    dy = 0.50 - 0.50
-    assert dx > 0.06
-    assert abs(dx) > 1.2 * abs(dy)
-    assert ("NEXT_TRACK" if dx > 0 else "PREV_TRACK") == "NEXT_TRACK"
+    # 3. Open Palm (all fingers extended) -> NONE (not a finger gun)
+    open_palm_lms = make_gun_landmarks("right")
+    # Extend ring and pinky
+    open_palm_lms[16] = MockPt(0.54, 0.35)
+    open_palm_lms[20] = MockPt(0.56, 0.38)
+    res_palm, _ = GestureWorker._detect_finger_gun(open_palm_lms)
+    assert res_palm == "NONE"
 
-    # Mirrored X: Moving to user's left (from x=0.6 to x=0.4)
-    dx_left = 0.40 - 0.60
-    assert ("NEXT_TRACK" if dx_left > 0 else "PREV_TRACK") == "PREV_TRACK"
+    # 4. Closed Fist (index folded) -> NONE
+    fist_lms = make_gun_landmarks("right")
+    fist_lms[8] = MockPt(0.50, 0.65)
+    res_fist, _ = GestureWorker._detect_finger_gun(fist_lms)
+    assert res_fist == "NONE"
+
+    # 5. Pointing Up (vertical index) -> NONE (not horizontal)
+    point_up_lms = make_gun_landmarks("right")
+    point_up_lms[8] = MockPt(0.50, 0.35)  # Index points vertically up
+    res_up, _ = GestureWorker._detect_finger_gun(point_up_lms)
+    assert res_up == "NONE"
 
 
 @pytest.mark.asyncio
@@ -346,13 +376,13 @@ async def test_gesture_rock_on_lock_toggle_and_open_palm_immediate():
     # First frame hasn't reached 1.0s hold yet
     assert gesture == "ROCK_ON"
     assert worker._toggle_gesture_start > 0.0
-    assert worker._toggle_gesture_fired is False
+    assert not worker._toggle_gesture_fired
 
     # 3. Simulate hold for 1.1s -> should fire GESTURE_TOGGLE:PAUSED
     worker._toggle_gesture_start = time.time() - 1.1
     gesture, score = worker._evaluate_gesture_heuristic(dummy_frame)
     assert gesture == "GESTURE_TOGGLE:PAUSED"
-    assert worker._toggle_gesture_fired is True
+    assert worker._toggle_gesture_fired
     assert worker._toggle_lockout_until > time.time()
 
     # 4. In paused state, verify _check_toggle_gesture_only resumes on Rock On (ILoveYou) hold 1.0s

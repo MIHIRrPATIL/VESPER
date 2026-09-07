@@ -105,6 +105,11 @@ class SystemSpecialist(BaseSpecialist):
                 "description": "Performs an active subnet sweep to discover connected VESPER edge nodes (Orange Pi, Raspberry Pi, mobile HUD) and automatically re-allocate cluster roles.",
                 "parameters": {"type": "object", "properties": {}},
             },
+            {
+                "name": "check_battery_status",
+                "description": "Reports the battery level and charging state for all connected devices (phone, laptop, edge nodes). Shows whether each device is charging and if any alerts are active.",
+                "parameters": {"type": "object", "properties": {}},
+            },
         ]
 
     # ── Hardware Telemetry (<5ms) ─────────────────────────────────────────────
@@ -325,6 +330,44 @@ class SystemSpecialist(BaseSpecialist):
             card_payload={"type": "audio_sinks_card", "sinks": sinks},
         )
 
+    # ── Battery Status (Cross-Device) ──────────────────────────────────────────
+
+    async def check_battery_status(self) -> SpecialistResult:
+        """Reports battery levels across all registered VESPER devices."""
+        from backend.agent.proactive_agent import proactive_agent
+
+        statuses = proactive_agent.get_all_device_battery_status()
+
+        if not statuses:
+            return SpecialistResult(
+                success=True,
+                action="check_battery_status",
+                data={"devices": []},
+                speech_summary="No devices with battery telemetry are currently registered in the cluster, sir.",
+                card_payload={"type": "battery_status_card", "devices": []},
+            )
+
+        speech_parts = []
+        for dev in statuses:
+            if dev["battery_level"] is not None:
+                charging_str = "and charging" if dev["is_charging"] else "and not charging"
+                alert_str = " (alert active)" if dev.get("alert_active") else ""
+                speech_parts.append(
+                    f"{dev['device_name']} is at {dev['battery_level']}% {charging_str}{alert_str}"
+                )
+            else:
+                speech_parts.append(f"{dev['device_name']} has no battery telemetry")
+
+        speech = f"Battery status across your devices, sir: {'; '.join(speech_parts)}."
+
+        return SpecialistResult(
+            success=True,
+            action="check_battery_status",
+            data={"devices": statuses},
+            speech_summary=speech,
+            card_payload={"type": "battery_status_card", "devices": statuses},
+        )
+
     # ── Network Device Discovery & Dynamic Role Allocation ───────────────────
 
     async def scan_network_devices(self) -> SpecialistResult:
@@ -409,5 +452,53 @@ class SystemSpecialist(BaseSpecialist):
         # 4. Network Discovery
         elif act in ["scan_network_devices", "scan_network", "discover_devices", "scan_devices"]:
             return await self.scan_network_devices()
+
+        # 5. Battery Status (cross-device)
+        elif act in ["check_battery_status", "battery_status", "battery", "check_battery", "device_battery"]:
+            return await self.check_battery_status()
+
+        # 6. Process Termination & Rogue Cleanup
+        elif act in ["terminate_process", "kill_process", "kill_rogue_process", "stop_process"]:
+            pid = params.get("pid")
+            p_name = str(params.get("name") or params.get("process") or params.get("process_name") or "")
+            if pid:
+                try:
+                    pid = int(pid)
+                except ValueError:
+                    pid = None
+            if not pid and p_name:
+                for p in psutil.process_iter(["pid", "name"]):
+                    try:
+                        if p_name.lower() in p.info["name"].lower():
+                            pid = p.info["pid"]
+                            break
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+            if not pid:
+                return SpecialistResult(
+                    success=False,
+                    action=act,
+                    error=f"Could not identify running process '{p_name}' to terminate, sir.",
+                    speech_summary=f"I could not locate active process '{p_name}', sir.",
+                )
+            from backend.agent.proactive.system_sentry import system_sentry
+            res = system_sentry.kill_rogue_process(pid, p_name)
+            if res.get("success"):
+                speech = f"Process '{p_name or pid}' has been terminated, sir."
+                return SpecialistResult(
+                    success=True,
+                    action=act,
+                    data=res,
+                    speech_summary=speech,
+                    card_payload={"type": "process_terminated_card", "pid": pid, "process_name": p_name},
+                )
+            else:
+                speech = f"Unable to terminate process '{p_name}': {res.get('error')}"
+                return SpecialistResult(
+                    success=False,
+                    action=act,
+                    error=res.get("error"),
+                    speech_summary=speech,
+                )
 
         return SpecialistResult(success=False, action=action, error=f"Unknown action '{action}' on system specialist.")

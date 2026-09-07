@@ -158,7 +158,7 @@ class NetworkScanner:
                 return DeviceRegistration(**data)
 
             # Case B: Standard VESPER Gateway /health endpoint
-            if data.get("status") == "healthy" and ("vesper" in str(data.get("service", "")).lower() or data.get("cluster_version") is not None):
+            if data.get("status") in ("healthy", "ok") and ("vesper" in str(data.get("service", "")).lower() or data.get("cluster_version") is not None):
                 dev_id = f"node-{ip.replace('.', '-')}-{port}"
                 return DeviceRegistration(
                     device_id=dev_id,

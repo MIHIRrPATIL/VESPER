@@ -71,7 +71,7 @@ VOICE_SILENCE_THRESHOLD_MS: int = int(os.getenv("VOICE_SILENCE_THRESHOLD_MS", "4
 AGENT_HOST: str = os.getenv("AGENT_HOST", "0.0.0.0")
 AGENT_PORT: int = int(os.getenv("AGENT_PORT", "8001"))
 AGENT_FAST_MODEL: str = os.getenv("AGENT_FAST_MODEL", "groq/compound-mini")
-AGENT_PRIMARY_MODEL: str = os.getenv("AGENT_PRIMARY_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+AGENT_PRIMARY_MODEL: str = os.getenv("AGENT_PRIMARY_MODEL", "openrouter/free")
 
 # ── External Specialist Integrations ──────────────────────────────────────
 TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")

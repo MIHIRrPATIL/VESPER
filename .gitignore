@@ -165,3 +165,10 @@ output/
 *high.onnx
 *high.onnx.json
 
+# Android and Gradle build artifacts
+.gradle/
+**/android/.gradle/
+**/android/build/
+*.aar
+*.apk
+

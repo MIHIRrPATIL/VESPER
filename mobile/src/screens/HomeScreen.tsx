@@ -6,24 +6,45 @@ import {
   TextInput,
   TouchableOpacity,
   ScrollView,
-  SafeAreaView,
   StatusBar,
   Switch,
+  ActivityIndicator,
+  Platform,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { gatewayClient, ConnectionStatus } from "../services/gateway";
 import { MobileNotificationService, PRESET_NOTIFICATIONS } from "../services/notifications";
-import { SynchronizedState } from "../types/events";
+import { SubnetDiscoveryService, DiscoveredGateway } from "../services/discovery";
+import { SynchronizedState, EventType } from "../types/events";
+import { AlfredService } from "../../modules/alfred-service";
 
 export default function HomeScreen() {
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
-  const [gatewayUrl, setGatewayUrl] = useState<string>("ws://127.0.0.1:8000/ws");
+  const [gatewayUrl, setGatewayUrl] = useState<string>(gatewayClient.getGatewayUrl());
   const [deviceName, setDeviceName] = useState<string>("Mobile Companion");
   const [state, setState] = useState<SynchronizedState | null>(null);
+
+  // Discovery state
+  const [isScanning, setIsScanning] = useState<boolean>(false);
+  const [scanProgress, setScanProgress] = useState<string>("");
+
+  // Offline queue state
+  const [offlineCount, setOfflineCount] = useState<number>(0);
+
+  // Live OS notification permission state
+  const [hasNotificationAccess, setHasNotificationAccess] = useState<boolean>(false);
+
+  // Historical notifications
+  const [clusterNotifications, setClusterNotifications] = useState<any[]>([]);
+  const [isLoadingClusterNotifs, setIsLoadingClusterNotifs] = useState<boolean>(false);
 
   // Custom alert form
   const [customTitle, setCustomTitle] = useState("");
   const [customText, setCustomText] = useState("");
   const [customApp, setCustomApp] = useState("WhatsApp");
+
+  // Alfred persistent foreground service state
+  const [isAlfredServiceRunning, setIsAlfredServiceRunning] = useState<boolean>(false);
 
   // Event feed log
   const [eventLogs, setEventLogs] = useState<Array<{ id: string; time: string; text: string; channel: string }>>([]);
@@ -32,19 +53,37 @@ export default function HomeScreen() {
     // 1. Initial info
     setGatewayUrl(gatewayClient.getGatewayUrl());
     setDeviceName(gatewayClient.getDeviceName());
+    setOfflineCount(gatewayClient.getOfflineQueueCount());
+    checkNotificationPermission();
 
     // 2. Status subscription
     const unsubStatus = gatewayClient.onStatus((newStatus) => {
       setStatus(newStatus);
+      if (newStatus === "connected") {
+        fetchHistory();
+      }
     });
 
     // 3. State subscription
     const unsubState = gatewayClient.onState((newState) => {
       setState(newState);
+      if (newState?.recent_notifications && newState.recent_notifications.length > 0) {
+        setClusterNotifications(newState.recent_notifications);
+      }
     });
 
-    // 4. Envelope log subscription
+    // 4. Offline queue subscription
+    const unsubQueue = gatewayClient.onOfflineQueue((count) => {
+      setOfflineCount(count);
+    });
+
+    // 5. Envelope log subscription with unique key generator
     const unsubEnvelope = gatewayClient.onEnvelope((env) => {
+      // Don't clutter the UI wire with routine heartbeat pings
+      if (env.type === EventType.PING || env.type === EventType.PONG) {
+        return;
+      }
+
       const timeStr = new Date().toLocaleTimeString();
       let summary = `${env.channel} : ${env.type}`;
       if (env.channel === "NOTIFY" && env.payload?.notification) {
@@ -52,8 +91,24 @@ export default function HomeScreen() {
       } else if (env.channel === "SYSTEM" && env.type === "SET_VOLUME") {
         summary += ` | Volume -> ${env.payload.volume}%`;
       }
-      setEventLogs((prev) => [{ id: env.uuid || Math.random().toString(), time: timeStr, text: summary, channel: String(env.channel) }, ...prev.slice(0, 19)]);
+      const uniqueId = `evt_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      setEventLogs((prev) => [{ id: uniqueId, time: timeStr, text: summary, channel: String(env.channel) }, ...prev.slice(0, 19)]);
     });
+
+    // 6. Check and auto-start Alfred persistent foreground service on Android
+    if (Platform.OS === "android") {
+      AlfredService.isServiceRunning().then((running) => {
+        setIsAlfredServiceRunning(running);
+        if (!running) {
+          AlfredService.startService(
+            "Alfred (VESPER Nexus)",
+            "Alfred is vigilantly standing watch, sir."
+          ).then((started) => {
+            if (started) setIsAlfredServiceRunning(true);
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
 
     // Connect automatically
     gatewayClient.connect();
@@ -61,19 +116,120 @@ export default function HomeScreen() {
     return () => {
       unsubStatus();
       unsubState();
+      unsubQueue();
       unsubEnvelope();
     };
   }, []);
+
+  const checkNotificationPermission = async () => {
+    if (Platform.OS === "android") {
+      try {
+        const listener = require("react-native-android-notification-listener");
+        if (listener?.default?.getPermissionStatus) {
+          const perm = await listener.default.getPermissionStatus();
+          setHasNotificationAccess(perm === "authorized");
+        }
+      } catch {
+        setHasNotificationAccess(false);
+      }
+    }
+  };
+
+  const handleRequestNotificationPermission = () => {
+    if (Platform.OS === "android") {
+      try {
+        const listener = require("react-native-android-notification-listener");
+        if (listener?.default?.requestPermission) {
+          listener.default.requestPermission();
+        }
+      } catch {
+        alert("Native notification access requires an installed Android APK build.");
+      }
+    }
+  };
+
+  const handleToggleAlfredService = async () => {
+    if (Platform.OS !== "android") {
+      alert("Foreground service requires Android standalone build.");
+      return;
+    }
+    if (isAlfredServiceRunning) {
+      await AlfredService.stopService();
+      setIsAlfredServiceRunning(false);
+    } else {
+      const ok = await AlfredService.startService(
+        "Alfred (VESPER Nexus)",
+        "Alfred is vigilantly standing watch, sir."
+      );
+      setIsAlfredServiceRunning(ok);
+    }
+  };
+
+  const handleRequestBatteryExemption = async () => {
+    if (Platform.OS !== "android") {
+      alert("Battery optimization settings apply to Android devices.");
+      return;
+    }
+    await AlfredService.requestIgnoreBatteryOptimizations();
+  };
 
   const handleConnect = () => {
     gatewayClient.setGatewayUrl(gatewayUrl.trim());
   };
 
-  const handleSendPreset = (presetId: string) => {
-    const success = MobileNotificationService.sendPreset(presetId);
-    if (success) {
-      console.log(`[HomeScreen] Sent preset: ${presetId}`);
+  const handleAutoDiscover = async (mode: "auto" | "quick" | "corporate" = "auto") => {
+    if (isScanning) return;
+    setIsScanning(true);
+    const modeLabel =
+      mode === "quick"
+        ? "Running Quick Scan (<500ms)..."
+        : mode === "corporate"
+        ? "Running Corporate / Campus Subnet Sweep..."
+        : "Running Hybrid Discovery...";
+    setScanProgress(modeLabel);
+
+    try {
+      const discovered: DiscoveredGateway | null = await SubnetDiscoveryService.discoverHybrid(
+        mode,
+        (scanned, total, currentIp) => {
+          setScanProgress(`Sweeping Subnet (${scanned}/${total}): ${currentIp}...`);
+        },
+        undefined,
+        gatewayUrl
+      );
+
+      if (discovered) {
+        setGatewayUrl(discovered.wsUrl);
+        setScanProgress(`Found gateway at ${discovered.ip}:${discovered.port}! Connecting...`);
+        await gatewayClient.setGatewayUrl(discovered.wsUrl);
+      } else {
+        setScanProgress(
+          mode === "quick"
+            ? "Quick scan finished with no match. Try 'Campus / Subnet Sweep'."
+            : "No VESPER gateway detected on local subnet. Verify Wi-Fi or enter IP manually."
+        );
+      }
+    } catch (err: any) {
+      setScanProgress(`Scan error: ${err?.message || "Unknown error"}`);
+    } finally {
+      setIsScanning(false);
     }
+  };
+
+  const fetchHistory = async () => {
+    setIsLoadingClusterNotifs(true);
+    try {
+      const notifs = await gatewayClient.fetchClusterNotifications(25, false);
+      if (notifs && notifs.length > 0) {
+        setClusterNotifications(notifs);
+      }
+    } finally {
+      setIsLoadingClusterNotifs(false);
+    }
+  };
+
+  const handleSendPreset = (presetId: string) => {
+    MobileNotificationService.sendPreset(presetId);
   };
 
   const handleSendCustom = () => {
@@ -98,12 +254,25 @@ export default function HomeScreen() {
   const getStatusColor = () => {
     switch (status) {
       case "connected":
-        return "#10B981"; // Emerald green
+        return "#10B981"; // Emerald
       case "connecting":
       case "reconnecting":
         return "#F59E0B"; // Amber
       default:
         return "#EF4444"; // Red
+    }
+  };
+
+  const getPriorityBadgeStyle = (priority: string) => {
+    switch (priority) {
+      case "URGENT":
+        return { backgroundColor: "rgba(239, 68, 68, 0.2)", borderColor: "#EF4444", textColor: "#F87171" };
+      case "HIGH":
+        return { backgroundColor: "rgba(245, 158, 11, 0.2)", borderColor: "#F59E0B", textColor: "#FBBF24" };
+      case "MEDIUM":
+        return { backgroundColor: "rgba(59, 130, 246, 0.2)", borderColor: "#3B82F6", textColor: "#60A5FA" };
+      default:
+        return { backgroundColor: "rgba(100, 116, 139, 0.2)", borderColor: "#64748B", textColor: "#94A3B8" };
     }
   };
 
@@ -131,13 +300,116 @@ export default function HomeScreen() {
               style={styles.input}
               value={gatewayUrl}
               onChangeText={setGatewayUrl}
-              placeholder="ws://192.168.1.xxx:8000/ws"
+              placeholder="ws://192.168.0.xxx:8000/ws"
               placeholderTextColor="#64748B"
               autoCapitalize="none"
               autoCorrect={false}
             />
             <TouchableOpacity style={styles.primaryButton} onPress={handleConnect}>
               <Text style={styles.buttonText}>Connect</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Hybrid Auto-Discovery Buttons */}
+          <View style={styles.discoveryButtonsRow}>
+            <TouchableOpacity
+              style={[styles.discoveryButtonHalf, isScanning && styles.buttonDisabled]}
+              onPress={() => handleAutoDiscover("quick")}
+              disabled={isScanning}
+            >
+              {isScanning ? (
+                <ActivityIndicator size="small" color="#38BDF8" />
+              ) : (
+                <Text style={styles.buttonTextSecondary}>Quick Scan (Home)</Text>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.discoveryButtonHalf, isScanning && styles.buttonDisabled]}
+              onPress={() => handleAutoDiscover("corporate")}
+              disabled={isScanning}
+            >
+              {isScanning ? (
+                <ActivityIndicator size="small" color="#38BDF8" />
+              ) : (
+                <Text style={styles.buttonTextSecondary}>Campus / Subnet Sweep</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+          {scanProgress !== "" && <Text style={styles.scanFeedback}>{scanProgress}</Text>}
+
+          {/* Offline Queue Notice */}
+          {offlineCount > 0 && (
+            <View style={styles.offlineBanner}>
+              <Text style={styles.offlineBannerText}>
+                {offlineCount} notification(s) stored in offline queue. Will sync automatically upon connection.
+              </Text>
+            </View>
+          )}
+        </View>
+
+        {/* Live OS Notification Interception Service Card */}
+        <View style={styles.card}>
+          <View style={styles.rowBetween}>
+            <Text style={styles.cardHeader}>Live OS Notification Interception</Text>
+            <View
+              style={[
+                styles.statusBadge,
+                { backgroundColor: hasNotificationAccess ? "#10B981" : "#F59E0B" },
+              ]}
+            >
+              <Text style={styles.statusText}>
+                {hasNotificationAccess ? "ACTIVE" : "PERMISSION REQUIRED"}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.helpText}>
+            {hasNotificationAccess
+              ? "NotificationListenerService is active. Incoming alerts from third-party apps (WhatsApp, SMS, Slack, etc.) are intercepted in real time and forwarded to VESPER."
+              : "To capture real notifications arriving on this phone from other apps, grant Notification Access in Android Settings. (Requires installed APK)."}
+          </Text>
+          <View style={styles.rowBetween}>
+            <TouchableOpacity
+              style={styles.secondaryButton}
+              onPress={handleRequestNotificationPermission}
+            >
+              <Text style={styles.buttonTextSecondary}>Open Notification Access Settings</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.smallButton} onPress={checkNotificationPermission}>
+              <Text style={styles.buttonText}>Refresh Status</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* Alfred Persistent Background Butler & Battery Shield */}
+        <View style={styles.card}>
+          <View style={styles.rowBetween}>
+            <Text style={styles.cardHeader}>Alfred Persistent Vigilance</Text>
+            <View
+              style={[
+                styles.statusBadge,
+                { backgroundColor: isAlfredServiceRunning ? "#10B981" : "#64748B" },
+              ]}
+            >
+              <Text style={styles.statusText}>
+                {isAlfredServiceRunning ? "ACTIVE (VIGILANT)" : "STANDBY"}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.helpText}>
+            Maintains a persistent Android foreground service with low-priority notification. Keeps Alfred capturing alerts and holding the relay connection even when the phone is locked or other apps are running.
+          </Text>
+          <View style={styles.rowBetween}>
+            <TouchableOpacity
+              style={styles.secondaryButton}
+              onPress={handleToggleAlfredService}
+            >
+              <Text style={styles.buttonTextSecondary}>
+                {isAlfredServiceRunning ? "Stop Service" : "Start Service"}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.smallButton} onPress={handleRequestBatteryExemption}>
+              <Text style={styles.buttonText}>Battery Exemption</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -180,11 +452,43 @@ export default function HomeScreen() {
           </View>
         </View>
 
+        {/* Synchronized Notifications History */}
+        <View style={styles.card}>
+          <View style={styles.rowBetween}>
+            <Text style={styles.cardHeader}>Recent Cluster Notifications</Text>
+            <TouchableOpacity onPress={fetchHistory} disabled={isLoadingClusterNotifs}>
+              <Text style={styles.actionLink}>
+                {isLoadingClusterNotifs ? "Refreshing..." : "Refresh History"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {clusterNotifications.length === 0 ? (
+            <Text style={styles.emptyText}>No notifications stored in cluster yet.</Text>
+          ) : (
+            clusterNotifications.slice(0, 5).map((n: any, idx: number) => {
+              const badge = getPriorityBadgeStyle(n.priority || "LOW");
+              return (
+                <View key={`notif_${n.id || idx}_${idx}`} style={styles.notifItem}>
+                  <View style={styles.notifHeaderRow}>
+                    <Text style={styles.notifAppName}>{n.app_name || "Unknown"}</Text>
+                    <View style={[styles.priorityTag, { backgroundColor: badge.backgroundColor, borderColor: badge.borderColor }]}>
+                      <Text style={[styles.priorityTagText, { color: badge.textColor }]}>{n.priority || "LOW"}</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.notifTitle}>{n.title}</Text>
+                  <Text style={styles.notifBody}>{n.text}</Text>
+                </View>
+              );
+            })
+          )}
+        </View>
+
         {/* Quick Notification Transmitter */}
         <View style={styles.card}>
-          <Text style={styles.cardHeader}>Notification Transmitter (Instant Relay)</Text>
+          <Text style={styles.cardHeader}>Notification Transmitter (Simulation Engine)</Text>
           <Text style={styles.helpText}>
-            Tap a preset to send an alert over WebSocket Channel.NOTIFY. The Desktop HUD will ingest, triage, and display it instantly.
+            Tap a preset to send an alert over WebSocket Channel.NOTIFY. If offline, the alert is cached and sent when reconnected.
           </Text>
 
           <View style={styles.presetGrid}>
@@ -231,8 +535,8 @@ export default function HomeScreen() {
           {eventLogs.length === 0 ? (
             <Text style={styles.emptyText}>No cluster events received yet. Connect to Gateway to begin streaming.</Text>
           ) : (
-            eventLogs.map((log) => (
-              <View key={log.id} style={styles.logItem}>
+            eventLogs.map((log, idx) => (
+              <View key={`${log.id}_${idx}`} style={styles.logItem}>
                 <Text style={styles.logTime}>[{log.time}]</Text>
                 <Text style={styles.logContent}>{log.text}</Text>
               </View>
@@ -247,7 +551,7 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#0F172A", // Dark Slate
+    backgroundColor: "#0F172A",
   },
   container: {
     padding: 16,
@@ -330,10 +634,68 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: "center",
   },
+  secondaryButton: {
+    backgroundColor: "#1E293B",
+    borderWidth: 1,
+    borderColor: "#38BDF8",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    alignItems: "center",
+    marginTop: 8,
+  },
+  buttonDisabled: {
+    opacity: 0.6,
+  },
   buttonText: {
     color: "#FFFFFF",
     fontWeight: "600",
     fontSize: 14,
+  },
+  buttonTextSecondary: {
+    color: "#38BDF8",
+    fontWeight: "600",
+    fontSize: 13,
+  },
+  discoveryButtonsRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 8,
+  },
+  discoveryButtonHalf: {
+    flex: 1,
+    backgroundColor: "#1E293B",
+    borderWidth: 1,
+    borderColor: "#334155",
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  discoveryRow: {
+    marginTop: 8,
+  },
+  loadingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  scanFeedback: {
+    fontSize: 12,
+    color: "#94A3B8",
+    marginTop: 6,
+    fontStyle: "italic",
+  },
+  offlineBanner: {
+    backgroundColor: "rgba(245, 158, 11, 0.15)",
+    borderWidth: 1,
+    borderColor: "#F59E0B",
+    borderRadius: 6,
+    padding: 8,
+    marginTop: 10,
+  },
+  offlineBannerText: {
+    color: "#FBBF24",
+    fontSize: 12,
   },
   metricRow: {
     flexDirection: "row",
@@ -369,6 +731,50 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 4,
+  },
+  actionLink: {
+    color: "#38BDF8",
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  notifItem: {
+    backgroundColor: "#0F172A",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: "#334155",
+  },
+  notifHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  notifAppName: {
+    fontSize: 12,
+    fontWeight: "bold",
+    color: "#94A3B8",
+  },
+  priorityTag: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+  },
+  priorityTagText: {
+    fontSize: 10,
+    fontWeight: "bold",
+  },
+  notifTitle: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#F8FAFC",
+    marginBottom: 2,
+  },
+  notifBody: {
+    fontSize: 12,
+    color: "#CBD5E1",
   },
   helpText: {
     fontSize: 12,

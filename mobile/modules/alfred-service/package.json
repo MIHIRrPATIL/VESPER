@@ -1,0 +1,15 @@
+{
+  "name": "alfred-service",
+  "version": "1.0.0",
+  "description": "VESPER Alfred Persistent Foreground Service Module for Android",
+  "main": "index.ts",
+  "types": "index.ts",
+  "scripts": {},
+  "keywords": [
+    "expo-module",
+    "foreground-service",
+    "vesper"
+  ],
+  "author": "VESPER",
+  "license": "MIT"
+}

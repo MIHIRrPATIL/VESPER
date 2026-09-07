@@ -26,6 +26,7 @@ DEFAULT_PIPER_DIR = Path(__file__).resolve().parent.parent / "models" / "piper"
 # Voice aliases mapping friendly names to (model_path, speaker_id)
 VOICE_ALIASES: dict[str, tuple[Path, int]] = {
     "alan": (DEFAULT_PIPER_DIR / "en_GB-alan-medium.onnx", 0),
+    "alan_medium": (DEFAULT_PIPER_DIR / "en_GB-alan-medium.onnx", 0),
     "cori": (DEFAULT_PIPER_DIR / "en_GB-cori-high.onnx", 0),
     "cori_high": (DEFAULT_PIPER_DIR / "en_GB-cori-high.onnx", 0),
     "ryan": (DEFAULT_PIPER_DIR / "en_US-ryan-high.onnx", 0),
@@ -157,10 +158,32 @@ class PiperTTSProvider(BaseTTSProvider):
         self.enable_dsp = enable_dsp if enable_dsp is not None else (os.getenv("PIPER_ENABLE_DSP", "true").lower() in ("true", "1", "yes"))
         self.piper_binary = piper_binary or shutil.which("piper") or "piper"
         self._voice_instance: Any = None
+        self._voice_name: str = voice_env
 
     @property
     def name(self) -> str:
         return "piper_local_tts"
+
+    @property
+    def voice_name(self) -> str:
+        return self._voice_name
+
+    @voice_name.setter
+    def voice_name(self, name: str) -> None:
+        self.set_voice(name)
+
+    def set_voice(self, voice_name: str) -> bool:
+        """Dynamically switches active voice model or speaker."""
+        key = voice_name.lower().strip()
+        if key in VOICE_ALIASES:
+            model_file, speaker = VOICE_ALIASES[key]
+            if model_file.exists():
+                self.model_path = str(model_file)
+                self.speaker_id = speaker
+                self._voice_instance = None
+                self._voice_name = key
+                return True
+        return False
 
     def is_available(self) -> bool:
         """Available if the model ONNX file exists on disk, or piper binary exists."""

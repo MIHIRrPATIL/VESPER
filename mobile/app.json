@@ -16,10 +16,22 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.vesper.companion",
+      "allowBackup": false,
+      "usesCleartextTraffic": true
     },
+    "plugins": [
+      "./plugins/withAndroidAllowBackup.js",
+      "./plugins/withAlfredService.js"
+    ],
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "21db8104-a027-455c-b448-f88e8eb28108"
+      }
     }
   }
 }

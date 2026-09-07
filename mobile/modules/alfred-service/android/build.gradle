@@ -1,0 +1,19 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.vesper.companion.service'
+version = '1.0.0'
+
+android {
+  namespace "com.vesper.companion.service"
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+}
+
+dependencies {
+  implementation 'androidx.core:core-ktx:1.13.1'
+}

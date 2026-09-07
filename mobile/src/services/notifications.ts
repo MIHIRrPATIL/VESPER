@@ -66,6 +66,24 @@ export const PRESET_NOTIFICATIONS: PresetNotification[] = [
     text: "Your VESPER verification code is 849201. Valid for 5 minutes.",
     priority: "URGENT",
   },
+  {
+    id: "preset_incoming_call",
+    label: "Incoming Phone Call",
+    app_name: "Phone",
+    package_name: "com.google.android.dialer",
+    title: "Sarah Connor",
+    text: "Incoming voice call...",
+    priority: "URGENT",
+  },
+  {
+    id: "preset_call_ended",
+    label: "Call Ended / Missed",
+    app_name: "Phone",
+    package_name: "com.google.android.dialer",
+    title: "Sarah Connor",
+    text: "Call ended (0:45)",
+    priority: "LOW",
+  },
 ];
 
 export class MobileNotificationService {

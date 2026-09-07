@@ -14,7 +14,6 @@ export const CameraDrawer: React.FC<CameraDrawerProps> = ({ status, onToggleSafe
   const [showPreview, setShowPreview] = useState(true);
   const [streamMode, setStreamMode] = useState<'backend' | 'browser'>('backend');
   const [isBackendStreaming, setIsBackendStreaming] = useState<boolean>(true);
-  const [backendStreamError, setBackendStreamError] = useState<string | null>(null);
   const [isWakeWordArmed, setIsWakeWordArmed] = useState<boolean>(true);
   const hasAutoStarted = useRef(false);
 
@@ -252,6 +251,14 @@ export const CameraDrawer: React.FC<CameraDrawerProps> = ({ status, onToggleSafe
             <div className="shortcut-item">
               <span className="shortcut-name">VOLUME_DOWN</span>
               <span className="shortcut-desc">Volume -10%</span>
+            </div>
+            <div className="shortcut-item">
+              <span className="shortcut-name">GUN_RIGHT</span>
+              <span className="shortcut-desc">Next Track (Finger Gun Right)</span>
+            </div>
+            <div className="shortcut-item">
+              <span className="shortcut-name">GUN_LEFT</span>
+              <span className="shortcut-desc">Prev Track (Finger Gun Left)</span>
             </div>
             <div className="shortcut-item">
               <span className="shortcut-name">PEACE_SIGN</span>

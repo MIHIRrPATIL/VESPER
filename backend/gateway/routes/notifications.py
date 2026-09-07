@@ -6,9 +6,10 @@ companion notifications ingested across the cluster.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from backend.shared.events import Channel, EventType, ServerEnvelope
@@ -17,6 +18,18 @@ from backend.sync.sync_manager import sync_manager
 
 logger = logging.getLogger("vesper.gateway.routes.notifications")
 router = APIRouter(prefix="/api/notifications", tags=["Notifications"])
+
+
+class RelayNotificationRequest(BaseModel):
+    package_name: str
+    app_name: Optional[str] = None
+    title: str = ""
+    text: str = ""
+    subtext: Optional[str] = None
+    priority: Optional[str] = None
+    post_time: Optional[float] = None
+    device_id: str = "mobile_client"
+    device_name: str = "Mobile Companion"
 
 
 class TestNotificationRequest(BaseModel):
@@ -35,6 +48,7 @@ class MarkReadRequest(BaseModel):
 
 
 @router.get("")
+@router.get("/")
 async def list_notifications(
     limit: int = Query(20, ge=1, le=100),
     unread_only: bool = Query(False),
@@ -56,6 +70,75 @@ async def list_notifications(
     }
 
 
+@router.get("/grouped")
+async def get_grouped_notifications() -> Dict[str, Any]:
+    """Returns active notifications grouped by application like the OS notification panel."""
+    grouped = notification_service.get_grouped_notifications()
+    return {
+        "status": "ok",
+        "unread_count": notification_service.get_unread_count(),
+        "total_apps": len(grouped),
+        "grouped": grouped,
+    }
+
+
+@router.post("/relay")
+async def relay_notification(req: RelayNotificationRequest, request: Request) -> Dict[str, Any]:
+    """Relays live notifications from the mobile companion directly to the cluster.
+
+    Guarantees immediate delivery across HTTP even when background WebSocket
+    connections are cycling or recovering from sleep.
+    """
+    notif = notification_service.ingest_notification(
+        payload=req.model_dump(),
+        source_device_id=req.device_id,
+        source_device_name=req.device_name,
+    )
+    if not notif:
+        return {"status": "ok", "delivered": False, "reason": "filtered_or_ignored"}
+
+    # Sync state count and preview
+    recent = [n.to_dict() for n in notification_service.get_recent_notifications(limit=5)]
+    await sync_manager.sync_notifications(
+        unread_count=notification_service.get_unread_count(),
+        recent=recent,
+    )
+
+    # Broadcast ambient card update to Desk HUD
+    conn_mgr = getattr(request.app.state, "connection_manager", None)
+    if conn_mgr:
+        hud_envelope = ServerEnvelope(
+            channel=Channel.NOTIFY,
+            type=EventType.NOTIFICATION_DIGEST,
+            payload={
+                "source_client": req.device_id,
+                "device_name": req.device_name,
+                "notification": notif.to_dict(),
+                "is_update": getattr(notif, "is_in_place_update", False),
+                "is_ongoing": getattr(notif, "is_ongoing", False),
+                "unread_count": notification_service.get_unread_count(),
+            },
+        )
+        try:
+            await conn_mgr.broadcast(hud_envelope)
+        except Exception as e:
+            logger.warning(f"[NOTIF_RELAY] Desk HUD broadcast failed: {e}")
+
+    # Trigger Proactive Agent VIP triage for HIGH/URGENT notifications
+    if notif.priority in ("URGENT", "HIGH"):
+        try:
+            from backend.agent.proactive_agent import proactive_agent
+            asyncio.create_task(proactive_agent.evaluate_notification(notif))
+        except Exception as e:
+            logger.warning(f"[NOTIF_RELAY] Proactive VIP triage trigger failed: {e}")
+
+    return {
+        "status": "ok",
+        "delivered": True,
+        "notification": notif.to_dict(),
+    }
+
+
 @router.post("/test")
 async def ingest_test_notification(req: TestNotificationRequest) -> Dict[str, Any]:
     """Simulates ingesting a mobile notification (useful for testing and Expo Go)."""
@@ -74,8 +157,8 @@ async def ingest_test_notification(req: TestNotificationRequest) -> Dict[str, An
 
     return {
         "status": "ok",
-        "message": "Notification ingested and triaged",
-        "notification": notif.to_dict(),
+        "message": "Notification ingested and triaged" if notif else "Notification filtered or ignored",
+        "notification": notif.to_dict() if notif else None,
     }
 
 

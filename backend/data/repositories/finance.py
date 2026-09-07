@@ -138,6 +138,29 @@ class FinanceRepository:
         )
         return [TransactionModel.model_validate(row) for row in res.data]
 
+    def delete_transaction(self, transaction_id: str) -> bool:
+        """Deletes a transaction and reverses its effect on the associated account balance."""
+        res = self.client.table("transactions").select("*").eq("id", transaction_id).execute()
+        if not res.data:
+            return False
+
+        txn = TransactionModel.model_validate(res.data[0])
+        if txn.account_id:
+            acc_res = self.client.table("accounts").select("*").eq("id", txn.account_id).execute()
+            if acc_res.data:
+                row = dict(acc_res.data[0])  # type: ignore[arg-type]
+                curr_balance = float(row["balance"])
+                if txn.type == TransactionType.EXPENSE:
+                    new_balance = curr_balance + txn.amount
+                elif txn.type == TransactionType.INCOME:
+                    new_balance = curr_balance - txn.amount
+                else:
+                    new_balance = curr_balance
+                self.client.table("accounts").update({"balance": new_balance}).eq("id", txn.account_id).execute()
+
+        self.client.table("transactions").delete().eq("id", transaction_id).execute()
+        return True
+
     def get_spending_by_category(self, user_id: str = "default_user") -> dict[str, float]:
         """Aggregates total expenses by category."""
         res = (

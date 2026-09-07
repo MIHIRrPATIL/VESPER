@@ -49,12 +49,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from backend.sync.network_scanner import network_scanner
     network_scanner.start_periodic_loop()
 
+    # Start UDP Broadcast Discovery Beacon (Port 8005)
+    from backend.gateway.beacon import discovery_beacon
+    discovery_beacon.start()
+
+    # Start Proactive Agent (battery monitoring + VIP notification triage)
+    from backend.agent.proactive_agent import proactive_agent
+    proactive_agent.set_broadcast_callback(connection_manager.broadcast)
+    proactive_agent.start()
+
+    # Register ProactiveAgent as a SyncManager listener for real-time battery eval
+    from backend.sync.sync_manager import sync_manager
+    sync_manager.add_listener(proactive_agent.on_state_change)
+
     logger.info("[GATEWAY] Online and ready for WebSocket / REST connections.")
 
     yield
 
     # Shutdown Phase
     logger.info("[GATEWAY] Shutting down...")
+    await proactive_agent.stop()
+    sync_manager.remove_listener(proactive_agent.on_state_change)
+    await discovery_beacon.stop()
     await network_scanner.stop_periodic_loop()
     await connection_manager.stop_heartbeat_supervisor()
     task_registry.cancel_all()

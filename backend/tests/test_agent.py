@@ -946,12 +946,14 @@ async def test_planner_pending_email_draft_domain_merging_and_validation():
     block_plan = planner._check_deterministic_prefilter("yes send it", ctx)
     assert block_plan is not None
     assert block_plan.plan_type == "direct"
+    assert block_plan.direct_response is not None
     assert "not a complete email address" in block_plan.direct_response
 
     # 2. User provides standalone domain "@gmail.com" -> merges into pending draft
     merge_plan = planner._check_deterministic_prefilter("@gmail.com", ctx)
     assert merge_plan is not None
     assert merge_plan.plan_type == "direct"
+    assert merge_plan.direct_response is not None
     assert "mihirpatil885@gmail.com" in merge_plan.direct_response
     assert ctx["pending_email_draft"]["to"] == "mihirpatil885@gmail.com"
 
@@ -961,5 +963,31 @@ async def test_planner_pending_email_draft_domain_merging_and_validation():
     assert send_plan.plan_type == "parallel"
     assert send_plan.steps[0]["action"] == "send_email"
     assert send_plan.steps[0]["params"]["to"] == "mihirpatil885@gmail.com"
+
+
+@pytest.mark.asyncio
+async def test_planner_pending_email_draft_body_update_and_immediate_send():
+    """Verifies that saying 'Add that saying ... and send it' populates body and dispatches."""
+    planner = SwarmPlanner()
+
+    ctx = {
+        "pending_email_draft": {
+            "to": "seemaraju.patil@gmail.com",
+            "subject": "A brief note",
+            "body": "",
+        }
+    }
+
+    # User adds body and requests send in the same turn
+    query = "Add that saying hello, I would like to have a call with you and send it."
+    plan = planner._check_deterministic_prefilter(query, ctx)
+
+    assert plan is not None
+    assert plan.plan_type == "parallel"
+    assert plan.steps[0]["agent"] == "email"
+    assert plan.steps[0]["action"] == "send_email"
+    assert plan.steps[0]["params"]["to"] == "seemaraju.patil@gmail.com"
+    assert plan.steps[0]["params"]["body"] == "hello, I would like to have a call with you"
+    assert ctx["pending_email_draft"]["body"] == "hello, I would like to have a call with you"
 
 

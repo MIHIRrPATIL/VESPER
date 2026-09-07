@@ -309,6 +309,41 @@ class FinanceSpecialist(BaseSpecialist):
             },
         )
 
+    async def undo_transaction(self, transaction_id: Optional[str] = None) -> SpecialistResult:
+        """Rolls back the most recent transaction or a specified transaction by ID."""
+        target_id = transaction_id
+        if not target_id:
+            recent = self.repo.get_recent_transactions(limit=1)
+            if not recent:
+                return SpecialistResult(
+                    success=False,
+                    action="undo_transaction",
+                    error="No recent transaction found to undo.",
+                    speech_summary="Sir, I found no recorded transactions to undo.",
+                )
+            target_id = recent[0].id
+
+        deleted = self.repo.delete_transaction(target_id)
+        if not deleted:
+            return SpecialistResult(
+                success=False,
+                action="undo_transaction",
+                error=f"Failed to locate transaction '{target_id}' to undo.",
+                speech_summary="I was unable to locate that transaction to undo, sir.",
+            )
+
+        primary_acc = self._get_or_create_primary_account()
+        updated_acc = self.repo.get_account(primary_acc.id)
+        current_bal = updated_acc.balance if updated_acc else primary_acc.balance
+
+        speech = f"Very well, sir. I have reversed that transaction. Your current balance stands at INR {current_bal:,.2f}."
+        return SpecialistResult(
+            success=True,
+            action="undo_transaction",
+            data={"transaction_id": target_id, "balance": current_bal},
+            speech_summary=speech,
+        )
+
     # ── Peer Debts, Running Tabs & Splitting ─────────────────────────────────
 
     def _get_person_running_tab(self, person: str) -> Dict[str, Any]:
@@ -688,6 +723,11 @@ class FinanceSpecialist(BaseSpecialist):
             desc = params.get("description")
             acc = params.get("account_name")
             return await self.log_transaction(amt, txn_type=t_type, category=cat, description=desc, account_name=acc)
+
+        # 2b. Undo / Rollback Transaction
+        elif act in ["undo_transaction", "undo_expense", "rollback_transaction", "undo"]:
+            txn_id = params.get("transaction_id")
+            return await self.undo_transaction(txn_id)
 
         # 3. Expense Splitting
         elif act in ["split_expense", "split_bill", "split"]:

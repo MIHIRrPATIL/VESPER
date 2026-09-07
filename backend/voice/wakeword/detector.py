@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import collections
 import logging
-import threading
+import os
+import pickle
 import time
+from pathlib import Path
 from typing import Callable, List, Optional
 import numpy as np
 from pydantic import BaseModel, Field
@@ -18,12 +20,14 @@ try:
 except ImportError:
     _HAS_WEBRTC_VAD = False
 
+MODELS_DIR = Path(__file__).parent / "models"
+
 
 class WakeWordEvent(BaseModel):
     """Event emitted when a wake phrase is triggered or sampled."""
 
     detected: bool = False
-    wake_word: str = "hey_alfred"
+    wake_word: str = "alfred"
     confidence: float = 0.0
     is_speech: bool = False
     peak_amplitude: float = 0.0
@@ -32,17 +36,17 @@ class WakeWordEvent(BaseModel):
 
 
 class WakeWordDetector:
-    """Detects 'Hey Alfred' / 'Alfred' from streaming 16kHz, 16-bit mono PCM audio."""
+    """Detects 'Alfred' and 'Jarvis' (both single-word and hey-prefixed) from streaming 16kHz PCM audio."""
 
     def __init__(
         self,
         wake_words: Optional[List[str]] = None,
-        threshold: float = 0.5,
+        threshold: float = 0.55,
         sample_rate: int = 16000,
-        vad_mode: int = 2,
+        vad_mode: int = 1,
         on_wake_word: Optional[Callable[[WakeWordEvent], None]] = None,
     ) -> None:
-        self.wake_words = wake_words or ["hey_alfred", "alfred", "hey_jarvis"]
+        self.wake_words = wake_words or ["alfred", "hey_alfred", "jarvis"]
         self.threshold = threshold
         self.sample_rate = sample_rate
         self.vad_mode = vad_mode
@@ -67,29 +71,42 @@ class WakeWordDetector:
         self.oww_model = None
         self._init_oww()
 
-        # Speech utterance tracker for Whisper verification ("Hey Alfred" / "Alfred")
-        self._speech_utterance_buffer = bytearray()
-        self._silence_frames_after_speech: int = 0
+        # Load Alfred and Jarvis acoustic verifiers
+        self.alfred_verifier = self._load_verifier(MODELS_DIR / "alfred_verifier.joblib", "Alfred")
+        self.jarvis_verifier = self._load_verifier(MODELS_DIR / "jarvis_verifier.joblib", "Jarvis")
+
         self._last_wake_time: float = 0.0
 
+    def _load_verifier(self, path: Path, name: str):
+        if path.exists():
+            try:
+                with open(path, "rb") as f:
+                    verifier = pickle.load(f)
+                logger.info(f"[WakeWordDetector] Loaded {name} acoustic verifier from {path.name}")
+                return verifier
+            except Exception as e:
+                logger.warning(f"[WakeWordDetector] Failed to load {name} verifier: {e}")
+        return None
+
     def _init_oww(self) -> None:
-        """Attempts to load openWakeWord model instances safely."""
+        """Loads openWakeWord acoustic model engine, strictly restricted to Jarvis."""
         try:
             import openwakeword
             import openwakeword.model
             all_paths = openwakeword.get_pretrained_model_paths()
-            paths = [p for p in all_paths if any(k in p for k in ["jarvis", "alexa", "mycroft"])]
-            if paths:
-                self.oww_model = openwakeword.model.Model(wakeword_model_paths=paths)
-            else:
-                self.oww_model = openwakeword.model.Model()
-            logger.info(f"[WakeWordDetector] Loaded openWakeWord acoustic model engine: {list(self.oww_model.models.keys())}")
+            # Exclude alexa and mycroft completely; keep only jarvis
+            paths = [
+                p for p in all_paths
+                if "jarvis" in p.lower() and "alexa" not in p.lower() and "mycroft" not in p.lower()
+            ]
+            self.oww_model = openwakeword.model.Model(wakeword_model_paths=paths)
+            logger.info(f"[WakeWordDetector] Loaded openWakeWord acoustic engine: {list(self.oww_model.models.keys())}")
         except Exception as e:
-            logger.warning(f"[WakeWordDetector] openWakeWord unavailable ({e}); running heuristic/cloud pipeline.")
+            logger.warning(f"[WakeWordDetector] openWakeWord unavailable ({e}); running fallback.")
             self.oww_model = None
 
     def process_frame(self, pcm_chunk: bytes) -> WakeWordEvent:
-        """Processes a 16kHz 16-bit mono PCM chunk and emits real-time telemetry."""
+        """Processes a 16kHz 16-bit mono PCM chunk and evaluates wake words in real-time."""
         if not pcm_chunk:
             return WakeWordEvent(
                 detected=False,
@@ -111,11 +128,10 @@ class WakeWordDetector:
         self.last_peak = peak
         self.last_rms = rms
 
-        # 2. Tier 1: WebRTC VAD Silence Gating
+        # 2. Tier 1: WebRTC VAD Silence Gating (mode 1 for gentle gating)
         is_speech = False
         if self.vad is not None:
-            # Sliced in 20ms (640-byte) or 30ms (960-byte) slices
-            frame_size = 640
+            frame_size = 640  # 20ms frame
             if len(pcm_chunk) % frame_size == 0 and len(pcm_chunk) >= frame_size:
                 for offset in range(0, len(pcm_chunk), frame_size):
                     sub = pcm_chunk[offset : offset + frame_size]
@@ -124,31 +140,16 @@ class WakeWordDetector:
                             is_speech = True
                             break
                     except Exception:
-                        is_speech = rms > 250
+                        is_speech = rms > 150
             else:
-                # Direct single frame test or fallback
                 try:
                     is_speech = self.vad.is_speech(pcm_chunk, self.sample_rate)
                 except Exception:
-                    is_speech = rms > 250
+                    is_speech = rms > 150
         else:
-            is_speech = rms > 250 or peak > 800
+            is_speech = rms > 150 or peak > 400
 
         self.last_is_speech = is_speech
-
-        # Track speech utterances for secondary Whisper verification
-        self._track_speech_utterance(pcm_chunk, is_speech)
-
-        # Drop pure silence early when buffer is empty to save cycles
-        if not is_speech and len(self._audio_buffer) == 0 and peak < 100:
-            self.last_score = 0.0
-            return WakeWordEvent(
-                detected=False,
-                confidence=0.0,
-                is_speech=False,
-                peak_amplitude=peak,
-                rms_amplitude=rms,
-            )
 
         # Append to circular audio buffer
         self._audio_buffer.extend(pcm_chunk)
@@ -156,39 +157,69 @@ class WakeWordDetector:
             overflow = len(self._audio_buffer) - self.max_buffer_bytes
             del self._audio_buffer[:overflow]
 
-        # 3. Tier 2: Evaluate openWakeWord ONNX model
+        # 3. Tier 2: Real-time dual-verifier evaluation (Alfred & Jarvis)
         curr_score = 0.0
         detected = False
-        triggered_word = "hey_alfred"
+        triggered_word = "alfred"
 
         if self.oww_model is not None:
             self._oww_accumulator.extend(pcm_chunk)
-            # openWakeWord expects >= 1280 samples (2560 bytes = 80ms)
-            chunk_bytes = 2560
+            chunk_bytes = 2560  # 1280 samples = 80ms
             while len(self._oww_accumulator) >= chunk_bytes:
                 eval_slice = bytes(self._oww_accumulator[:chunk_bytes])
                 del self._oww_accumulator[:chunk_bytes]
                 try:
                     slice_np = np.frombuffer(eval_slice, dtype=np.int16)
                     prediction = self.oww_model.predict(slice_np)
-                    for ww, score in prediction.items():
-                        s_float = float(score)
-                        if s_float > curr_score:
-                            curr_score = s_float
-                        if s_float >= self.threshold and (time.time() - self._last_wake_time > 2.0):
-                            detected = True
-                            triggered_word = ww
-                            self._last_wake_time = time.time()
-                            logger.info(f"[WakeWordDetector] ONNX model triggered: {ww} (score={s_float:.2f})")
-                            break
+
+                    # Extract 16-frame feature vector (16 x 96 = 1536 dims)
+                    p_alfred = 0.0
+                    p_jarvis = 0.0
+                    if hasattr(self.oww_model, "preprocessor"):
+                        feats = self.oww_model.preprocessor.get_features(16)
+                        if feats is not None and feats.size >= 1536:
+                            vec = feats.flatten()[-1536:].reshape(1, -1)
+                            if self.alfred_verifier is not None:
+                                p_alfred = float(self.alfred_verifier.predict_proba(vec)[0, 1])
+                            if self.jarvis_verifier is not None:
+                                p_jarvis = float(self.jarvis_verifier.predict_proba(vec)[0, 1])
+
+                    # Combine with stock openWakeWord Jarvis score
+                    oww_jarvis = float(prediction.get("hey_jarvis_v0.1", 0.0))
+                    combined_jarvis = max(p_jarvis, oww_jarvis)
+
+                    eval_max = max(p_alfred, combined_jarvis)
+                    if eval_max > curr_score:
+                        curr_score = eval_max
+
+                    # Check detection with cooldown
+                    now = time.time()
+                    if (now - self._last_wake_time) > 1.8:
+                        alfred_thresh = min(self.threshold, 0.32)
+                        jarvis_thresh = min(self.threshold, 0.32)
+                        best_score = max(p_alfred, combined_jarvis)
+
+                        if best_score >= alfred_thresh:
+                            if p_alfred >= combined_jarvis and p_alfred >= alfred_thresh:
+                                detected = True
+                                triggered_word = "alfred"
+                                self._last_wake_time = now
+                                logger.info(f"[WakeWordDetector] 'Alfred' detected (confidence={p_alfred:.2f})")
+                                break
+                            elif combined_jarvis >= jarvis_thresh:
+                                detected = True
+                                triggered_word = "jarvis"
+                                self._last_wake_time = now
+                                logger.info(f"[WakeWordDetector] 'Jarvis' detected (confidence={combined_jarvis:.2f})")
+                                break
                 except Exception as e:
-                    logger.debug(f"[WakeWordDetector] openWakeWord error: {e}")
+                    logger.debug(f"[WakeWordDetector] Inference error: {e}")
 
         self.last_score = curr_score
 
         if detected:
             self.reset()
-            evt = WakeWordEvent(
+            return WakeWordEvent(
                 detected=True,
                 wake_word=triggered_word,
                 confidence=curr_score,
@@ -197,7 +228,6 @@ class WakeWordDetector:
                 rms_amplitude=rms,
                 timestamp=time.time(),
             )
-            return evt
 
         return WakeWordEvent(
             detected=False,
@@ -208,66 +238,7 @@ class WakeWordDetector:
             timestamp=time.time(),
         )
 
-    def _track_speech_utterance(self, pcm_chunk: bytes, is_speech: bool) -> None:
-        """Accumulates continuous speech bursts and verifies wake phrase via Whisper upon pause."""
-        if is_speech:
-            self._speech_utterance_buffer.extend(pcm_chunk)
-            self._silence_frames_after_speech = 0
-            # Cap maximum speech buffer to 3.5 seconds to prevent unbounded growth
-            if len(self._speech_utterance_buffer) > 112000:
-                del self._speech_utterance_buffer[:len(pcm_chunk)]
-        else:
-            if len(self._speech_utterance_buffer) > 0:
-                self._silence_frames_after_speech += 1
-                # If ~320ms of silence observed after speech (approx 4 frames of 80ms)
-                if self._silence_frames_after_speech >= 3:
-                    utterance_len = len(self._speech_utterance_buffer)
-                    # If duration is between 0.3s and 2.5s (9,600 to 80,000 bytes at 16kHz 16-bit mono)
-                    if 9600 <= utterance_len <= 80000:
-                        candidate_pcm = bytes(self._speech_utterance_buffer)
-                        self._speech_utterance_buffer.clear()
-                        self._silence_frames_after_speech = 0
-                        self._dispatch_utterance_verification(candidate_pcm)
-                    else:
-                        self._speech_utterance_buffer.clear()
-                        self._silence_frames_after_speech = 0
-
-    def _dispatch_utterance_verification(self, candidate_pcm: bytes) -> None:
-        """Asynchronously verifies if a short speech utterance contains 'Alfred' or 'Vesper'."""
-        if time.time() - self._last_wake_time < 2.0:
-            return
-
-        def _worker():
-            try:
-                import asyncio
-                from backend.voice.stt import GroqSpeechToText
-                wav = pack_pcm_to_wav(candidate_pcm, sample_rate=self.sample_rate)
-                stt = GroqSpeechToText()
-                transcript = asyncio.run(stt.transcribe_wav(wav))
-                if transcript:
-                    cleaned = transcript.lower().strip()
-                    logger.debug(f"[WakeWordDetector] Utterance verified text: \"{cleaned}\"")
-                    wake_terms = ["alfred", "hey alfred", "vesper", "hey vesper", "jarvis", "wake up"]
-                    if any(term in cleaned for term in wake_terms):
-                        logger.info(f"[WakeWordDetector] Wake word confirmed via speech recognition: '{cleaned}'")
-                        self._last_wake_time = time.time()
-                        evt = WakeWordEvent(
-                            detected=True,
-                            wake_word="hey_alfred",
-                            confidence=0.98,
-                            is_speech=True,
-                            peak_amplitude=self.last_peak,
-                            rms_amplitude=self.last_rms,
-                            timestamp=time.time(),
-                        )
-                        if self.on_wake_word:
-                            self.on_wake_word(evt)
-            except Exception as e:
-                logger.debug(f"[WakeWordDetector] Background utterance verification notice: {e}")
-
-        threading.Thread(target=_worker, daemon=True, name="vesper-utterance-verifier").start()
-
-    def trigger_manual_wake(self, phrase: str = "hey_alfred") -> WakeWordEvent:
+    def trigger_manual_wake(self, phrase: str = "alfred") -> WakeWordEvent:
         """Manually fires a wake event (useful for UI button triggers or integration tests)."""
         self.reset()
         evt = WakeWordEvent(
@@ -287,11 +258,19 @@ class WakeWordDetector:
         """Clears internal audio and prediction buffers."""
         self._audio_buffer.clear()
         self._oww_accumulator.clear()
-        self._speech_utterance_buffer.clear()
-        self._silence_frames_after_speech = 0
         if self.oww_model is not None:
             try:
                 self.oww_model.reset()
+                if hasattr(self.oww_model, "preprocessor"):
+                    prep = self.oww_model.preprocessor
+                    if hasattr(prep, "raw_data_buffer"):
+                        prep.raw_data_buffer.clear()
+                    if hasattr(prep, "melspectrogram_buffer"):
+                        prep.melspectrogram_buffer = np.ones((76, 32))
+                    if hasattr(prep, "accumulated_samples"):
+                        prep.accumulated_samples = 0
+                    if hasattr(prep, "feature_buffer"):
+                        prep.feature_buffer = np.zeros((120, 96))
             except Exception:
                 pass
 

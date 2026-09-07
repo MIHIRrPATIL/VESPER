@@ -108,6 +108,26 @@ function classifyLandmarkGeometry(landmarks: Landmark[]): { gesture: string; con
     return { gesture: 'ROCK_ON', confidence: 0.88 };
   }
 
+  // Finger Gun (Pistol): Index extended & straight, thumb extended, ring & pinky folded
+  const thumbTip = landmarks[4];
+  const thumbMcp = landmarks[2];
+  const thumbExt = Math.hypot(thumbTip.x - wrist.x, thumbTip.y - wrist.y) > Math.hypot(thumbMcp.x - wrist.x, thumbMcp.y - wrist.y) * 1.05;
+
+  if (indexExt && ringFold && pinkyFold && thumbExt && (middleFold || middleExt)) {
+    // Check horizontal orientation of index barrel (from MCP to TIP)
+    // In mirrored coordinates (matching user perspective): dx = indexMcp.x - indexTip.x
+    const dxMirrored = indexMcp.x - indexTip.x;
+    const dy = indexTip.y - indexMcp.y;
+
+    if (Math.abs(dxMirrored) >= 0.08 && Math.abs(dxMirrored) > 1.20 * Math.abs(dy)) {
+      if (dxMirrored > 0) {
+        return { gesture: 'GUN_RIGHT', confidence: 0.90 };
+      } else {
+        return { gesture: 'GUN_LEFT', confidence: 0.90 };
+      }
+    }
+  }
+
   return null;
 }
 
@@ -261,7 +281,7 @@ class CameraGestureManager {
       const isZenGesture = detectedGesture === 'PEACE_SIGN';
       const isToggleGesture = detectedGesture === 'ROCK_ON';
       const requiredStreak = isZenGesture ? 3 : (isToggleGesture ? 4 : 2);
-      const cooldownMs = isZenGesture ? 2000 : (detectedGesture.startsWith('VOLUME_') ? 350 : 800);
+      const cooldownMs = isZenGesture ? 2000 : (detectedGesture.startsWith('VOLUME_') ? 350 : (detectedGesture.startsWith('GUN_') ? 1600 : 800));
 
       if (detectedGesture === this.lastGestureName) {
         this.consecutiveCount++;
@@ -323,6 +343,10 @@ class CameraGestureManager {
     console.log('[GESTURE_MANAGER] attachImageElement called. Has element:', !!imgRef);
     this.imageElement = imgRef;
     this.setBackendMode(!!imgRef);
+  }
+
+  public getImageElement(): HTMLImageElement | null {
+    return this.imageElement;
   }
 
   public attachVideoElement(videoRef: HTMLVideoElement): void {

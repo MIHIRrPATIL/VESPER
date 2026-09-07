@@ -68,8 +68,9 @@ from backend.shared.events import (
 console = Console()
 logger = logging.getLogger("vesper.run_services")
 
-GATEWAY_URL = f"http://127.0.0.1:{GATEWAY_PORT}"
-GATEWAY_WS_URL = f"ws://127.0.0.1:{GATEWAY_PORT}/ws"
+GATEWAY_HOST = os.getenv("GATEWAY_HOST", "127.0.0.1")
+GATEWAY_URL = os.getenv("GATEWAY_URL", f"http://{GATEWAY_HOST}:{GATEWAY_PORT}")
+GATEWAY_WS_URL = os.getenv("GATEWAY_WS_URL", f"ws://{GATEWAY_HOST}:{GATEWAY_PORT}/ws")
 AGENT_URL = AGENT_SERVICE_URL
 VOICE_URL = VOICE_SERVICE_URL
 OUTPUT_DIR = PROJECT_ROOT / "output"
@@ -110,6 +111,79 @@ def play_audio_file(audio_path: Path, delete_after: bool = True) -> None:
                 pass
 
 
+def _duck_background_audio(duck_pct: int = 20) -> Dict[str, Any]:
+    """Temporarily reduces volume of active media players and background streams during TTS."""
+    state: Dict[str, Any] = {"sink_inputs": {}}
+    # 1. Playerctl volume ducking (Spotify, VLC, web browsers, MPRIS)
+    try:
+        playerctl = shutil.which("playerctl")
+        if playerctl:
+            r = subprocess.run([playerctl, "-a", "volume"], capture_output=True, text=True, timeout=1)
+            if r.returncode == 0 and r.stdout.strip():
+                try:
+                    first_val = float(r.stdout.strip().splitlines()[0])
+                    state["playerctl"] = first_val
+                except ValueError:
+                    state["playerctl"] = 1.0
+            subprocess.run(
+                [playerctl, "-a", "volume", str(max(0.05, duck_pct / 100.0))],
+                timeout=1, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+    except Exception:
+        pass
+
+    # 2. PulseAudio / PipeWire sink-input volume ducking (system applications)
+    try:
+        pactl = shutil.which("pactl")
+        if pactl:
+            r = subprocess.run([pactl, "list", "sink-inputs"], capture_output=True, text=True, timeout=1)
+            if r.returncode == 0 and r.stdout.strip():
+                import re
+                blocks = re.split(r"Sink Input #(\d+)", r.stdout)
+                for i in range(1, len(blocks), 2):
+                    sid = blocks[i]
+                    block = blocks[i + 1]
+                    m = re.search(r"Volume:.*?/\s*(\d+)%", block)
+                    orig_vol = m.group(1) + "%" if m else "100%"
+                    state["sink_inputs"][sid] = orig_vol
+                    subprocess.run(
+                        [pactl, "set-sink-input-volume", sid, f"{duck_pct}%"],
+                        timeout=1, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+    except Exception:
+        pass
+    return state
+
+
+def _unduck_background_audio(state: Dict[str, Any]) -> None:
+    """Restores background media players and audio streams after TTS finishes."""
+    if not state:
+        return
+    # 1. Restore Playerctl volume
+    try:
+        playerctl = shutil.which("playerctl")
+        if playerctl and "playerctl" in state:
+            vol = state["playerctl"]
+            subprocess.run(
+                [playerctl, "-a", "volume", str(vol)],
+                timeout=1, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+    except Exception:
+        pass
+
+    # 2. Restore PulseAudio / PipeWire sink-inputs
+    try:
+        pactl = shutil.which("pactl")
+        if pactl and state.get("sink_inputs"):
+            for s_id, orig_vol in state["sink_inputs"].items():
+                subprocess.run(
+                    [pactl, "set-sink-input-volume", s_id, str(orig_vol)],
+                    timeout=1, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+    except Exception:
+        pass
+
+
 async def speak_text(text: str) -> None:
     """Synthesizes text through Alfred's TTS and plays through the speakers."""
     from backend.voice.tts.manager import TTSManager
@@ -117,6 +191,7 @@ async def speak_text(text: str) -> None:
 
     tts_mgr = TTSManager()
     chunks = []
+    duck_state = await asyncio.to_thread(_duck_background_audio, 20)
     try:
         async for chunk in tts_mgr.stream_speech(text):
             chunks.append(chunk)
@@ -127,6 +202,8 @@ async def speak_text(text: str) -> None:
             await asyncio.to_thread(play_audio_file, out_file, True)
     except Exception as e:
         console.print(f"[dim red][TTS Error] {e}[/dim red]")
+    finally:
+        await asyncio.to_thread(_unduck_background_audio, duck_state)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -296,6 +373,10 @@ class TerminalDesktopHUD:
         self._tts_lock = asyncio.Lock()
         self._current_tts_task: Optional[asyncio.Task] = None
         self._current_tts_proc: Optional[asyncio.subprocess.Process] = None
+        self._call_duck_state: Optional[Dict[str, Any]] = None
+        self._call_watchdog_task: Optional[asyncio.Task] = None
+        self._voice_duck_state: Optional[Dict[str, Any]] = None
+        self._voice_watchdog_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> bool:
         """Establishes WebSocket connection and completes CLIENT_HELLO handshake."""
@@ -382,7 +463,7 @@ class TerminalDesktopHUD:
                     continue
 
                 # Render regular event
-                self._render_incoming_envelope(envelope)
+                await self._render_incoming_envelope(envelope)
             except asyncio.CancelledError:
                 break
             except websockets.exceptions.ConnectionClosed:
@@ -393,7 +474,7 @@ class TerminalDesktopHUD:
                 if self.is_running:
                     console.print(f"[dim red][ERROR] Inbound parse error: {e}[/dim red]")
 
-    def _render_incoming_envelope(self, envelope: ServerEnvelope) -> None:
+    async def _render_incoming_envelope(self, envelope: ServerEnvelope) -> None:
         """Renders server events into styled terminal components."""
         p = envelope.payload
 
@@ -497,17 +578,70 @@ class TerminalDesktopHUD:
 
             gesture = p.get("gesture", "")
             conf = p.get("confidence", 1.0)
-            if gesture in ("CLOSED_FIST", "MUTE"):
-                self._wakeword_manually_muted = True
-                if self._wakeword_listener:
-                    self._wakeword_listener.pause()
-                console.print(f"\n[bold yellow][WAKE WORD] Listener PAUSED (Gesture: {gesture})[/bold yellow]")
+            if gesture in ("CLOSED_FIST", "MUTE", "STOP", "INTERRUPT"):
+                # If background audio is ducked for wake word or incoming phone call, restore it on gesture
+                if self._voice_duck_state is not None and self._call_duck_state is None:
+                    if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+                        self._voice_watchdog_task.cancel()
+                    await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
+                    self._voice_duck_state = None
+
+                if self._call_duck_state is not None:
+                    if self._call_watchdog_task and not self._call_watchdog_task.done():
+                        self._call_watchdog_task.cancel()
+                    await asyncio.to_thread(_unduck_background_audio, self._call_duck_state)
+                    self._call_duck_state = None
+                    console.print("\n[dim green][CALL DISMISSED] Background audio restored via Closed Fist gesture.[/dim green]")
+
+                # If assistant is currently speaking or processing voice/research, execute instant touchless cutoff
+                is_active = bool(
+                    self._current_tts_proc
+                    or (self._current_tts_task and not self._current_tts_task.done())
+                    or self._is_handling_voice
+                )
+                if is_active:
+                    if self._current_tts_task and not self._current_tts_task.done():
+                        self._current_tts_task.cancel()
+                    if self._current_tts_proc:
+                        try:
+                            self._current_tts_proc.terminate()
+                        except Exception:
+                            pass
+                        self._current_tts_proc = None
+                    self._is_handling_voice = False
+                    self._wakeword_manually_muted = False
+                    if self._wakeword_listener and self.is_running:
+                        self._wakeword_listener.resume()
+
+                    console.print("\n[bold red][INTERRUPT] Assistant stopped via Closed Fist gesture.[/bold red]")
+                    if self.websocket:
+                        asyncio.create_task(
+                            self.send_envelope(Channel.SYSTEM, EventType.INTERRUPT, {"reason": "GESTURE_CLOSED_FIST"})
+                        )
+                else:
+                    self._wakeword_manually_muted = True
+                    if self._wakeword_listener:
+                        self._wakeword_listener.pause()
+                    console.print(f"\n[bold yellow][WAKE WORD] Listener PAUSED (Gesture: {gesture})[/bold yellow]")
             elif gesture in ("OPEN_PALM", "RESUME", "UNMUTE"):
+                if self._voice_duck_state is not None and self._call_duck_state is None:
+                    if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+                        self._voice_watchdog_task.cancel()
+                    await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
+                    self._voice_duck_state = None
+
+                if self._call_duck_state is not None:
+                    if self._call_watchdog_task and not self._call_watchdog_task.done():
+                        self._call_watchdog_task.cancel()
+                    await asyncio.to_thread(_unduck_background_audio, self._call_duck_state)
+                    self._call_duck_state = None
+                    console.print("\n[dim green][CALL CONCLUDED] Background audio restored via Open Palm gesture.[/dim green]")
+
                 self._wakeword_manually_muted = False
                 if self._wakeword_listener and self.is_running:
                     self._wakeword_listener.resume()
                 console.print(f"\n[bold green][WAKE WORD] Listener ARMED (Gesture: {gesture})[/bold green]")
-            elif gesture in ("POINTING_UP", "TOGGLE_WAKEWORD", "WAKEWORD_TOGGLE"):
+            elif gesture in ("TOGGLE_WAKEWORD", "WAKEWORD_TOGGLE"):
                 self._wakeword_manually_muted = not self._wakeword_manually_muted
                 if self._wakeword_manually_muted:
                     if self._wakeword_listener:
@@ -563,6 +697,12 @@ class TerminalDesktopHUD:
             sys.stdout.flush()
 
         elif envelope.type == EventType.AGENT_IDLE:
+            if self._voice_duck_state is not None and self._call_duck_state is None:
+                if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+                    self._voice_watchdog_task.cancel()
+                await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
+                self._voice_duck_state = None
+
             # Standby idle - re-arm microphone listener cleanly once speech finishes unless manually muted
             if self._wakeword_listener and self.is_running and not self._wakeword_manually_muted:
                 async def _idle_resume():
@@ -570,6 +710,117 @@ class TerminalDesktopHUD:
                     if self._wakeword_listener and self.is_running and not self._is_handling_voice and not self._current_tts_proc and not self._wakeword_manually_muted:
                         self._wakeword_listener.resume()
                 asyncio.create_task(_idle_resume())
+
+        elif envelope.type in (EventType.NOTIFICATION_DIGEST, EventType.CALL_STATE) or envelope.channel == Channel.NOTIFY:
+            notif = p.get("notification", {})
+            title = notif.get("title") or p.get("title") or "Notification Alert"
+            app_name = notif.get("app_name") or "Alfred Sentinel"
+            speech = p.get("speech") or notif.get("text") or ""
+            is_proactive = bool(p.get("proactive") or p.get("action_required"))
+            staged = p.get("staged_action")
+            body_text = speech or notif.get("text", "")
+
+            # ── Telephony & Call Ducking Interceptor ─────────────────────────
+            is_call = bool(p.get("is_call") or notif.get("is_call") or envelope.type == EventType.CALL_STATE)
+            call_phase = p.get("call_phase") or notif.get("call_phase") or p.get("state") or p.get("phase")
+
+            if not is_call:
+                from backend.sync.notification_service import NotificationService
+                pkg = notif.get("package_name") or p.get("package_name") or ""
+                is_call, detected_phase = NotificationService.detect_call_event(pkg, title, body_text)
+                if detected_phase:
+                    call_phase = detected_phase
+
+            if is_call:
+                phase = (call_phase or "INCOMING").upper()
+                if phase in ("INCOMING", "RINGING", "ACTIVE", "OFFHOOK"):
+                    if self._call_duck_state is None:
+                        self._call_duck_state = await asyncio.to_thread(_duck_background_audio, 20)
+                        caller_label = f"{title}" if title else "Incoming Call"
+                        console.print(f"\n[bold red][CALL DETECTED] Background audio ducked to 20% for incoming call ({caller_label}).[/bold red]")
+
+                    # Arm 45-second fallback watchdog to avoid permanent ducking if no call-end event arrives
+                    if self._call_watchdog_task and not self._call_watchdog_task.done():
+                        self._call_watchdog_task.cancel()
+
+                    async def _call_timeout_watchdog():
+                        try:
+                            await asyncio.sleep(45.0)
+                            if self._call_duck_state:
+                                console.print("\n[dim yellow][CALL TIMEOUT] No call-ended update after 45s; restoring audio.[/dim yellow]")
+                                await asyncio.to_thread(_unduck_background_audio, self._call_duck_state)
+                                self._call_duck_state = None
+                        except asyncio.CancelledError:
+                            pass
+
+                    self._call_watchdog_task = asyncio.create_task(_call_timeout_watchdog())
+
+                elif phase in ("ENDED", "MISSED", "REJECTED", "DISCONNECTED", "IDLE"):
+                    if self._call_duck_state is not None:
+                        if self._call_watchdog_task and not self._call_watchdog_task.done():
+                            self._call_watchdog_task.cancel()
+                        await asyncio.to_thread(_unduck_background_audio, self._call_duck_state)
+                        self._call_duck_state = None
+                        console.print(f"\n[bold green][CALL CONCLUDED] Restored background audio to original volume ({title}).[/bold green]")
+
+            console.print()
+            border = "yellow" if is_proactive else ("red" if is_call and (call_phase or "").upper() in ("INCOMING", "RINGING") else "cyan")
+            header = f"[bold yellow][PROACTIVE ADVISORY] {app_name}: {title}[/bold yellow]" if is_proactive else f"[bold {border}][NOTIFICATION] {app_name}: {title}[/bold {border}]"
+            if staged:
+                body_text += f"\n[dim]Action Staged: {staged.get('domain')}:{staged.get('action')} - Use voice or /help to confirm.[/dim]"
+
+            console.print(
+                Panel(
+                    f"[bold white]{body_text}[/bold white]",
+                    title=header,
+                    border_style=border,
+                )
+            )
+
+            # Trigger real-time speech playback for proactive alerts
+            if speech and is_proactive:
+                if self._current_tts_task and not self._current_tts_task.done():
+                    self._current_tts_task.cancel()
+                if self._current_tts_proc:
+                    try:
+                        self._current_tts_proc.terminate()
+                    except Exception:
+                        pass
+                self._current_tts_task = asyncio.create_task(self._play_tts_response(speech))
+
+            sys.stdout.write("\nvesper> ")
+            sys.stdout.flush()
+
+        elif envelope.type == EventType.INTERRUPT:
+            # If voice duck state active, restore audio
+            if self._voice_duck_state is not None and self._call_duck_state is None:
+                if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+                    self._voice_watchdog_task.cancel()
+                await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
+                self._voice_duck_state = None
+
+            # If call duck state active, restore audio
+            if self._call_duck_state is not None:
+                if self._call_watchdog_task and not self._call_watchdog_task.done():
+                    self._call_watchdog_task.cancel()
+                await asyncio.to_thread(_unduck_background_audio, self._call_duck_state)
+                self._call_duck_state = None
+
+            # Out-of-band interrupt received: terminate audio playback & reset state
+            if self._current_tts_task and not self._current_tts_task.done():
+                self._current_tts_task.cancel()
+            if self._current_tts_proc:
+                try:
+                    self._current_tts_proc.terminate()
+                except Exception:
+                    pass
+                self._current_tts_proc = None
+            self._is_handling_voice = False
+            if self._wakeword_listener and self.is_running and not self._wakeword_manually_muted:
+                self._wakeword_listener.resume()
+            console.print("\n[bold red][INTERRUPTED] Assistant stopped via interrupt signal.[/bold red]")
+            sys.stdout.write("vesper> ")
+            sys.stdout.flush()
 
         elif envelope.type == EventType.ERROR:
             msg = p.get("message", "Unknown error")
@@ -581,13 +832,35 @@ class TerminalDesktopHUD:
         """Renders specific HUD card payloads cleanly in terminal."""
         card_type = card.get("type", "generic_card")
 
-        if card_type == "task_list_card":
+        if card_type in ("NOTIFICATION_DIGEST", "notification_digest"):
+            raw_notifs = card.get("items") or card.get("notifications") or []
+            notifs: List[Dict[str, Any]] = raw_notifs if isinstance(raw_notifs, list) else []
+            title = card.get("title", "Active Mobile Notifications")
+            table = Table(title=title, border_style="cyan", show_lines=True)
+            table.add_column("App", style="bold cyan")
+            table.add_column("Sender / Title", style="bold")
+            table.add_column("Message", style="white")
+            table.add_column("Priority", style="yellow")
+            for item in notifs:
+                table.add_row(
+                    str(item.get("app_name", "Mobile")),
+                    str(item.get("title", "")),
+                    str(item.get("text", ""))[:80],
+                    str(item.get("priority", "NORMAL")),
+                )
+            console.print(table)
+            if card.get("unread_emails"):
+                console.print(f"[dim cyan]Unread Emails in Inbox: {card.get('unread_emails')}[/dim cyan]")
+
+        elif card_type == "task_list_card":
             table = Table(title="Active Task Ledger", border_style="green", show_lines=True)
             table.add_column("ID", style="dim")
             table.add_column("Title", style="bold")
             table.add_column("Status")
             table.add_column("Priority")
-            for t in card.get("tasks", []):
+            raw_tasks = card.get("tasks") or []
+            tasks: List[Dict[str, Any]] = raw_tasks if isinstance(raw_tasks, list) else []
+            for t in tasks:
                 table.add_row(str(t.get("id", "")), str(t.get("title", "")), str(t.get("status", "")), str(t.get("priority", "")))
             console.print(table)
 
@@ -709,6 +982,11 @@ class TerminalDesktopHUD:
                 self._wakeword_listener.pause()
 
             temp_audio_path = None
+            call_duck_active = self._call_duck_state is not None
+            voice_duck_active = self._voice_duck_state is not None
+            duck_state = None
+            if not call_duck_active and not voice_duck_active:
+                duck_state = await asyncio.to_thread(_duck_background_audio, 20)
             try:
                 if self._tts_mgr is None:
                     from backend.voice.tts.manager import TTSManager
@@ -760,6 +1038,14 @@ class TerminalDesktopHUD:
             except Exception as e:
                 logger.debug(f"[TTS Playback Error] {e}")
             finally:
+                if voice_duck_active and not call_duck_active:
+                    if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+                        self._voice_watchdog_task.cancel()
+                    if self._voice_duck_state:
+                        await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
+                    self._voice_duck_state = None
+                elif not call_duck_active and duck_state:
+                    await asyncio.to_thread(_unduck_background_audio, duck_state)
                 if temp_audio_path:
                     try:
                         os.unlink(temp_audio_path)
@@ -775,6 +1061,28 @@ class TerminalDesktopHUD:
         """Invoked on the main asyncio thread when a wake word is detected."""
         console.print(f"\n[bold green][WAKE DETECTED][/bold green] ('{event.wake_word}', conf={event.confidence:.2f})")
         console.print("[dim cyan]Alfred is listening... (speak your command)[/dim cyan]")
+
+        # Immediately duck background audio so the microphone can cleanly capture the user's speech
+        if self._voice_duck_state is None and self._call_duck_state is None:
+            async def _duck_on_wake():
+                self._voice_duck_state = await asyncio.to_thread(_duck_background_audio, 20)
+            asyncio.create_task(_duck_on_wake())
+
+        # Arm a 30s voice interaction watchdog to prevent audio staying ducked if user says nothing or speech pipeline errors
+        if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+            self._voice_watchdog_task.cancel()
+
+        async def _voice_timeout_watchdog():
+            try:
+                await asyncio.sleep(30.0)
+                if self._voice_duck_state and self._call_duck_state is None:
+                    await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
+                    self._voice_duck_state = None
+            except asyncio.CancelledError:
+                pass
+
+        self._voice_watchdog_task = asyncio.create_task(_voice_timeout_watchdog())
+
         if self.websocket:
             asyncio.create_task(
                 self.send_envelope(
@@ -828,13 +1136,20 @@ class TerminalDesktopHUD:
             console.print(f"[dim red][Voice Error] {e}[/dim red]")
         finally:
             self._is_handling_voice = False
-            # If no command was dispatched (silence or hallucination), re-arm listener after brief cooldown
-            if not command_sent and self._wakeword_listener and self.is_running:
-                async def _unpause():
-                    await asyncio.sleep(0.3)
-                    if self._wakeword_listener and self.is_running and not self._is_handling_voice:
-                        self._wakeword_listener.resume()
-                asyncio.create_task(_unpause())
+            # If no command was dispatched (silence or hallucination), restore ducked audio and re-arm listener
+            if not command_sent:
+                if self._voice_duck_state is not None and self._call_duck_state is None:
+                    if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+                        self._voice_watchdog_task.cancel()
+                    asyncio.create_task(asyncio.to_thread(_unduck_background_audio, self._voice_duck_state))
+                    self._voice_duck_state = None
+
+                if self._wakeword_listener and self.is_running:
+                    async def _unpause():
+                        await asyncio.sleep(0.3)
+                        if self._wakeword_listener and self.is_running and not self._is_handling_voice:
+                            self._wakeword_listener.resume()
+                    asyncio.create_task(_unpause())
             sys.stdout.write("vesper> ")
             sys.stdout.flush()
 
@@ -866,7 +1181,7 @@ class TerminalDesktopHUD:
             sample_rate=sample_rate,
         )
         self._wakeword_listener.start()
-        console.print("[bold green][WAKE WORD] Armed 'Hey Alfred' / 'Hey Jarvis' continuous listener.[/bold green]")
+        console.print("[bold green][WAKE WORD] Armed 'Alfred' and 'Jarvis' continuous listeners.[/bold green]")
 
     def stop_wakeword(self) -> None:
         """Disarms wake word listener and releases microphone."""
@@ -1008,7 +1323,7 @@ class TerminalDesktopHUD:
         table.add_row("/devices", "List all active discovered devices on local subnet")
         table.add_row("/gestures on|off", "Arm or disarm live optical webcam gesture tracker")
         table.add_row("/wakeword on|off", "Arm or disarm live microphone 'Hey Alfred' wake word listener")
-        table.add_row("/gesture <NAME>", "Emulate gesture (CLOSED_FIST, OPEN_PALM, NEXT_TRACK, PREV_TRACK, PEACE_SIGN, THUMB_UP, THUMB_DOWN, AIR_TAP)")
+        table.add_row("/gesture <NAME>", "Emulate gesture (CLOSED_FIST, OPEN_PALM, GUN_RIGHT, GUN_LEFT, PEACE_SIGN, THUMB_UP, THUMB_DOWN, AIR_TAP)")
         table.add_row("/media <ACTION>", "Emulate media action (play, pause, next_track, previous_track)")
         table.add_row("/vol <0-100>", "Set master cluster audio volume")
         table.add_row("/zen", "Toggle ambient minimal clock (Zen Mode)")
