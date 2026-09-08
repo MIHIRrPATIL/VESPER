@@ -17,6 +17,7 @@ Key Architectural Guarantees:
    - GUN_RIGHT / NEXT_TRACK: Point Finger Gun Right -> Skip to Next Media Track
    - GUN_LEFT / PREV_TRACK: Point Finger Gun Left -> Return to Previous Media Track
    - PEACE_SIGN: Toggle Ambient Zen Mode
+   - THREE_FINGERS: Media Play / Pause (volume untouched)
    - THUMB_UP: Volume Step Up (+10%) / Confirm
    - THUMB_DOWN: Volume Step Down (-10%) / Dismiss
    - POINTING_UP: Toggle Focus Mode
@@ -280,6 +281,9 @@ DEFAULT_GESTURE_COOLDOWNS: Dict[str, float] = {
     "CLOSED_FIST": 1.5,
     "OPEN_PALM": 1.5,
     "PEACE_SIGN": 2.0,
+    "THREE_FINGERS": 1.5,
+    "PLAY_PAUSE": 1.5,
+    "MEDIA_PLAY_PAUSE": 1.5,
     "POINTING_UP": 2.0,
     "NEXT_TRACK": 1.6,
     "PREV_TRACK": 1.6,
@@ -814,6 +818,60 @@ class GestureWorker:
         else:
             return "GUN_LEFT", 0.90
 
+    @staticmethod
+    def _detect_three_fingers(hand_lms: Any) -> Tuple[str, float]:
+        """Classifies three fingers extended (Index, Middle, Ring extended; Pinky folded).
+
+        Used for pure Media Play/Pause toggle without modifying master volume or muting.
+
+        Anatomy:
+        - Pinky finger: Folded into the palm.
+        - Index, Middle, and Ring fingers: Extended away from the wrist past their PIP joints.
+
+        Returns:
+            ("THREE_FINGERS", 0.90) if detected
+            ("NONE", 0.0) otherwise
+        """
+        if not hand_lms or len(hand_lms) < 21:
+            return "NONE", 0.0
+
+        def get_pt(p: Any) -> Tuple[float, float, float]:
+            if hasattr(p, "x"):
+                return float(p.x), float(p.y), float(getattr(p, "z", 0.0))
+            elif isinstance(p, dict):
+                return float(p.get("x", 0.0)), float(p.get("y", 0.0)), float(p.get("z", 0.0))
+            return float(p[0]), float(p[1]), float(p[2]) if len(p) > 2 else 0.0
+
+        def dist_2d(p1: Any, p2: Any) -> float:
+            x1, y1, _ = get_pt(p1)
+            x2, y2, _ = get_pt(p2)
+            return math.hypot(x1 - x2, y1 - y2)
+
+        wrist = hand_lms[0]
+        index_pip = hand_lms[6]
+        index_tip = hand_lms[8]
+        middle_pip = hand_lms[10]
+        middle_tip = hand_lms[12]
+        ring_pip = hand_lms[14]
+        ring_tip = hand_lms[16]
+        pinky_pip = hand_lms[18]
+        pinky_tip = hand_lms[20]
+
+        # 1. Pinky MUST be folded into the palm
+        pinky_folded = dist_2d(pinky_tip, wrist) < dist_2d(pinky_pip, wrist) * 1.15
+        if not pinky_folded:
+            return "NONE", 0.0
+
+        # 2. Index, Middle, and Ring fingers MUST be extended
+        index_extended = dist_2d(index_tip, wrist) > dist_2d(index_pip, wrist) * 1.18
+        middle_extended = dist_2d(middle_tip, wrist) > dist_2d(middle_pip, wrist) * 1.18
+        ring_extended = dist_2d(ring_tip, wrist) > dist_2d(ring_pip, wrist) * 1.18
+
+        if index_extended and middle_extended and ring_extended:
+            return "THREE_FINGERS", 0.90
+
+        return "NONE", 0.0
+
     def _evaluate_gesture_heuristic(self, frame: Any) -> Tuple[str, float]:
         """Evaluates hand gestures using MediaPipe GestureRecognizer and trajectory heuristics.
 
@@ -941,6 +999,13 @@ class GestureWorker:
                     self._toggle_gesture_start = 0.0
                     return gun_gesture, gun_conf
 
+                # ── 2c. Three Fingers Extended → Media Play/Pause ──
+                three_gesture, three_conf = self._detect_three_fingers(hand_lms)
+                if three_gesture != "NONE":
+                    self._wrist_history.clear()
+                    self._toggle_gesture_start = 0.0
+                    return three_gesture, three_conf
+
             else:
                 self._pinch_streak = 0
 
@@ -1050,7 +1115,19 @@ class GestureWorker:
                 )
                 await asyncio.to_thread(_set_system_volume, dial_pct)
 
-            elif gesture in ("PEACE_SIGN", "TOGGLE_ZEN"):
+            elif gesture in ("THREE_FINGERS", "PLAY_PAUSE", "MEDIA_PLAY_PAUSE"):
+                # Pure media play/pause toggle without modifying master volume or muting
+                is_playing = media_copy.get("is_playing", True)
+                new_playing = not is_playing
+                media_copy["is_playing"] = new_playing
+                await sync_manager.update_state(
+                    {"current_media": media_copy},
+                    source_device_id="gesture_worker",
+                )
+                await asyncio.to_thread(_control_media_player, "play-pause")
+                logger.info(f"[GestureWorker] THREE_FINGERS toggled playback -> {'PLAY' if new_playing else 'PAUSE'} (Volume untouched: {cur_vol}%)")
+
+            elif gesture in ("PEACE_SIGN", "VICTORY", "TOGGLE_ZEN", "ZEN_MODE"):
                 new_zen = not cur_snap.zen_mode
                 await sync_manager.update_state(
                     {"zen_mode": new_zen},

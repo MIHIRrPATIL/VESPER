@@ -34,6 +34,12 @@ function wasmStaticPlugin(): Plugin {
 export default defineConfig(() => ({
   plugins: [react(), wasmStaticPlugin()],
 
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   clearScreen: false,
   server: {

@@ -51,6 +51,7 @@ VESPER supports an expanded, touchless gesture vocabulary designed for immediate
 | **`THUMB_UP`** | **Volume Up (+10%)** | `Channel.SYSTEM` : `SET_VOLUME` (`volume=cur+10`) | Increments system master volume by +10% |
 | **`THUMB_DOWN`** | **Volume Down (-10%)** | `Channel.SYSTEM` : `SET_VOLUME` (`volume=cur-10`) | Decrements system master volume by -10% |
 | **`PEACE_SIGN`** | **Toggle Zen Mode** | `Channel.SYSTEM` : `ZEN_MODE_STATE` (`toggle=True`) | Toggles ambient distraction-free Zen Mode across the cluster |
+| **`THREE_FINGERS`** | **Media Play / Pause** | `Channel.SYSTEM` : `MEDIA_CONTROL` (`action="play_pause"`) | Pure media playback toggle (Spotify/MPRIS) without modifying master volume or system mute |
 | **`POINTING_UP`** | **Toggle Focus Mode** | `Channel.SYSTEM` : `FOCUS_MODE_STATE` (`toggle=True`) | Toggles high-productivity Focus Mode across the cluster |
 | **`ROCK_ON` (`ILoveYou`)** | **Lock / Unlock Gesture Tracking** | `Channel.GESTURE` : `GESTURE_TOGGLE` (`:PAUSED` / `:RESUMED`) | Deliberate hold for 1.0s locks or unlocks gesture tracking with a 2.0s anti-flapping buffer |
 | **`AIR_TAP`** | **Select / Activate Widget** | `Channel.GESTURE` : `AIR_TAP` | Quick pinch tap in the air for desk UI interaction |

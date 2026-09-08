@@ -103,6 +103,11 @@ function classifyLandmarkGeometry(landmarks: Landmark[]): { gesture: string; con
     return { gesture: 'PEACE_SIGN', confidence: 0.90 };
   }
 
+  // Three Fingers: Index, Middle, & Ring extended, pinky folded
+  if (indexExt && middleExt && ringExt && pinkyFold) {
+    return { gesture: 'THREE_FINGERS', confidence: 0.90 };
+  }
+
   // Rock On: Index & Pinky extended, middle & ring folded
   if (indexExt && pinkyExt && middleFold && ringFold) {
     return { gesture: 'ROCK_ON', confidence: 0.88 };

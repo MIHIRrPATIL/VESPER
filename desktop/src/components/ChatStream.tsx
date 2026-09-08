@@ -1,133 +1,135 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Mic, Sparkles } from 'lucide-react';
-import { ConversationMessage } from '../types/vesper';
-import { gatewayService } from '../services/gateway';
+import {
+  ChevronDown,
+  Settings,
+  Terminal,
+  Activity,
+  Code
+} from 'lucide-react';
+import { ConversationMessage, AgentState } from '../types/vesper';
+import { BentoGrid, BentoCard } from './ui/bento-grid';
+import { DynamicGreeting } from './DynamicGreeting';
+import { CommandInput } from './CommandInput';
+import { DesignerChronometer } from './DesignerChronometer';
 
 interface ChatStreamProps {
   messages: ConversationMessage[];
+  agentState: AgentState;
+  intent?: string;
+  activeHeadline?: string;
+  isLogExpanded?: boolean;
+  onToggleLog?: () => void;
   onSimulateWakeWord: () => void;
+  onSendUserMessage?: (text: string) => void;
 }
 
-export const ChatStream: React.FC<ChatStreamProps> = ({ messages, onSimulateWakeWord }) => {
-  const [inputText, setInputText] = useState('');
+export const ChatStream: React.FC<ChatStreamProps> = ({
+  messages,
+  agentState: _agentState,
+  intent: _intent,
+  activeHeadline: _activeHeadline = 'What can I help you shape today?',
+  isLogExpanded: controlledLogExpanded,
+  onToggleLog: controlledToggleLog,
+  onSimulateWakeWord: _onSimulateWakeWord,
+  onSendUserMessage,
+}) => {
+  const [internalLogExpanded, setInternalLogExpanded] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  const isLogExpanded =
+    controlledLogExpanded !== undefined ? controlledLogExpanded : internalLogExpanded;
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputText.trim()) return;
-    gatewayService.sendVoiceCommand(inputText);
-    setInputText('');
+  const toggleLog = () => {
+    if (controlledToggleLog) {
+      controlledToggleLog();
+    } else {
+      setInternalLogExpanded(!internalLogExpanded);
+    }
   };
 
-  const handleQuickPrompt = (prompt: string) => {
-    gatewayService.sendVoiceCommand(prompt);
+  useEffect(() => {
+    if (isLogExpanded) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, isLogExpanded]);
+
+  const dispatchCommand = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (onSendUserMessage) {
+      onSendUserMessage(trimmed);
+    }
   };
 
   return (
-    <div className="chat-stream-container">
-      <div className="chat-stream-header">
-        <div className="chat-title">
-          <Sparkles size={16} />
-          <span>COGNITIVE LOG & DIALOGUE</span>
+    <div className="center-stage-command-deck" style={{ width: '100%', position: 'relative' }}>
+      <div className="center-stage-inner relative z-10 w-full flex flex-col items-center justify-center">
+        <div className="hero-command-group w-full max-w-5xl flex flex-col items-start justify-start mb-32">
+          <DynamicGreeting />
+          
+          <CommandInput 
+            onSubmit={(val) => dispatchCommand(val)}
+          />
         </div>
-        <div className="chat-actions">
-          <button
-            type="button"
-            className="secondary-btn"
-            onClick={onSimulateWakeWord}
-            title="Simulate Wake Word: Hey Alfred"
-          >
-            <Mic size={14} />
-            <span>WAKE WORD</span>
-          </button>
-        </div>
-      </div>
 
-      <div className="chat-messages-scroll">
-        {messages.length === 0 ? (
-          <div className="chat-empty-state">
-            <div className="empty-title">Alfred System Online</div>
-            <div className="empty-desc">
-              Speak &apos;Hey Alfred&apos; via edge microphone, enter a command below, or perform a hand gesture.
+        <BentoGrid className="w-full max-w-5xl">
+          <BentoCard 
+            name="System Parameters" 
+            description="Configure the underlying AI gateway logic, adjust memory buffers, and review telemetry." 
+            Icon={Settings} 
+            className="col-span-2"
+          />
+          <BentoCard 
+            name="Active Terminals" 
+            description="3 bash instances running." 
+            Icon={Terminal} 
+          />
+          <BentoCard 
+            name="Cluster Metrics" 
+            description="Zero degradation in memory space. Latency optimal." 
+            Icon={Activity} 
+          />
+          <BentoCard 
+            name="Code Intelligence" 
+            description="Semantic indexing up to date across local projects." 
+            Icon={Code} 
+            className="col-span-2"
+          />
+        </BentoGrid>
+
+        {/* Bottom Designer Chronometer: Time, Date & Day */}
+        <DesignerChronometer />
+
+        {/* Expandable Dialogue Log Modal / Drawer */}
+        {isLogExpanded && (
+          <div className="command-log-drawer">
+            <div className="drawer-header">
+              <span className="drawer-title">SESSION CONVERSATION LOG</span>
+              <button
+                type="button"
+                className="drawer-close-btn"
+                onClick={toggleLog}
+              >
+                <ChevronDown size={15} />
+              </button>
             </div>
-            <div className="quick-prompts">
-              <button
-                type="button"
-                className="chip-btn"
-                onClick={() => handleQuickPrompt('Give me a brief system and cluster status report')}
-              >
-                System Status
-              </button>
-              <button
-                type="button"
-                className="chip-btn"
-                onClick={() => handleQuickPrompt('What is the weather today?')}
-              >
-                Weather Briefing
-              </button>
-              <button
-                type="button"
-                className="chip-btn"
-                onClick={() => handleQuickPrompt('Help me plan my deep work block for today')}
-              >
-                Deep Work Plan
-              </button>
+            <div className="drawer-messages-list">
+              {messages.length === 0 ? (
+                <div className="empty-dialogue">No messages in current session history.</div>
+              ) : (
+                messages.map((msg) => (
+                  <div key={msg.id} className={`dialogue-item ${msg.sender}`}>
+                    <span className="sender-tag">[{msg.sender.toUpperCase()}]</span>
+                    <span className="message-body">{msg.text}</span>
+                  </div>
+                ))
+              )}
+              <div ref={messagesEndRef} />
             </div>
           </div>
-        ) : (
-          messages.map((msg) => (
-            <div key={msg.id} className={`chat-bubble-row ${msg.sender}`}>
-              <div className="chat-bubble">
-                <div className="bubble-header">
-                  <span className="bubble-sender">{msg.sender.toUpperCase()}</span>
-                  {msg.intent && <span className="bubble-intent">{msg.intent}</span>}
-                  {msg.latencyMs && (
-                    <span className="bubble-latency">{msg.latencyMs.toFixed(0)}ms</span>
-                  )}
-                  <span className="bubble-time">
-                    {new Date(msg.timestamp).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      second: '2-digit',
-                    })}
-                  </span>
-                </div>
-
-                <div className="bubble-content">{msg.text}</div>
-
-                {msg.cards && msg.cards.length > 0 && (
-                  <div className="bubble-cards">
-                    {msg.cards.map((card, idx) => (
-                      <div key={idx} className="hud-card">
-                        {card.title && <div className="card-title">{card.title}</div>}
-                        {card.content && <div className="card-body">{card.content}</div>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))
         )}
-        <div ref={messagesEndRef} />
       </div>
-
-      <form className="chat-input-form" onSubmit={handleSubmit}>
-        <input
-          type="text"
-          className="chat-input"
-          placeholder="Send voice command or query to Alfred Swarm..."
-          value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-        />
-        <button type="submit" className="send-btn" disabled={!inputText.trim()}>
-          <Send size={16} />
-        </button>
-      </form>
     </div>
   );
 };
+

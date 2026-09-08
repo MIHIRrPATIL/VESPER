@@ -179,6 +179,18 @@ def register_default_specialists(reg: SpecialistRegistry) -> None:
     except Exception as e:
         logger.warning(f"[Registry] Could not load EmailSpecialist: {e}")
 
+    try:
+        from backend.agent.specialists.weather_specialist import WeatherSpecialist
+        reg.register(WeatherSpecialist())
+    except Exception as e:
+        logger.warning(f"[Registry] Could not load WeatherSpecialist: {e}")
+
+    try:
+        from backend.agent.specialists.conversation_specialist import ConversationSpecialist
+        reg.register(ConversationSpecialist())
+    except Exception as e:
+        logger.warning(f"[Registry] Could not load ConversationSpecialist: {e}")
+
 
 # Initialize default specialists
 register_default_specialists(registry)

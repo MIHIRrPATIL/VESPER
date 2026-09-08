@@ -110,10 +110,14 @@ async def scan_network_devices() -> Dict[str, Any]:
 
 
 @router.get("/proactive/actions/recent", response_model=Dict[str, Any])
-async def get_recent_proactive_action(max_age: float = 15.0) -> Dict[str, Any]:
+async def get_recent_proactive_action(max_age: float = 180.0) -> Dict[str, Any]:
     """Returns the most recently prompted proactive action awaiting confirmation."""
     from backend.agent.proactive.action_queue import action_queue
     act = action_queue.get_recent_prompted_action(max_age_sec=max_age)
+    if not act:
+        active = action_queue.get_active_actions()
+        if active:
+            act = active[0]
     if act:
         return {"found": True, "action": act.model_dump()}
     return {"found": False, "action": None}

@@ -231,7 +231,11 @@ class MessageRouter:
             await self.manager.broadcast(broadcast_envelope)
             return
 
-        command_text = envelope.payload.get("command", "")
+        command_text = (envelope.payload.get("command") or "").strip()
+        if not command_text:
+            logger.debug(f"[VOICE] Empty voice command from '{session.client_id}' ignored.")
+            return
+
         logger.info(f"[VOICE] Command from '{session.client_id}': \"{command_text}\" (UUID: {envelope.uuid})")
 
         # 2. Agent Activating Broadcast -> Notify cluster that LangGraph has started reasoning (THINKING)
@@ -259,7 +263,7 @@ class MessageRouter:
 
                 try:
                     target_url = f"{AGENT_SERVICE_URL}/query"
-                    timeout_config = httpx.Timeout(connect=5.0, read=35.0, write=5.0, pool=5.0)
+                    timeout_config = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)
                     async with httpx.AsyncClient(timeout=timeout_config) as http_client:
                         try:
                             agent_res = await http_client.post(
@@ -365,7 +369,34 @@ class MessageRouter:
         gesture = str(envelope.payload.get("gesture", "")).strip().upper()
         logger.info(f"[GESTURE] Received gesture '{gesture}' from '{session.client_id}'")
 
-        if gesture in ("TOGGLE_ZEN", "PEACE_SIGN"):
+        if gesture in ("THREE_FINGERS", "PLAY_PAUSE", "MEDIA_PLAY_PAUSE"):
+            # Pure media play/pause toggle without touching master volume or muting
+            now = time.time()
+            if getattr(self, "_last_media_toggle", 0.0) and (now - self._last_media_toggle < 1.0):
+                logger.info("[GESTURE] Ignored rapid Play/Pause toggle (cluster debounce)")
+                return
+            self._last_media_toggle = now
+
+            cur_state = sync_manager.get_snapshot()
+            media_copy = dict(cur_state.current_media)
+            is_currently_playing = media_copy.get("is_playing", True)
+            new_playing = not is_currently_playing
+            media_copy["is_playing"] = new_playing
+            await sync_manager.update_state({"current_media": media_copy}, source_device_id=session.client_id)
+
+            _control_media_player("play-pause")
+            action_name = "play" if new_playing else "pause"
+            logger.info(f"[GESTURE] THREE_FINGERS toggled media playback from '{session.client_id}' -> {action_name} (Volume untouched)")
+
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.SYSTEM,
+                type=EventType.MEDIA_CONTROL,
+                payload={"action": "play_pause", "media_state": action_name, "source": f"GESTURE:{gesture}"},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+
+        elif gesture in ("PEACE_SIGN", "VICTORY", "TOGGLE_ZEN", "ZEN_MODE"):
             now = time.time()
             if getattr(self, "_last_zen_toggle", 0.0) and (now - self._last_zen_toggle < 2.0):
                 logger.info("[GESTURE] Ignored rapid Zen Mode toggle (cluster debounce)")

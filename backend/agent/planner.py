@@ -104,6 +104,11 @@ FEW-SHOT EXAMPLES:
 - Multi-intent: {{"plan_type": "parallel", "steps": [{{"agent": "media", "action": "play_music", "params": {{"query": "lofi"}}}}, {{"agent": "tasks", "action": "add_task", "params": {{"title": "Review PR"}}}}]}}
 - Screen error: {{"plan_type": "parallel", "steps": [{{"agent": "vision", "action": "inspect_screen", "params": {{"query": "error"}}}}]}}
 - Read thread: {{"plan_type": "parallel", "steps": [{{"agent": "email", "action": "read_thread", "params": {{}}}}]}}
+- Current weather: {{"plan_type": "parallel", "steps": [{{"agent": "weather", "action": "get_current_weather", "params": {{"location": "Mumbai"}}}}]}}
+- Weather forecast: {{"plan_type": "parallel", "steps": [{{"agent": "weather", "action": "get_weather_forecast", "params": {{"location": "Palghar", "days": 3}}}}]}}
+- Will it rain: {{"plan_type": "parallel", "steps": [{{"agent": "weather", "action": "check_rain", "params": {{"hours_ahead": 6}}}}]}}
+- Greet/chit-chat: {{"plan_type": "parallel", "steps": [{{"agent": "conversation", "action": "chit_chat", "params": {{"query": "how are you doing"}}}}]}}
+- Recall conversations: {{"plan_type": "parallel", "steps": [{{"agent": "conversation", "action": "recall_conversations", "params": {{"query": "vesper project", "time_range": "week"}}}}]}}
 
 Return strictly JSON:
 {{
@@ -138,11 +143,18 @@ class SwarmPlanner:
         neg_candidates = []
 
         is_neg = bool(re.search(r"\b(no|don't|dont|cancel|reject|never mind|nevermind|forget it|stop|discard)\b", q_lower))
+        is_affirmative = bool(re.search(r"\b(yes|yeah|sure|confirm|proceed|go ahead|do it|add|create|log|record|that)\b", q_lower))
 
         for item in active:
             matched = False
-            # Check domain
-            if item.domain.lower() in q_lower:
+            domain_lower = item.domain.lower()
+            # Check domain and common synonyms
+            if (
+                domain_lower in q_lower
+                or (domain_lower == "tasks" and any(k in q_lower for k in ("task", "todo", "reminder", "item", "form", "job", "internship")))
+                or (domain_lower == "finance" and any(k in q_lower for k in ("transaction", "expense", "payment", "money", "debt", "budget", "rupees", "inr")))
+                or (domain_lower == "system" and any(k in q_lower for k in ("process", "kill", "cpu", "load", "task", "pid")))
+            ):
                 matched = True
 
             # Check merchant or key tokens from verbatim text or params
@@ -155,7 +167,7 @@ class SwarmPlanner:
 
             # Check specific params (e.g. description or title)
             desc = str(item.params.get("description") or item.params.get("title") or "").lower()
-            if desc and any(w in q_lower for w in desc.split() if len(w) > 3 and w not in ("under", "with", "from")):
+            if desc and any(w in q_lower for w in desc.split() if len(w) > 3 and w not in ("under", "with", "from", "that", "this")):
                 matched = True
 
             if matched:
@@ -164,12 +176,22 @@ class SwarmPlanner:
                 else:
                     pos_candidates.append(item)
 
+        # If only 1 action is active across the cluster and user provides a targeted confirmation like
+        # "yeah create that task", "create that", "cancel that", "do it", automatically match it!
+        is_targeted = bool(re.search(r"\b(task|todo|transaction|expense|payment|item|form|job|it|that|this|matter)\b", q_lower))
+        if len(active) == 1 and not pos_candidates and not neg_candidates and is_targeted and (is_affirmative or is_neg):
+            if is_neg:
+                neg_candidates.append(active[0])
+            else:
+                pos_candidates.append(active[0])
+
         return pos_candidates, neg_candidates
 
     def _check_deterministic_prefilter(
         self,
         query: str,
         session_context: Optional[Dict[str, Any]] = None,
+        registry: Optional[SpecialistRegistry] = None,
     ) -> Optional[SwarmPlan]:
         """Pre-filters high-stakes unambiguous queries deterministically before LLM invocation.
 
@@ -235,7 +257,7 @@ class SwarmPlanner:
             return SwarmPlan(
                 plan_type="direct",
                 provider_used="prefilter",
-                direct_response=f"Very well, sir. I have dismissed the proposal: {target.verbatim_text}.",
+                direct_response=f"Very well, sir. I have dismissed and discarded the proposal: {target.verbatim_text}.",
             )
         elif len(neg_matches) > 1:
             return SwarmPlan(
@@ -270,7 +292,7 @@ class SwarmPlanner:
         if recent_prompted:
             is_affirmative = any(
                 re.search(rf"\b{w}\b", q_lower)
-                for w in ["yes", "yeah", "sure", "confirm", "proceed", "go ahead", "do it", "log it", "record it", "add it", "create it", "pause it", "play it", "resume it"]
+                for w in ["yes", "yeah", "sure", "confirm", "proceed", "go ahead", "do it", "log it", "record it", "add it", "create it", "pause it", "play it", "resume it", "create that task", "add that task"]
             ) and not any(w in q_lower for w in ["don't", "dont", "no", "cancel", "stop", "nevermind", "forget"])
 
             is_negative = any(
@@ -279,9 +301,9 @@ class SwarmPlanner:
             )
 
             if is_affirmative:
-                action_queue.resolve_action(recent_prompted.id, "confirmed", confirmed_by="voice_15s_window")
-                audit_logger.log_action(recent_prompted, confirmed_by="voice_15s_window")
-                logger.info(f"[Planner.PreFilter] Strict 15s window confirmation for staged action: {recent_prompted.id}")
+                action_queue.resolve_action(recent_prompted.id, "confirmed", confirmed_by="voice_proactive_window")
+                audit_logger.log_action(recent_prompted, confirmed_by="voice_proactive_window")
+                logger.info(f"[Planner.PreFilter] Proactive window confirmation for staged action: {recent_prompted.id}")
                 return SwarmPlan(
                     plan_type="parallel",
                     provider_used="prefilter",
@@ -350,6 +372,7 @@ class SwarmPlanner:
             )
             if subject_match:
                 raw_subj = subject_match.group(1).strip()
+                dispatch_now = False
                 send_in_subj = re.search(r"(?:,\s*|\s+)(?:and\s+|then\s+|now\s+)?(?:send\s+it|send|dispatch)\s*[.!]?$", raw_subj, re.IGNORECASE)
                 if send_in_subj:
                     new_subject = raw_subj[:send_in_subj.start()].strip()
@@ -595,6 +618,54 @@ class SwarmPlanner:
                 steps=[{"agent": "system", "action": "scan_network_devices", "params": {}}],
             )
 
+        # 6b. Screen / Display Power Management (screen off, display off, sleep screen, wake screen):
+        is_screen_off_query = bool(
+            re.search(
+                r"\b(turn\s+off|power\s+off|shut\s+off|switch\s+off|sleep|kill)\s+(the\s+)?(screen|display|monitor|screens|monitors)\b",
+                q_lower,
+            )
+            or re.search(r"\b(screen|display|monitor)\s+(off|sleep)\b", q_lower)
+            or re.search(r"\b(put\s+(the\s+)?(screen|display|monitor|device|system)\s+to\s+sleep)\b", q_lower)
+        )
+        if is_screen_off_query:
+            logger.info("[Planner.PreFilter] Matched screen power off query -> system:set_screen_power (state=off)")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "system", "action": "set_screen_power", "params": {"state": "off"}}],
+            )
+
+        is_screen_on_query = bool(
+            re.search(
+                r"\b(turn\s+on|power\s+on|switch\s+on|wake|wake\s+up)\s+(the\s+)?(screen|display|monitor|screens|monitors)\b",
+                q_lower,
+            )
+            or re.search(r"\b(screen|display|monitor)\s+on\b", q_lower)
+        )
+        if is_screen_on_query:
+            logger.info("[Planner.PreFilter] Matched screen power on query -> system:set_screen_power (state=on)")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "system", "action": "set_screen_power", "params": {"state": "on"}}],
+            )
+
+        # 6c. Screen / Session Lock (lock screen, lock session, lock my pc):
+        is_lock_query = bool(
+            re.search(
+                r"\b(lock\s+(the\s+)?(screen|session|display|pc|laptop|computer)|lock\s+my\s+(pc|laptop|computer|screen))\b",
+                q_lower,
+            )
+            or q_lower.strip() in ("lock", "lock screen", "lock session", "lock pc")
+        )
+        if is_lock_query:
+            logger.info("[Planner.PreFilter] Matched lock session query -> system:lock_session")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "system", "action": "lock_session", "params": {}}],
+            )
+
         # 7. GitHub Repository Queries (my repos, recent projects on github):
         is_github_repo_query = bool(
             re.search(
@@ -639,30 +710,81 @@ class SwarmPlanner:
                 }],
             )
 
+        # 9. Spotify Playlist Listing Queries (0-token fast path):
+        is_list_playlists_query = bool(
+            re.search(
+                r"\b(?:what|list|show|get|tell\s+me|display|which)\b.*\bplaylists?\b",
+                q_lower,
+            )
+            or re.search(r"\bplaylists?\s+(?:do\s+i\s+have|i\s+have|in\s+my\s+library|on\s+(?:my\s+)?spotify)\b", q_lower)
+            or re.search(r"^(?:my\s+)?playlists?$", q_lower.strip())
+        ) and not any(w in q_lower for w in ["play ", "start ", "shuffle ", "queue "])
+        if is_list_playlists_query:
+            logger.info("[Planner.PreFilter] Matched list playlists query -> media:list_playlists")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "media", "action": "list_playlists", "params": {"limit": 25}}],
+            )
+
+        # 10. Direct Playlist Playback: "play [my] playlist <name>", "play <name> playlist"
+        m_play_pl = (
+            re.search(r"\b(?:play|start|shuffle)\s+(?:my\s+)?playlist\s+([a-zA-Z0-9\s!_'-]+?)(?:\s+on\s+spotify)?$", q_lower)
+            or re.search(r"\b(?:play|start|shuffle)\s+(?:my\s+)?([a-zA-Z0-9\s!_'-]+?)\s+playlist(?:\s+on\s+spotify)?$", q_lower)
+        )
+        if m_play_pl and not any(w in q_lower for w in ["what", "list", "show", "tell me", "which"]):
+            target_pl = m_play_pl.group(1).strip()
+            if target_pl:
+                logger.info(f"[Planner.PreFilter] Matched direct playlist playback -> media:play_playlist('{target_pl}')")
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{"agent": "media", "action": "play_playlist", "params": {"name": target_pl}}],
+                )
+
         # ── TIER 2: LOCAL SEMANTIC INTENT ROUTER (~10ms CPU, 0 tokens) ────────
         intent, conf, proto = self.semantic_router.classify(query)
 
         if intent == SemanticIntent.HANDHELD_OBJECT_RESEARCH:
             logger.info(f"[Planner.PreFilter] Semantic match: HANDHELD_OBJECT_RESEARCH (conf={conf:.2f}, proto='{proto}')")
-            # Preserve user secondary questions (e.g. "and tell the best book by the same author")
+            # Preserve user secondary questions or specific attributes (e.g. "and tell the best book", "sugar content", "calories")
             secondary_hint = ""
             for conj in [" and ", " also ", " plus ", " then ", ", "]:
                 if conj in query.lower():
                     parts = re.split(rf"{conj}", query, flags=re.IGNORECASE)
                     for p in parts[1:]:
                         clean_p = p.strip()
-                        if any(w in clean_p.lower() for w in ["best", "other", "author", "similar", "rating", "review", "sequel", "movie", "synopsis", "summary", "price", "more"]):
+                        if any(w in clean_p.lower() for w in ["best", "other", "author", "similar", "rating", "review", "sequel", "movie", "synopsis", "summary", "price", "more", "sugar", "calorie", "nutrition", "ingredient"]):
                             secondary_hint = f" {clean_p}"
                             break
                     if secondary_hint:
                         break
 
-            search_query_tmpl = f"$step_1.extracted_text{secondary_hint}"
+            if not secondary_hint:
+                m_attr = re.search(
+                    r"\b(?:what is|tell me|check|find|how many|what are)\s+(?:the\s+)?([a-zA-Z0-9\s]+?)\s+(?:of|for|in|about)\s+(?:what|the\s+item|this|the\s+product|the\s+book)\b",
+                    query,
+                    flags=re.IGNORECASE,
+                )
+                if m_attr:
+                    attr_name = m_attr.group(1).strip()
+                    if attr_name and not any(w in attr_name.lower() for w in ["what", "this", "name"]):
+                        secondary_hint = f" {attr_name}"
+
+            is_nutrition_or_visual = any(w in q_lower for w in ["sugar", "calorie", "nutrition", "carbs", "ingredient", "fat", "protein", "healthy", "what is this", "what am i holding"])
+            first_action = "inspect_webcam" if is_nutrition_or_visual else "ocr_webcam"
+            first_params = (
+                {"query": f"Identify the product or item shown in the webcam and describe its brand, type, and details: {query}"}
+                if is_nutrition_or_visual
+                else {"focus_hint": "Extract all visible text: title, author, brand, subtitle, or any identifying label."}
+            )
+
+            search_query_tmpl = f"$step_1.description{secondary_hint}" if first_action == "inspect_webcam" else f"$step_1.extracted_text{secondary_hint}"
             return SwarmPlan(
                 plan_type="sequential",
                 provider_used="prefilter",
                 steps=[
-                    {"agent": "vision", "action": "ocr_webcam", "params": {"focus_hint": "Extract all visible text: title, author, brand, subtitle, or any identifying label."}},
+                    {"agent": "vision", "action": first_action, "params": first_params},
                     {"agent": "research", "action": "web_search", "params": {"query": search_query_tmpl}},
                 ],
             )
@@ -801,6 +923,127 @@ class SwarmPlanner:
                 steps=[{"agent": "system", "action": "check_battery_status", "params": {}}],
             )
 
+        # ── WEATHER PREFILTER ─────────────────────────────────────────────────
+        # Current weather / conditions
+        is_current_weather = any(p in q_lower for p in [
+            "what's the weather", "what is the weather", "how's the weather",
+            "current weather", "weather right now", "weather today",
+            "is it hot", "is it cold", "temperature outside", "weather outside",
+            "weather in", "how's it outside",
+        ])
+        if is_current_weather:
+            location = None
+            loc_match = re.search(r"weather (?:in|at|for|around)\s+([\w\s,]+?)(?:\s+(?:right now|today|now|currently))?$", q_lower)
+            if loc_match:
+                location = loc_match.group(1).strip().title()
+            logger.info(f"[Planner.PreFilter] Weather inquiry detected -> weather:get_current_weather (location={location})")
+            if not registry or registry.get("weather"):
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{"agent": "weather", "action": "get_current_weather", "params": {"location": location} if location else {}}],
+                )
+            elif registry.get("research"):
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{"agent": "research", "action": "web_search", "params": {"query": f"weather in {location}" if location else "current weather"}}],
+                )
+
+        # Rain / umbrella check
+        is_rain_check = any(p in q_lower for p in [
+            "will it rain", "going to rain", "is it raining", "rain today",
+            "need an umbrella", "carry an umbrella", "umbrella", "bring a raincoat",
+            "chance of rain", "precipitation", "will it storm", "thunderstorm today",
+        ])
+        if is_rain_check:
+            location = None
+            loc_match = re.search(r"(?:rain|storm|umbrella) (?:in|at|for|around)\s+([\w\s,]+?)(?:\s+(?:today|tonight|now))?$", q_lower)
+            if loc_match:
+                location = loc_match.group(1).strip().title()
+            logger.info(f"[Planner.PreFilter] Rain check detected -> weather:check_rain (location={location})")
+            if not registry or registry.get("weather"):
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{"agent": "weather", "action": "check_rain", "params": {"location": location, "hours_ahead": 6} if location else {"hours_ahead": 6}}],
+                )
+            elif registry.get("research"):
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{"agent": "research", "action": "web_search", "params": {"query": f"rain forecast {location}" if location else "will it rain today"}}],
+                )
+
+        # Weather forecast
+        is_forecast = any(p in q_lower for p in [
+            "weather forecast", "forecast for", "weather this week", "weather next",
+            "tomorrow's weather", "what will the weather be", "weather for the next",
+        ])
+        if is_forecast:
+            location = None
+            days = 3
+            days_match = re.search(r"(\d+)\s*days?", q_lower)
+            if days_match:
+                days = int(days_match.group(1))
+            loc_match = re.search(r"forecast (?:for|in|at)\s+([\w\s,]+?)(?:\s+(?:this|next|for))?$", q_lower)
+            if loc_match:
+                location = loc_match.group(1).strip().title()
+            logger.info(f"[Planner.PreFilter] Forecast detected -> weather:get_weather_forecast (location={location}, days={days})")
+            if not registry or registry.get("weather"):
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{"agent": "weather", "action": "get_weather_forecast", "params": {"location": location, "days": days}}],
+                )
+            elif registry.get("research"):
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{"agent": "research", "action": "web_search", "params": {"query": f"{days} day weather forecast for {location}" if location else "weather forecast"}}],
+                )
+
+        # ── CONVERSATION PREFILTER ────────────────────────────────────────────
+        # Greetings and simple chit-chat
+        is_greeting = any(p in q_lower for p in [
+            "good morning alfred", "good afternoon alfred", "good evening alfred",
+            "hey alfred", "hello alfred", "hi alfred",
+        ])
+        if is_greeting:
+            logger.info("[Planner.PreFilter] Greeting detected -> conversation:chit_chat")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "conversation", "action": "chit_chat", "params": {"query": query}}],
+            )
+
+        is_how_are_you = bool(re.search(
+            r"\b(how are you|how are you doing|how do you feel|how's it going|you doing|you alright)\b", q_lower
+        ))
+        if is_how_are_you:
+            logger.info("[Planner.PreFilter] How-are-you detected -> conversation:chit_chat")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "conversation", "action": "chit_chat", "params": {"query": query}}],
+            )
+
+        # Dialogue recall / history queries
+        is_recall = any(p in q_lower for p in [
+            "what have we worked on", "what did we work on",
+            "what did we talk about", "what have we discussed",
+            "what did we discuss", "remind me of our conversations",
+            "recall our previous", "what did we do last", "recap of our",
+            "what have we been working on",
+        ])
+        if is_recall:
+            logger.info("[Planner.PreFilter] Conversation recall detected -> conversation:recall_conversations")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "conversation", "action": "recall_conversations", "params": {"query": query, "time_range": "week"}}],
+            )
+
         return None
 
     def _select_candidate_specialists(
@@ -813,7 +1056,7 @@ class SwarmPlanner:
         candidates: set[str] = set()
 
         domain_keywords = {
-            "media": ["play", "song", "music", "track", "spotify", "artist", "album", "volume", "pause", "resume", "listen", "soundtrack", "lofi"],
+            "media": ["play", "song", "music", "track", "spotify", "artist", "album", "volume", "pause", "resume", "listen", "soundtrack", "lofi", "playlist", "playlists"],
             "tasks": ["task", "todo", "reminder", "remind", "calendar", "event", "meeting", "agenda", "schedule", "appointment"],
             "email": ["email", "mail", "inbox", "thread", "message", "sender", "unread", "draft", "rohit", "arpit", "hemanshu"],
             "vision": ["see", "look", "watch", "camera", "webcam", "screen", "display", "monitor", "holding", "read", "ocr", "terminal", "window"],
@@ -822,6 +1065,19 @@ class SwarmPlanner:
             "memory": ["remember", "forget", "recall", "memorize", "preference", "profile", "what do you know about me"],
             "system": ["volume", "battery", "cpu", "ram", "specs", "brightness", "bluetooth", "wifi", "host", "system", "cluster", "vitals", "hardware", "report"],
             "crawl": ["crawl", "scrape", "documentation", "scrape page", "docs for"],
+            "weather": [
+                "weather", "temperature", "rain", "raining", "sunny", "cloudy", "overcast", "fog", "foggy",
+                "humidity", "wind", "storm", "thunderstorm", "drizzle", "umbrella", "forecast", "climate",
+                "how hot", "how cold", "will it rain", "should i carry", "uv index", "feels like",
+                "precipitation", "snowfall", "celsius", "degree",
+            ],
+            "conversation": [
+                "how are you", "how are you doing", "how do you feel", "good morning alfred",
+                "good afternoon alfred", "good evening alfred", "what have we", "what did we",
+                "what have we worked on", "what did we talk about", "what did we discuss",
+                "tell me about what", "remind me of", "chit chat", "how's it going",
+                "what do you think", "catch up", "check in",
+            ],
         }
 
         for domain, kws in domain_keywords.items():
@@ -859,7 +1115,7 @@ class SwarmPlanner:
     ) -> Tuple[SwarmPlan, float]:
         """Stage 1: Generates an execution plan from the user query with conversation context."""
         # ── Deterministic Pre-Filter (<1ms) ──────────────────────────────────
-        prefilter_plan = self._check_deterministic_prefilter(query, session_context)
+        prefilter_plan = self._check_deterministic_prefilter(query, session_context, registry=registry)
         if prefilter_plan is not None:
             prefilter_plan.provider_used = "prefilter"
             logger.info("[Planner] Plan generated via deterministic pre-filter (0ms, provider: prefilter)")
@@ -909,10 +1165,17 @@ class SwarmPlanner:
                 txt = active_visual.get("text", "")[:300]
                 context_lines.append(f"Last Visual Observation ({src}): {txt}")
 
-            entities = session_context.get("entities", {})
-            for ent_type, ent_data in entities.items():
-                if ent_type not in ("email", "track", "repo", "task", "visual"):
-                    context_lines.append(f"Active {ent_type.capitalize()}: {json.dumps(ent_data)}")
+            # Surface active proactive staged actions so the planner can adopt and execute them
+            active_staged = action_queue.get_active_actions()
+            if active_staged:
+                for a in active_staged:
+                    evidence_src = a.raw_evidence.get("sender") or a.raw_evidence.get("source_title") or a.raw_evidence.get("app_name") or ""
+                    evidence_msg = a.raw_evidence.get("message") or a.raw_evidence.get("raw_text") or a.raw_evidence.get("text") or ""
+                    context_lines.append(
+                        f"Active Proactive Staged Action: [ID: {a.id}] Domain='{a.domain}', Action='{a.action}', "
+                        f"Target='{a.verbatim_text}', Params={json.dumps(a.params)}, "
+                        f"Evidence=from '{evidence_src}': '{evidence_msg[:120]}'"
+                    )
 
             if context_lines:
                 messages.append({
@@ -1233,13 +1496,22 @@ class SwarmPlanner:
                         cleaned_lines.append(l_str)
                 if cleaned_lines:
                     q_clean = " ".join(cleaned_lines)
+                for bad in [
+                    "no legible text detected in this frame",
+                    "no legible text detected",
+                    "no legible text",
+                    "no text detected",
+                    "no visible text",
+                    "no text could be extracted",
+                ]:
+                    q_clean = re.sub(rf"\b{re.escape(bad)}\b", "", q_clean, flags=re.IGNORECASE)
                 params["query"] = re.sub(r"\s+", " ", q_clean).strip()
 
             res = await registry.execute_action(agent_name, action, params, context)
             results.append(res)
             step_outputs[f"step_{idx}"] = res.data or res.speech_summary
 
-            # ── Confidence Gate (Fix 1/4): Vision/OCR → Research chains only ──────
+            # ── Confidence Gate: Vision/OCR → Research chains only ──────
             # If this step is a vision/OCR action and the NEXT step is a research step,
             # check the OCR confidence before blindly passing the result downstream.
             if (
@@ -1251,14 +1523,51 @@ class SwarmPlanner:
                 next_step = plan.steps[idx]  # plan.steps is 0-indexed, idx is 1-indexed
                 is_next_research = next_step.get("agent") == "research"
                 confidence = res.data.get("confidence", "high")
+                extracted = str(res.data.get("extracted_text") or "").strip()
+                unreadable_patterns = [
+                    "no legible text",
+                    "no text detected",
+                    "unable to detect",
+                    "no visible text",
+                    "no text could be extracted",
+                    "no text found",
+                ]
+                is_unreadable = (
+                    confidence in ("uncertain", "low")
+                    or not extracted
+                    or any(p in extracted.lower() for p in unreadable_patterns)
+                )
 
-                if is_next_research and confidence == "uncertain":
+                if is_next_research and is_unreadable:
+                    # If OCR yielded no legible text on webcam, attempt inspect_webcam visual recognition before halting
+                    if action == "ocr_webcam":
+                        logger.info("[Planner] OCR yielded no legible text; attempting inspect_webcam visual recognition fallback...")
+                        _ocr_query = params.get("query") or params.get("focus_hint") or "Identify the product or object the user is holding and describe it"
+                        v_fallback = await registry.execute_action(
+                            "vision",
+                            "inspect_webcam",
+                            {"query": f"Identify the product or object the user is holding and describe it: {_ocr_query}"},
+                            context,
+                        )
+                        if (
+                            v_fallback.success
+                            and isinstance(v_fallback.data, dict)
+                            and v_fallback.data.get("confidence") != "uncertain"
+                            and v_fallback.data.get("description")
+                        ):
+                            logger.info(f"[Planner] Visual recognition fallback succeeded: {v_fallback.data.get('description')[:60]}")
+                            # Use recognized item description for downstream research
+                            results[-1] = v_fallback
+                            v_fallback.data["extracted_text"] = v_fallback.data.get("description", "")
+                            step_outputs[f"step_{idx}"] = v_fallback.data
+                            continue
+
                     # Item is unreadable — ask user to reposition instead of hallucinating
                     logger.info(f"[Planner] Vision/OCR {action} confidence=uncertain: halting sequential chain, requesting repositioning.")
                     msg = (
                         "I'm having difficulty reading your display clearly, sir. Could you please zoom in or bring the window to focus?"
                         if "screen" in action
-                        else "I'm having difficulty reading the cover clearly, sir. Could you hold it a bit closer to the camera, or face it more directly toward me?"
+                        else "I'm having difficulty reading what you're holding clearly, sir. Could you hold it a bit closer to the camera, or face the label more directly toward me?"
                     )
                     clarify = SpecialistResult(
                         success=True,
@@ -1268,6 +1577,11 @@ class SwarmPlanner:
                         data={
                             "gate": "uncertain",
                             "extracted_text": res.data.get("extracted_text", "") or res.data.get("description", ""),
+                        },
+                        card_payload={
+                            "type": "CAMERA_GUIDANCE",
+                            "title": "Camera Repositioning Needed",
+                            "suggestion": "Hold item closer and steady facing camera",
                         },
                     )
                     results.append(clarify)

@@ -7,7 +7,9 @@ speech text, HUD cards, and execution metadata.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -22,10 +24,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger("vesper.agent.service")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Pre-warm semantic intent router in background task so port 8001 opens immediately
+    async def _prewarm():
+        try:
+            import asyncio
+            from backend.agent.semantic_router import SemanticIntentRouter
+            router = SemanticIntentRouter()
+            await asyncio.to_thread(router._ensure_initialized)
+            logger.info("[AgentService] SemanticIntentRouter pre-warmed successfully.")
+        except Exception as e:
+            logger.warning(f"[AgentService] SemanticIntentRouter pre-warm notice: {e}")
+
+    asyncio.create_task(_prewarm())
+    yield
+
+
 app = FastAPI(
     title="VESPER Agent Swarm Service",
     description="Cognitive Multi-Agent Swarm and Supervisor for VESPER",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # Global supervisor instance

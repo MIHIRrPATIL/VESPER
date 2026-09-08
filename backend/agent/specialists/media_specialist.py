@@ -84,6 +84,16 @@ class MediaSpecialist(BaseSpecialist):
                 },
             },
             {
+                "name": "list_playlists",
+                "description": "Lists the user's saved, created, and followed Spotify playlists with track counts and owners.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "description": "Maximum number of playlists to retrieve (default: 20)."}
+                    },
+                },
+            },
+            {
                 "name": "play_radio",
                 "description": "Plays an artist radio, genre radio, or themed radio station on Spotify (e.g. 'Justin Bieber Radio', 'Coldplay Radio', 'Synthwave Radio').",
                 "parameters": {
@@ -537,6 +547,89 @@ class MediaSpecialist(BaseSpecialist):
         except Exception as e:
             logger.exception(f"[Media:Spotify] Playlist error: {e}")
             return SpecialistResult(success=False, action="play_playlist", error=str(e))
+
+    async def list_user_playlists(self, limit: int = 25) -> SpecialistResult:
+        """Retrieves and lists the user's Spotify playlists (both created and followed)."""
+        token = await self._get_user_token()
+        if not token:
+            return SpecialistResult(
+                success=False,
+                action="list_playlists",
+                error="Spotify account is not connected.",
+                speech_summary="Sir, your Spotify account is not currently connected. Please authenticate with Spotify so I may view your playlists.",
+            )
+
+        try:
+            headers = {"Authorization": f"Bearer {token}"}
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                res = await client.get(
+                    f"https://api.spotify.com/v1/me/playlists?limit={limit}",
+                    headers=headers,
+                )
+                if res.status_code != 200:
+                    return SpecialistResult(
+                        success=False,
+                        action="list_playlists",
+                        error=f"Spotify API error ({res.status_code}): {res.text}",
+                        speech_summary="I encountered an error retrieving your Spotify playlists, sir.",
+                    )
+
+                items = [p for p in res.json().get("items", []) if p]
+                if not items:
+                    return SpecialistResult(
+                        success=True,
+                        action="list_playlists",
+                        data={"playlists": [], "count": 0},
+                        speech_summary="You do not have any saved playlists in your Spotify library, sir.",
+                        card_payload={"type": "spotify_playlists_card", "title": "Your Spotify Playlists", "playlists": []},
+                    )
+
+                playlists_data = []
+                names = []
+                for p in items:
+                    p_name = p.get("name", "Untitled")
+                    owner_name = p.get("owner", {}).get("display_name", "Spotify")
+                    total_tracks = p.get("tracks", {}).get("total", 0)
+                    uri = p.get("uri", "")
+                    img_url = p.get("images", [{}])[0].get("url", "") if p.get("images") else ""
+                    playlists_data.append({
+                        "name": p_name,
+                        "owner": owner_name,
+                        "total_tracks": total_tracks,
+                        "uri": uri,
+                        "image_url": img_url,
+                    })
+                    names.append(p_name)
+
+                # Format speech summary in Alfred's refined butler tone
+                if len(names) <= 5:
+                    playlist_list_str = ", ".join(f"'{n}'" for n in names)
+                    speech = f"You have {len(names)} playlists in your library, sir: {playlist_list_str}."
+                else:
+                    top_five = ", ".join(f"'{n}'" for n in names[:5])
+                    speech = f"You have {len(names)} playlists in your library, sir, including {top_five}, among others."
+
+                logger.info(f"[Media:Spotify] Retrieved {len(playlists_data)} user playlists successfully")
+                return SpecialistResult(
+                    success=True,
+                    action="list_playlists",
+                    data={"playlists": playlists_data, "count": len(playlists_data)},
+                    speech_summary=speech,
+                    card_payload={
+                        "type": "spotify_playlists_card",
+                        "title": "Your Spotify Playlists",
+                        "count": len(playlists_data),
+                        "playlists": playlists_data,
+                    },
+                )
+        except Exception as e:
+            logger.exception(f"[Media:Spotify] Error listing user playlists: {e}")
+            return SpecialistResult(
+                success=False,
+                action="list_playlists",
+                error=str(e),
+                speech_summary="I was unable to retrieve your playlists at this time, sir.",
+            )
 
     async def play_radio_on_spotify(self, station: str, device: Optional[str] = None) -> SpecialistResult:
         """Plays an artist radio, genre radio, or themed radio on Spotify."""
@@ -1052,9 +1145,16 @@ class MediaSpecialist(BaseSpecialist):
             device = params.get("device")
             return await self.play_radio_on_spotify(station, device=device)
 
-        # 7. Spotify Playlists
+        # 7a. List User Playlists
+        elif act in ["list_playlists", "get_playlists", "get_user_playlists", "list_user_playlists", "show_playlists"]:
+            limit = int(params.get("limit") or 25)
+            return await self.list_user_playlists(limit=limit)
+
+        # 7b. Spotify Playlists Playback
         elif any(k in act for k in ["playlist", "user_playlists"]) or act == "play_playlist":
-            name = str(params.get("name") or params.get("query") or params.get("playlist") or "")
+            name = str(params.get("name") or params.get("query") or params.get("playlist") or "").strip()
+            if not name or act in ["list_playlists", "get_playlists", "show_playlists"]:
+                return await self.list_user_playlists()
             device = params.get("device")
             return await self.play_playlist_on_spotify(name, device=device)
 

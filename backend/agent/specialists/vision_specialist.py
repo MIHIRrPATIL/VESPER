@@ -314,27 +314,36 @@ class VisionSpecialist(BaseSpecialist):
                 data={"source": "webcam"},
             )
 
-        text = ocr_result.extracted_text or ocr_result.description
-        speech = "Here is the transcription of what you are holding, sir." if len(text) > 40 else text
-
-        # Confidence scoring: based on how much legible text was extracted.
-        # "high"     → ≥15 chars of text (enough for a title/label search)
-        # "medium"   → 5-14 chars (partial read, may still be useful)
-        # "uncertain" → <5 chars or empty (cover not readable, ask user to reposition)
+        text = ocr_result.extracted_text or ocr_result.description or ""
         stripped = text.strip()
-        if len(stripped) >= 15:
-            confidence = "high"
-        elif len(stripped) >= 5:
-            confidence = "medium"
-        else:
+
+        unreadable_patterns = [
+            "no legible text",
+            "no text detected",
+            "no visible text",
+            "no text could be extracted",
+            "unable to detect any text",
+            "cannot detect any text",
+            "not legible",
+            "no text found",
+        ]
+        is_unreadable = len(stripped) < 5 or any(p in stripped.lower() for p in unreadable_patterns)
+
+        if is_unreadable:
             confidence = "uncertain"
+            speech = "I was unable to detect any legible text on the item you are holding, sir. If you could hold it closer to the camera or face the label directly toward me, I would be pleased to read it for you."
+            extracted_text = ""
+        else:
+            confidence = "high" if len(stripped) >= 15 else "medium"
+            speech = "Here is the transcription of what you are holding, sir." if len(text) > 40 else text
+            extracted_text = text
 
         return SpecialistResult(
             success=True,
             action="ocr_webcam",
             speech_summary=speech,
             data={
-                "extracted_text": text,
+                "extracted_text": extracted_text,
                 "raw_ocr": text,           # direct OCR output, unmodified
                 "confidence": confidence,  # high / medium / uncertain
                 "source": "webcam",
@@ -503,22 +512,35 @@ class VisionSpecialist(BaseSpecialist):
             )
 
         text = ocr_result.extracted_text or ocr_result.description or ""
-        speech = "I have transcribed the text visible on your display, sir." if len(text) > 40 else text
-
         stripped = text.strip()
-        if len(stripped) >= 15:
-            confidence = "high"
-        elif len(stripped) >= 5:
-            confidence = "medium"
-        else:
+
+        unreadable_patterns = [
+            "no legible text",
+            "no text detected",
+            "no visible text",
+            "no text could be extracted",
+            "unable to detect any text",
+            "cannot detect any text",
+            "not legible",
+            "no text found",
+        ]
+        is_unreadable = len(stripped) < 5 or any(p in stripped.lower() for p in unreadable_patterns)
+
+        if is_unreadable:
             confidence = "uncertain"
+            speech = "I was unable to detect any legible text on your display, sir. Could you please zoom in or bring the window to focus?"
+            extracted_text = ""
+        else:
+            confidence = "high" if len(stripped) >= 15 else "medium"
+            speech = "I have transcribed the text visible on your display, sir." if len(text) > 40 else text
+            extracted_text = text
 
         return SpecialistResult(
             success=True,
             action="ocr_screen",
             speech_summary=speech,
             data={
-                "extracted_text": text,
+                "extracted_text": extracted_text,
                 "raw_ocr": text,
                 "confidence": confidence,
                 "source": "screen",

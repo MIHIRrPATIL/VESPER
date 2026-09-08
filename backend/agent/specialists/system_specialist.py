@@ -110,6 +110,26 @@ class SystemSpecialist(BaseSpecialist):
                 "description": "Reports the battery level and charging state for all connected devices (phone, laptop, edge nodes). Shows whether each device is charging and if any alerts are active.",
                 "parameters": {"type": "object", "properties": {}},
             },
+            {
+                "name": "set_screen_power",
+                "description": "Controls display power management (DPMS) to turn monitors off (sleep screen) or turn them back on without locking session.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "state": {
+                            "type": "string",
+                            "enum": ["off", "on", "toggle"],
+                            "description": "Target screen state: 'off' to turn displays off/sleep screen, 'on' to wake displays, 'toggle' to toggle.",
+                        },
+                    },
+                    "required": ["state"],
+                },
+            },
+            {
+                "name": "lock_session",
+                "description": "Locks the current desktop session securely (triggers hyprlock/loginctl).",
+                "parameters": {"type": "object", "properties": {}},
+            },
         ]
 
     # ── Hardware Telemetry (<5ms) ─────────────────────────────────────────────
@@ -330,6 +350,111 @@ class SystemSpecialist(BaseSpecialist):
             card_payload={"type": "audio_sinks_card", "sinks": sinks},
         )
 
+    # ── Display & Screen Power Management (DPMS) ─────────────────────────────
+
+    def _run_dpms_control(self, state: str) -> bool:
+        """Dispatches display power management state (Hyprland / wlopm / xset) safely."""
+        hyprctl = shutil.which("hyprctl")
+        if hyprctl:
+            try:
+                # If turning off, give slight 0.8s lead time so audio/card dispatch starts cleanly
+                if state == "off":
+                    subprocess.Popen(["bash", "-c", "sleep 0.8 && hyprctl dispatch dpms off"])
+                else:
+                    subprocess.run([hyprctl, "dispatch", "dpms", state], capture_output=True, text=True, timeout=2.0)
+                return True
+            except Exception as e:
+                logger.warning(f"[System:dpms] hyprctl error: {e}")
+
+        wlopm = shutil.which("wlopm")
+        if wlopm:
+            try:
+                action = "--off" if state == "off" else "--on"
+                if state == "off":
+                    subprocess.Popen(["bash", "-c", f"sleep 0.8 && wlopm {action} '*'"])
+                else:
+                    subprocess.run([wlopm, action, "*"], capture_output=True, text=True, timeout=2.0)
+                return True
+            except Exception:
+                pass
+
+        xset = shutil.which("xset")
+        if xset:
+            try:
+                action = "off" if state == "off" else "on"
+                if state == "off":
+                    subprocess.Popen(["bash", "-c", f"sleep 0.8 && xset dpms force {action}"])
+                else:
+                    subprocess.run([xset, "dpms", "force", action], capture_output=True, text=True, timeout=2.0)
+                return True
+            except Exception:
+                pass
+
+        return False
+
+    async def set_screen_power(self, state: str = "off") -> SpecialistResult:
+        """Turns monitor displays off or on without session locking."""
+        st = state.lower().strip()
+        if st not in ("off", "on", "toggle"):
+            st = "off"
+
+        success = await asyncio.to_thread(self._run_dpms_control, st)
+        if success:
+            speech = "Turning off the display now, sir." if st == "off" else "Display powered on, sir."
+            return SpecialistResult(
+                success=True,
+                action="set_screen_power",
+                data={"screen_state": st},
+                speech_summary=speech,
+                card_payload={"type": "screen_power_card", "state": st},
+            )
+        else:
+            speech = f"Unable to toggle display power to '{st}', sir."
+            return SpecialistResult(
+                success=False,
+                action="set_screen_power",
+                error=f"Display power manager failed for state '{st}'",
+                speech_summary=speech,
+            )
+
+    def _run_lock_session(self) -> bool:
+        """Invokes system session lock via loginctl or hyprlock."""
+        try:
+            res = subprocess.run(["loginctl", "lock-session"], capture_output=True, text=True, timeout=2.0)
+            if res.returncode == 0:
+                return True
+        except Exception as e:
+            logger.warning(f"[System:lock] loginctl failed: {e}")
+
+        try:
+            subprocess.Popen(["bash", "-c", "pidof hyprlock || hyprlock"])
+            return True
+        except Exception as e:
+            logger.error(f"[System:lock] hyprlock fallback failed: {e}")
+            return False
+
+    async def lock_session(self) -> SpecialistResult:
+        """Locks the desktop session securely."""
+        success = await asyncio.to_thread(self._run_lock_session)
+        if success:
+            speech = "Locking the session now, sir."
+            return SpecialistResult(
+                success=True,
+                action="lock_session",
+                data={"locked": True},
+                speech_summary=speech,
+                card_payload={"type": "session_lock_card", "locked": True},
+            )
+        else:
+            speech = "Unable to lock session, sir."
+            return SpecialistResult(
+                success=False,
+                action="lock_session",
+                error="Session lock command failed",
+                speech_summary=speech,
+            )
+
+
     # ── Battery Status (Cross-Device) ──────────────────────────────────────────
 
     async def check_battery_status(self) -> SpecialistResult:
@@ -449,7 +574,20 @@ class SystemSpecialist(BaseSpecialist):
         elif act in ["list_audio_sinks", "audio_sinks", "devices"]:
             return await self.list_audio_sinks()
 
-        # 4. Network Discovery
+        # 4. Display & Screen Power (DPMS)
+        elif act in [
+            "set_screen_power", "screen_power", "screen_off", "screen_on",
+            "display_off", "display_on", "sleep_screen", "turn_off_screen",
+            "turn_on_screen", "screen", "display", "dpms",
+        ]:
+            st = str(params.get("state") or ("off" if any(k in act for k in ["off", "sleep"]) else "on"))
+            return await self.set_screen_power(st)
+
+        # 4. Session Lock
+        elif act in ["lock_session", "lock_screen", "lock", "screen_lock", "lock_system"]:
+            return await self.lock_session()
+
+        # 5. Network Discovery
         elif act in ["scan_network_devices", "scan_network", "discover_devices", "scan_devices"]:
             return await self.scan_network_devices()
 

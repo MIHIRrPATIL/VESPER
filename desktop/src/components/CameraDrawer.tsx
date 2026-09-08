@@ -1,17 +1,23 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { Camera, CameraOff, Eye, EyeOff, Hand, CheckCircle2 } from 'lucide-react';
+import { Camera, CameraOff, Hand, CheckCircle2, X } from 'lucide-react';
 import { cameraGestureManager, GestureStatus } from '../services/camera';
 import { gatewayService } from '../services/gateway';
 
 interface CameraDrawerProps {
   status: GestureStatus;
+  isOpen: boolean;
+  onClose: () => void;
   onToggleSafetyLock: () => void;
 }
 
-export const CameraDrawer: React.FC<CameraDrawerProps> = ({ status, onToggleSafetyLock }) => {
+export const CameraDrawer: React.FC<CameraDrawerProps> = ({
+  status,
+  isOpen,
+  onClose,
+  onToggleSafetyLock,
+}) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [showPreview, setShowPreview] = useState(true);
   const [streamMode, setStreamMode] = useState<'backend' | 'browser'>('backend');
   const [isBackendStreaming, setIsBackendStreaming] = useState<boolean>(true);
   const [isWakeWordArmed, setIsWakeWordArmed] = useState<boolean>(true);
@@ -43,7 +49,6 @@ export const CameraDrawer: React.FC<CameraDrawerProps> = ({ status, onToggleSafe
   const setCanvasRef = useCallback((element: HTMLCanvasElement | null) => {
     canvasRef.current = element;
     if (element) {
-      console.log('[CAMERA_DRAWER] Canvas element mounted, attaching to manager');
       cameraGestureManager.attachDisplayCanvas(element);
     }
   }, []);
@@ -52,7 +57,6 @@ export const CameraDrawer: React.FC<CameraDrawerProps> = ({ status, onToggleSafe
   const setVideoRef = useCallback((element: HTMLVideoElement | null) => {
     videoRef.current = element;
     if (element) {
-      console.log('[CAMERA_DRAWER] Video element mounted, attaching to manager');
       cameraGestureManager.attachVideoElement(element);
     }
   }, []);
@@ -65,24 +69,21 @@ export const CameraDrawer: React.FC<CameraDrawerProps> = ({ status, onToggleSafe
       cameraGestureManager.setBackendMode(false);
       if (videoRef.current && !hasAutoStarted.current) {
         hasAutoStarted.current = true;
-        console.log('[CAMERA_DRAWER] Starting browser WebRTC camera');
         cameraGestureManager.startCamera(videoRef.current);
       }
     }
   }, [streamMode, isBackendStreaming]);
 
-  const handleToggleCamera = () => {
+  const handleToggleCam = async () => {
     if (streamMode === 'backend') {
-      setIsBackendStreaming((prev) => {
-        const next = !prev;
-        cameraGestureManager.setBackendMode(next);
-        return next;
-      });
+      const nextState = !isBackendStreaming;
+      setIsBackendStreaming(nextState);
+      cameraGestureManager.setBackendMode(nextState);
     } else {
       if (status.isCameraActive) {
         cameraGestureManager.stopCamera();
       } else if (videoRef.current) {
-        cameraGestureManager.startCamera(videoRef.current);
+        await cameraGestureManager.startCamera(videoRef.current);
       }
     }
   };
@@ -90,183 +91,142 @@ export const CameraDrawer: React.FC<CameraDrawerProps> = ({ status, onToggleSafe
   const isCamActive = streamMode === 'backend' ? isBackendStreaming : status.isCameraActive;
 
   return (
-    <div className="camera-drawer">
-      <div className="camera-header">
-        <div className="camera-title">
-          <Hand size={16} />
-          <span>CLIENT-SIDE GESTURE PERCEPTION</span>
-        </div>
+    <>
+      {/* Hidden WebRTC Video Anchor (Kept permanently in DOM for continuous vision processing) */}
+      <video
+        ref={setVideoRef}
+        style={{ display: 'none' }}
+        autoPlay
+        playsInline
+        muted
+      />
 
-        <div className="camera-actions">
-          {/* Mode Switcher: OpenCV Native Stream vs Browser WebRTC */}
-          <button
-            type="button"
-            className="secondary-btn"
-            style={{ fontSize: '10px', padding: '3px 7px' }}
-            onClick={() => {
-              const next = streamMode === 'backend' ? 'browser' : 'backend';
-              setStreamMode(next);
-              if (next === 'browser') {
-                cameraGestureManager.setBackendMode(false);
-                if (videoRef.current) {
-                  cameraGestureManager.startCamera(videoRef.current);
-                }
-              } else {
-                cameraGestureManager.stopCamera();
-                setIsBackendStreaming(true);
-                cameraGestureManager.setBackendMode(true);
-              }
-            }}
-            title={streamMode === 'backend' ? 'Using backend optical stream. Click for browser WebRTC.' : 'Using browser WebRTC. Click for backend optical stream.'}
-          >
-            <span>{streamMode === 'backend' ? 'OPENCV STREAM' : 'WEBRTC CAM'}</span>
-          </button>
-
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={() => setShowPreview(!showPreview)}
-            title={showPreview ? 'Hide camera preview' : 'Show camera preview'}
-          >
-            {showPreview ? <Eye size={15} /> : <EyeOff size={15} />}
-          </button>
-
-          <button
-            type="button"
-            className={`secondary-btn ${isCamActive ? 'active' : ''}`}
-            onClick={handleToggleCamera}
-            title={isCamActive ? 'Stop Camera' : 'Start Camera'}
-          >
-            {isCamActive ? <CameraOff size={14} /> : <Camera size={14} />}
-            <span>{isCamActive ? 'DISABLE CAM' : 'ENABLE CAM'}</span>
+      {/* Floating Glass Vision HUD Drawer */}
+      <div className={`camera-floating-drawer ${isOpen ? 'open' : 'closed'}`}>
+        <div className="drawer-header">
+          <div className="drawer-title-group">
+            <Hand size={15} className="title-icon" />
+            <span className="drawer-title">OPTICAL GESTURE PERCEPTION</span>
+          </div>
+          <button type="button" className="drawer-close-btn" onClick={onClose} title="Close Drawer">
+            <X size={15} />
           </button>
         </div>
-      </div>
 
-      <div className="camera-body">
-        {/* Real-time Hardware Video / Landmark Canvas Preview */}
-        <div className={`video-wrapper ${showPreview ? 'visible' : 'hidden'}`}>
-          {/* Hidden video element used as media stream frame source in WebRTC mode */}
-          <video
-            ref={setVideoRef}
-            style={{ display: 'none' }}
-            autoPlay
-            playsInline
-            muted
-          />
-
-          {/* Unified High-Performance Canvas Display (Supports WebKitGTK without MJPEG codec limitations) */}
-          <canvas
-            ref={setCanvasRef}
-            className="camera-video"
-            width={320}
-            height={240}
-          />
-
-          {!isCamActive && (
-            <div className="video-placeholder">
-              <span className="placeholder-main">Camera Offline</span>
-              <span className="placeholder-sub">Click ENABLE CAM or switch to WEBRTC.</span>
-            </div>
-          )}
-
-          {status.hasHand && (
-            <div className="hand-badge">
-              <span>{status.handedness || 'Hand'} Tracked</span>
-            </div>
-          )}
-
-          {status.activeGesture !== 'NONE' && (
-            <div className="gesture-overlay-banner">
-              <span className="gesture-glow-text">{status.activeGesture}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Gesture Status and Feedback */}
-        <div className="gesture-telemetry">
-          <div className="telemetry-row">
-            <span className="label">Vision Worker:</span>
-            <span className={`val ${status.isWorkerReady ? 'ready' : 'loading'}`}>
-              {status.isWorkerReady ? 'READY (MediaPipe GPU/CPU)' : 'INITIALIZING...'}
-            </span>
-          </div>
-
-          <div className="telemetry-row">
-            <span className="label">Live Perception:</span>
-            <span className="val highlight">
-              {status.activeGesture} {status.confidence > 0 ? `(${(status.confidence * 100).toFixed(0)}%)` : ''}
-            </span>
-          </div>
-
-          <div className="telemetry-row">
-            <span className="label">Last Confirmed:</span>
-            <span className="val confirmed">
-              <CheckCircle2 size={13} className="val-icon" />
-              <span>{status.lastConfirmedGesture}</span>
-            </span>
-          </div>
-
-          <div className="telemetry-row">
-            <span className="label">Wake Word:</span>
+        <div className="drawer-body">
+          {/* Stream Mode & Controls */}
+          <div className="stream-mode-pills">
             <button
               type="button"
-              className={`pill-btn ${isWakeWordArmed ? 'armed' : 'locked'}`}
-              onClick={handleToggleWakeWord}
-              title={isWakeWordArmed ? 'Continuous wake word listener armed. Click to mute/pause.' : 'Wake word listener muted. Click to arm.'}
+              className={`mode-pill ${streamMode === 'backend' ? 'active' : ''}`}
+              onClick={() => setStreamMode('backend')}
             >
-              {isWakeWordArmed ? 'ARMED' : 'MUTED'}
+              BACKEND SINK
+            </button>
+            <button
+              type="button"
+              className={`mode-pill ${streamMode === 'browser' ? 'active' : ''}`}
+              onClick={() => setStreamMode('browser')}
+            >
+              LOCAL WEBRTC
+            </button>
+            <button
+              type="button"
+              className={`mode-pill ${isCamActive ? 'active' : 'inactive'}`}
+              onClick={handleToggleCam}
+            >
+              {isCamActive ? <Camera size={13} /> : <CameraOff size={13} />}
+              <span>{isCamActive ? 'ACTIVE' : 'MUTED'}</span>
             </button>
           </div>
 
-          <div className="telemetry-row">
-            <span className="label">Safety Lock:</span>
+          {/* Canvas Viewport */}
+          <div className="canvas-frame">
+            <canvas
+              ref={setCanvasRef}
+              className="gesture-display-canvas"
+              width={300}
+              height={225}
+            />
+            {!isCamActive && (
+              <div className="canvas-offline-scrim">
+                <span>Camera Stream Standby</span>
+              </div>
+            )}
+            {status.hasHand && (
+              <div className="hand-tracking-pill">
+                <span>{status.handedness || 'Hand'} Detected</span>
+              </div>
+            )}
+            {status.activeGesture !== 'NONE' && (
+              <div className="active-gesture-overlay">
+                <span>{status.activeGesture}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Perception Telemetry */}
+          <div className="telemetry-grid">
+            <div className="telemetry-item">
+              <span className="telemetry-label">Active:</span>
+              <span className="telemetry-value highlight">
+                {status.activeGesture} {status.confidence > 0 ? `(${(status.confidence * 100).toFixed(0)}%)` : ''}
+              </span>
+            </div>
+            <div className="telemetry-item">
+              <span className="telemetry-label">Last Confirmed:</span>
+              <span className="telemetry-value confirmed">
+                <CheckCircle2 size={12} />
+                <span>{status.lastConfirmedGesture}</span>
+              </span>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
             <button
               type="button"
-              className={`pill-btn ${status.isSafetyLocked ? 'locked' : 'armed'}`}
+              className={`mode-pill ${status.isSafetyLocked ? 'active' : ''}`}
               onClick={onToggleSafetyLock}
+              style={{ flex: 1 }}
             >
-              {status.isSafetyLocked ? 'LOCKED' : 'ARMED'}
+              LOCK: {status.isSafetyLocked ? 'ENGAGED' : 'ARMED'}
+            </button>
+            <button
+              type="button"
+              className={`mode-pill ${isWakeWordArmed ? 'active' : ''}`}
+              onClick={handleToggleWakeWord}
+              style={{ flex: 1 }}
+            >
+              WAKE: {isWakeWordArmed ? 'ARMED' : 'MUTED'}
             </button>
           </div>
 
-          <div className="gesture-shortcuts">
-            <div className="shortcuts-title">MAPPED TOUCHLESS SHORTCUTS</div>
-            <div className="shortcut-item">
-              <span className="shortcut-name">CLOSED_FIST</span>
-              <span className="shortcut-desc">Mute / Stop Wake Word</span>
+          {/* Quick Shortcuts */}
+          <div className="touchless-shortcuts-sheet">
+            <div className="sheet-title">TOUCHLESS GESTURE MAPPINGS</div>
+            <div className="sheet-row">
+              <span className="cmd">VOLUME_UP / DOWN</span>
+              <span className="desc">Thumb Up / Down</span>
             </div>
-            <div className="shortcut-item">
-              <span className="shortcut-name">OPEN_PALM</span>
-              <span className="shortcut-desc">Unmute / Resume Wake Word</span>
+            <div className="sheet-row">
+              <span className="cmd">OPEN_PALM</span>
+              <span className="desc">Pause Media / Resume Wake</span>
             </div>
-            <div className="shortcut-item">
-              <span className="shortcut-name">POINTING_UP</span>
-              <span className="shortcut-desc">Toggle Wake Word (Arm/Mute)</span>
+            <div className="sheet-row">
+              <span className="cmd">CLOSED_FIST</span>
+              <span className="desc">Stop / Mute Wake Word</span>
             </div>
-            <div className="shortcut-item">
-              <span className="shortcut-name">VOLUME_UP</span>
-              <span className="shortcut-desc">Volume +10%</span>
+            <div className="sheet-row">
+              <span className="cmd">PEACE_SIGN</span>
+              <span className="desc">Toggle Zen Mode</span>
             </div>
-            <div className="shortcut-item">
-              <span className="shortcut-name">VOLUME_DOWN</span>
-              <span className="shortcut-desc">Volume -10%</span>
-            </div>
-            <div className="shortcut-item">
-              <span className="shortcut-name">GUN_RIGHT</span>
-              <span className="shortcut-desc">Next Track (Finger Gun Right)</span>
-            </div>
-            <div className="shortcut-item">
-              <span className="shortcut-name">GUN_LEFT</span>
-              <span className="shortcut-desc">Prev Track (Finger Gun Left)</span>
-            </div>
-            <div className="shortcut-item">
-              <span className="shortcut-name">PEACE_SIGN</span>
-              <span className="shortcut-desc">Toggle Zen Mode</span>
+            <div className="sheet-row">
+              <span className="cmd">THREE_FINGERS</span>
+              <span className="desc">Media Play / Pause</span>
             </div>
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
 };

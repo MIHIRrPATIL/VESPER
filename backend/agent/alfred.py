@@ -199,6 +199,7 @@ class AlfredSupervisor:
         self,
         registry: Optional[SpecialistRegistry] = None,
         llm_client: Optional[LLMClient] = None,
+        session_id: Optional[str] = None,
     ) -> None:
         self.registry = registry or default_registry
         self.fast_path = FastPathEngine()
@@ -207,6 +208,7 @@ class AlfredSupervisor:
         self.conversation_history: List[Dict[str, str]] = []
         self._turn_counter: int = 0
         self._context_metadata: Dict[str, Dict[str, Any]] = {}
+        self._session_id: str = session_id or ""
         self.session_context: Dict[str, Any] = {
             "entities": {},
             "active_email": None,
@@ -220,6 +222,11 @@ class AlfredSupervisor:
             "pending_email_draft": None,
             "last_research": None,
         }
+        try:
+            from backend.data.conversation_store import conversation_store as _conv_store
+            self._conversation_store = _conv_store
+        except Exception:
+            self._conversation_store = None
 
     def clear_history(self) -> None:
         """Clears the session conversation history and active context."""
@@ -697,6 +704,31 @@ class AlfredSupervisor:
             self.conversation_history.append({"role": "assistant", "content": eval_res.speech_text})
         if len(self.conversation_history) > 16:
             self.conversation_history = self.conversation_history[-16:]
+
+        # Persist turns to conversation store asynchronously (non-blocking)
+        if self._conversation_store is not None:
+            try:
+                intent_hint = plan.steps[0].get("action", "") if getattr(plan, "steps", None) else ""
+                asyncio.create_task(
+                    self._conversation_store.arecord_turn(
+                        role="user",
+                        content=cleaned_query,
+                        intent=intent_hint,
+                        session_id=self._session_id,
+                    )
+                )
+                if eval_res.speech_text:
+                    asyncio.create_task(
+                        self._conversation_store.arecord_turn(
+                            role="assistant",
+                            content=eval_res.speech_text[:500],
+                            intent=intent_hint,
+                            summary=eval_res.speech_text[:200],
+                            session_id=self._session_id,
+                        )
+                    )
+            except Exception:
+                pass
 
         return AlfredResponse(
             speech_text=eval_res.speech_text,

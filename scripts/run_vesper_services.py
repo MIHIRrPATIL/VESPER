@@ -111,9 +111,19 @@ def play_audio_file(audio_path: Path, delete_after: bool = True) -> None:
                 pass
 
 
+import atexit
+_ACTIVE_DUCK_STATES: List[Dict[str, Any]] = []
+_LAST_KNOWN_NORMAL_VOLUMES: Dict[str, Any] = {
+    "playerctl": 0.8,
+    "sink_inputs": {},
+}
+
+
 def _duck_background_audio(duck_pct: int = 20) -> Dict[str, Any]:
-    """Temporarily reduces volume of active media players and background streams during TTS."""
+    """Temporarily reduces volume of active media players and background streams during voice/TTS."""
     state: Dict[str, Any] = {"sink_inputs": {}}
+    target_vol_ratio = max(0.05, duck_pct / 100.0)
+
     # 1. Playerctl volume ducking (Spotify, VLC, web browsers, MPRIS)
     try:
         playerctl = shutil.which("playerctl")
@@ -121,18 +131,26 @@ def _duck_background_audio(duck_pct: int = 20) -> Dict[str, Any]:
             r = subprocess.run([playerctl, "-a", "volume"], capture_output=True, text=True, timeout=1)
             if r.returncode == 0 and r.stdout.strip():
                 try:
-                    first_val = float(r.stdout.strip().splitlines()[0])
-                    state["playerctl"] = first_val
+                    curr = float(r.stdout.strip().splitlines()[0])
+                    # If current volume is already ducked (<= 0.25), retain previous normal baseline
+                    if curr > 0.25:
+                        _LAST_KNOWN_NORMAL_VOLUMES["playerctl"] = curr
+                        state["playerctl"] = curr
+                    else:
+                        state["playerctl"] = _LAST_KNOWN_NORMAL_VOLUMES.get("playerctl", 0.8)
                 except ValueError:
-                    state["playerctl"] = 1.0
+                    state["playerctl"] = _LAST_KNOWN_NORMAL_VOLUMES.get("playerctl", 0.8)
+            else:
+                state["playerctl"] = _LAST_KNOWN_NORMAL_VOLUMES.get("playerctl", 0.8)
+
             subprocess.run(
-                [playerctl, "-a", "volume", str(max(0.05, duck_pct / 100.0))],
+                [playerctl, "-a", "volume", str(target_vol_ratio)],
                 timeout=1, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
     except Exception:
         pass
 
-    # 2. PulseAudio / PipeWire sink-input volume ducking (system applications)
+    # 2. PulseAudio / PipeWire sink-input volume ducking
     try:
         pactl = shutil.which("pactl")
         if pactl:
@@ -144,7 +162,14 @@ def _duck_background_audio(duck_pct: int = 20) -> Dict[str, Any]:
                     sid = blocks[i]
                     block = blocks[i + 1]
                     m = re.search(r"Volume:.*?/\s*(\d+)%", block)
-                    orig_vol = m.group(1) + "%" if m else "100%"
+                    curr_pct = int(m.group(1)) if m else 100
+                    # If current volume is already ducked (<= 25%), retain previous normal baseline
+                    if curr_pct > 25:
+                        orig_vol = f"{curr_pct}%"
+                        _LAST_KNOWN_NORMAL_VOLUMES["sink_inputs"][sid] = orig_vol
+                    else:
+                        orig_vol = _LAST_KNOWN_NORMAL_VOLUMES["sink_inputs"].get(sid, "100%")
+
                     state["sink_inputs"][sid] = orig_vol
                     subprocess.run(
                         [pactl, "set-sink-input-volume", sid, f"{duck_pct}%"],
@@ -152,18 +177,25 @@ def _duck_background_audio(duck_pct: int = 20) -> Dict[str, Any]:
                     )
     except Exception:
         pass
+
+    _ACTIVE_DUCK_STATES.append(state)
     return state
 
 
-def _unduck_background_audio(state: Dict[str, Any]) -> None:
-    """Restores background media players and audio streams after TTS finishes."""
-    if not state:
-        return
-    # 1. Restore Playerctl volume
+def _unduck_background_audio(state: Optional[Dict[str, Any]] = None) -> None:
+    """Restores background media players and audio streams back to normal volume."""
+    if state and state in _ACTIVE_DUCK_STATES:
+        _ACTIVE_DUCK_STATES.remove(state)
+
+    # 1. Restore Playerctl volume (Spotify, etc.)
     try:
         playerctl = shutil.which("playerctl")
-        if playerctl and "playerctl" in state:
-            vol = state["playerctl"]
+        if playerctl:
+            vol = 0.8
+            if state and "playerctl" in state and float(state["playerctl"]) > 0.25:
+                vol = float(state["playerctl"])
+            elif _LAST_KNOWN_NORMAL_VOLUMES.get("playerctl", 0.8) > 0.25:
+                vol = float(_LAST_KNOWN_NORMAL_VOLUMES["playerctl"])
             subprocess.run(
                 [playerctl, "-a", "volume", str(vol)],
                 timeout=1, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -174,14 +206,69 @@ def _unduck_background_audio(state: Dict[str, Any]) -> None:
     # 2. Restore PulseAudio / PipeWire sink-inputs
     try:
         pactl = shutil.which("pactl")
-        if pactl and state.get("sink_inputs"):
-            for s_id, orig_vol in state["sink_inputs"].items():
-                subprocess.run(
-                    [pactl, "set-sink-input-volume", s_id, str(orig_vol)],
-                    timeout=1, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
+        if pactl:
+            if state and state.get("sink_inputs"):
+                for s_id, orig_vol in state["sink_inputs"].items():
+                    vol_str = orig_vol if (orig_vol and int(str(orig_vol).rstrip("%")) > 25) else "100%"
+                    subprocess.run(
+                        [pactl, "set-sink-input-volume", str(s_id), vol_str],
+                        timeout=1, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+
+            # SWEEPER: Sweep all active sink inputs in PipeWire.
+            # Any sink input currently throttled to <= 25% (e.g. Spotify after track transition)
+            # is restored back to normal volume (100% or known baseline).
+            r = subprocess.run([pactl, "list", "sink-inputs"], capture_output=True, text=True, timeout=1)
+            if r.returncode == 0 and r.stdout.strip():
+                import re
+                blocks = re.split(r"Sink Input #(\d+)", r.stdout)
+                for i in range(1, len(blocks), 2):
+                    sid = blocks[i]
+                    block = blocks[i + 1]
+                    m = re.search(r"Volume:.*?/\s*(\d+)%", block)
+                    if m and int(m.group(1)) <= 25:
+                        restore_vol = _LAST_KNOWN_NORMAL_VOLUMES["sink_inputs"].get(sid, "100%")
+                        if int(restore_vol.rstrip("%")) <= 25:
+                            restore_vol = "100%"
+                        subprocess.run(
+                            [pactl, "set-sink-input-volume", sid, restore_vol],
+                            timeout=1, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                        )
     except Exception:
         pass
+
+
+def _restore_all_ducked_audio() -> None:
+    """Unconditionally restores all background audio, media players, and sinks to normal volume."""
+    while _ACTIVE_DUCK_STATES:
+        st = _ACTIVE_DUCK_STATES.pop()
+        try:
+            _unduck_background_audio(st)
+        except Exception:
+            pass
+
+    # Sweep with no specific state
+    _unduck_background_audio(None)
+
+    # Force sweep playerctl if any player remains <= 0.25
+    try:
+        playerctl = shutil.which("playerctl")
+        if playerctl:
+            r = subprocess.run([playerctl, "-a", "volume"], capture_output=True, text=True, timeout=1)
+            if r.returncode == 0 and r.stdout.strip():
+                for line in r.stdout.strip().splitlines():
+                    try:
+                        if float(line) <= 0.25:
+                            restore_val = str(_LAST_KNOWN_NORMAL_VOLUMES.get("playerctl", 0.8))
+                            subprocess.run([playerctl, "-a", "volume", restore_val], timeout=1, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            break
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+
+
+atexit.register(_restore_all_ducked_audio)
 
 
 async def speak_text(text: str) -> None:
@@ -234,7 +321,7 @@ class ServiceSupervisor:
         self.processes[name] = proc
         return proc
 
-    async def wait_for_health(self, name: str, url: str, timeout_seconds: float = 12.0) -> bool:
+    async def wait_for_health(self, name: str, url: str, timeout_seconds: float = 25.0) -> bool:
         """Polls a /health endpoint until it responds HTTP 200."""
         t0 = time.time()
         health_url = f"{url.rstrip('/')}/health"
@@ -360,6 +447,9 @@ class TerminalDesktopHUD:
         self.is_running = True
         self._bg_tasks: List[asyncio.Task] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._receive_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._reconnect_task: Optional[asyncio.Task] = None
 
         # Peripherals
         self._gesture_worker = None
@@ -373,6 +463,7 @@ class TerminalDesktopHUD:
         self._tts_lock = asyncio.Lock()
         self._current_tts_task: Optional[asyncio.Task] = None
         self._current_tts_proc: Optional[asyncio.subprocess.Process] = None
+        self._tts_duck_state: Optional[Dict[str, Any]] = None
         self._call_duck_state: Optional[Dict[str, Any]] = None
         self._call_watchdog_task: Optional[asyncio.Task] = None
         self._voice_duck_state: Optional[Dict[str, Any]] = None
@@ -382,6 +473,20 @@ class TerminalDesktopHUD:
         """Establishes WebSocket connection and completes CLIENT_HELLO handshake."""
         try:
             self._loop = asyncio.get_running_loop()
+            if self._receive_task and not self._receive_task.done():
+                self._receive_task.cancel()
+                self._receive_task = None
+            if self._heartbeat_task and not self._heartbeat_task.done():
+                self._heartbeat_task.cancel()
+                self._heartbeat_task = None
+
+            if self.websocket:
+                try:
+                    await self.websocket.close()
+                except Exception:
+                    pass
+                self.websocket = None
+
             self.websocket = await websockets.connect(self.ws_url)
 
             # Send CLIENT_HELLO
@@ -407,12 +512,33 @@ class TerminalDesktopHUD:
                 return True
             return False
         except Exception as e:
+            self.websocket = None
             console.print(f"[bold red]Connection failed:[/bold red] {e}")
             return False
 
+    @property
+    def is_connected(self) -> bool:
+        """Evaluates whether the underlying WebSocket connection is active and open."""
+        ws = self.websocket
+        if ws is None:
+            return False
+        # Modern websockets (v13+) use .state (State.OPEN == 1)
+        if hasattr(ws, "state"):
+            try:
+                from websockets.protocol import State
+                return ws.state == State.OPEN
+            except Exception:
+                return getattr(ws, "state", None) == 1
+        # Legacy websockets (v12 and earlier)
+        if hasattr(ws, "open"):
+            return bool(ws.open)
+        if hasattr(ws, "closed"):
+            return not bool(ws.closed)
+        return True
+
     async def send_envelope(self, channel: Channel, event_type: EventType, payload: Dict[str, Any]) -> None:
         """Encapsulates and dispatches a validated ClientEnvelope to the Gateway."""
-        if not self.websocket:
+        if not self.is_connected:
             return
         envelope = ClientEnvelope(
             uuid=str(uuid.uuid4()),
@@ -422,12 +548,16 @@ class TerminalDesktopHUD:
         )
         try:
             await self.websocket.send(envelope.model_dump_json())
+        except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedOK, websockets.exceptions.ConnectionClosedError):
+            self.websocket = None
         except Exception as e:
-            console.print(f"[dim red][WS Send Error] {e}[/dim red]")
+            if self.is_connected:
+                console.print(f"[dim red][WS Send Error] {e}[/dim red]")
+            self.websocket = None
 
     async def _heartbeat_loop(self) -> None:
         """Maintains active session heartbeat with the Gateway."""
-        while self.is_running and self.websocket:
+        while self.is_running and self.is_connected:
             try:
                 await asyncio.sleep(12.0)
                 await self.send_envelope(
@@ -440,9 +570,32 @@ class TerminalDesktopHUD:
             except Exception:
                 break
 
+    async def _reconnect_supervisor(self) -> None:
+        """Continuously monitors gateway connection and reconnects automatically if dropped."""
+        while self.is_running:
+            await asyncio.sleep(2.5)
+            if self.is_running and not self.is_connected:
+                self.websocket = None
+                try:
+                    reconnected = await self.connect()
+                    if reconnected:
+                        console.print("\n[bold green][GATEWAY] Reconnected to Gateway successfully.[/bold green]")
+                        sys.stdout.write("vesper> ")
+                        sys.stdout.flush()
+                        if self._receive_task and not self._receive_task.done():
+                            self._receive_task.cancel()
+                        if self._heartbeat_task and not self._heartbeat_task.done():
+                            self._heartbeat_task.cancel()
+                        self._receive_task = asyncio.create_task(self._receive_loop())
+                        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                        self._bg_tasks = [t for t in self._bg_tasks if not t.done()]
+                        self._bg_tasks.extend([self._receive_task, self._heartbeat_task])
+                except Exception:
+                    pass
+
     async def _receive_loop(self) -> None:
         """Asynchronously listens for server broadcasts and renders them to the console."""
-        while self.is_running and self.websocket:
+        while self.is_running and self.is_connected:
             try:
                 raw_msg = await self.websocket.recv()
                 data = json.loads(raw_msg)
@@ -467,12 +620,20 @@ class TerminalDesktopHUD:
             except asyncio.CancelledError:
                 break
             except websockets.exceptions.ConnectionClosed:
+                self.websocket = None
                 if self.is_running:
-                    console.print("[bold yellow][DISCONNECT] Gateway connection closed.[/bold yellow]")
+                    console.print("\n[bold yellow][DISCONNECT] Gateway connection closed. Attempting reconnect in background...[/bold yellow]")
+                    sys.stdout.write("vesper> ")
+                    sys.stdout.flush()
+                break
+            except RuntimeError as re:
+                if self.is_running:
+                    console.print(f"[dim red][WS Concurrency Break] {re}[/dim red]")
                 break
             except Exception as e:
                 if self.is_running:
                     console.print(f"[dim red][ERROR] Inbound parse error: {e}[/dim red]")
+                await asyncio.sleep(0.5)
 
     async def _render_incoming_envelope(self, envelope: ServerEnvelope) -> None:
         """Renders server events into styled terminal components."""
@@ -579,8 +740,8 @@ class TerminalDesktopHUD:
             gesture = p.get("gesture", "")
             conf = p.get("confidence", 1.0)
             if gesture in ("CLOSED_FIST", "MUTE", "STOP", "INTERRUPT"):
-                # If background audio is ducked for wake word or incoming phone call, restore it on gesture
-                if self._voice_duck_state is not None and self._call_duck_state is None:
+                # If background audio is ducked for wake word, call, or speech, restore it immediately
+                if self._voice_duck_state is not None:
                     if self._voice_watchdog_task and not self._voice_watchdog_task.done():
                         self._voice_watchdog_task.cancel()
                     await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
@@ -592,6 +753,13 @@ class TerminalDesktopHUD:
                     await asyncio.to_thread(_unduck_background_audio, self._call_duck_state)
                     self._call_duck_state = None
                     console.print("\n[dim green][CALL DISMISSED] Background audio restored via Closed Fist gesture.[/dim green]")
+
+                if self._tts_duck_state is not None:
+                    await asyncio.to_thread(_unduck_background_audio, self._tts_duck_state)
+                    self._tts_duck_state = None
+
+                # Fallback sweeper to guarantee all media players and sink inputs are unthrottled
+                await asyncio.to_thread(_restore_all_ducked_audio)
 
                 # If assistant is currently speaking or processing voice/research, execute instant touchless cutoff
                 is_active = bool(
@@ -641,6 +809,15 @@ class TerminalDesktopHUD:
                 if self._wakeword_listener and self.is_running:
                     self._wakeword_listener.resume()
                 console.print(f"\n[bold green][WAKE WORD] Listener ARMED (Gesture: {gesture})[/bold green]")
+            elif gesture in ("THREE_FINGERS", "PLAY_PAUSE", "MEDIA_PLAY_PAUSE"):
+                await asyncio.to_thread(_control_media_player, "play-pause")
+                console.print(f"\n[bold yellow][MEDIA_CONTROL] Media Play/Pause toggled via Three Fingers ({gesture})[/bold yellow]")
+            elif gesture in ("PEACE_SIGN", "VICTORY", "TOGGLE_ZEN", "ZEN_MODE"):
+                console.print(f"\n[bold magenta][ZEN_MODE] Zen Mode toggle signal sent via Peace Sign ({gesture})[/bold magenta]")
+                if self.websocket:
+                    asyncio.create_task(
+                        self.send_envelope(Channel.GESTURE, EventType.GESTURE_EVENT, {"gesture": "PEACE_SIGN"})
+                    )
             elif gesture in ("TOGGLE_WAKEWORD", "WAKEWORD_TOGGLE"):
                 self._wakeword_manually_muted = not self._wakeword_manually_muted
                 if self._wakeword_manually_muted:
@@ -697,11 +874,20 @@ class TerminalDesktopHUD:
             sys.stdout.flush()
 
         elif envelope.type == EventType.AGENT_IDLE:
-            if self._voice_duck_state is not None and self._call_duck_state is None:
-                if self._voice_watchdog_task and not self._voice_watchdog_task.done():
-                    self._voice_watchdog_task.cancel()
-                await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
-                self._voice_duck_state = None
+            # Do not prematurely unduck if local TTS playback is still underway
+            is_speaking = bool(
+                self._current_tts_proc
+                or (self._current_tts_task and not self._current_tts_task.done())
+            )
+            if not is_speaking:
+                if self._voice_duck_state is not None and self._call_duck_state is None:
+                    if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+                        self._voice_watchdog_task.cancel()
+                    await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
+                    self._voice_duck_state = None
+                if self._tts_duck_state is not None:
+                    await asyncio.to_thread(_unduck_background_audio, self._tts_duck_state)
+                    self._tts_duck_state = None
 
             # Standby idle - re-arm microphone listener cleanly once speech finishes unless manually muted
             if self._wakeword_listener and self.is_running and not self._wakeword_manually_muted:
@@ -793,7 +979,7 @@ class TerminalDesktopHUD:
 
         elif envelope.type == EventType.INTERRUPT:
             # If voice duck state active, restore audio
-            if self._voice_duck_state is not None and self._call_duck_state is None:
+            if self._voice_duck_state is not None:
                 if self._voice_watchdog_task and not self._voice_watchdog_task.done():
                     self._voice_watchdog_task.cancel()
                 await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
@@ -805,6 +991,14 @@ class TerminalDesktopHUD:
                     self._call_watchdog_task.cancel()
                 await asyncio.to_thread(_unduck_background_audio, self._call_duck_state)
                 self._call_duck_state = None
+
+            # If TTS speech duck state active, restore audio
+            if self._tts_duck_state is not None:
+                await asyncio.to_thread(_unduck_background_audio, self._tts_duck_state)
+                self._tts_duck_state = None
+
+            # Fallback sweeper to ensure all media players and sink inputs are unthrottled
+            await asyncio.to_thread(_restore_all_ducked_audio)
 
             # Out-of-band interrupt received: terminate audio playback & reset state
             if self._current_tts_task and not self._current_tts_task.done():
@@ -881,6 +1075,112 @@ class TerminalDesktopHUD:
             table.add_row(str(card.get("statement", "")), str(card.get("category", "")), str(card.get("action", "stored")))
             console.print(table)
 
+        elif card_type in ("spotify_playlists_card", "spotify_playlists"):
+            raw_playlists = card.get("playlists") or []
+            playlists: List[Dict[str, Any]] = raw_playlists if isinstance(raw_playlists, list) else []
+            table = Table(title=str(card.get("title", "Your Spotify Playlists")), border_style="green", show_lines=True)
+            table.add_column("No.", style="dim", width=4)
+            table.add_column("Playlist Name", style="bold green")
+            table.add_column("Tracks", style="cyan", justify="right")
+            table.add_column("Curator / Owner", style="yellow")
+            for idx, p in enumerate(playlists, start=1):
+                table.add_row(
+                    str(idx),
+                    str(p.get("name", "Untitled")),
+                    str(p.get("total_tracks", "--")),
+                    str(p.get("owner", "Spotify")),
+                )
+            console.print(table)
+
+        elif card_type in ("weather_card",):
+            table = Table(title=f"Weather - {card.get('city', 'Unknown')}, {card.get('country', '')}", border_style="cyan")
+            table.add_column("Metric", style="bold")
+            table.add_column("Value")
+            cond = card.get("condition", "--")
+            temp = card.get("temperature_c")
+            feels = card.get("feels_like_c")
+            humidity = card.get("humidity_pct")
+            wind = card.get("wind_speed_kmh")
+            uv = card.get("uv_index")
+            precip = card.get("precip_probability_pct")
+            table.add_row("Condition", str(cond))
+            if temp is not None:
+                table.add_row("Temperature", f"{temp}\u00b0C")
+            if feels is not None:
+                table.add_row("Feels Like", f"{feels}\u00b0C")
+            if humidity is not None:
+                table.add_row("Humidity", f"{humidity}%")
+            if wind is not None:
+                table.add_row("Wind Speed", f"{wind:.0f} km/h")
+            if uv is not None:
+                table.add_row("UV Index", str(uv))
+            if precip is not None:
+                table.add_row("Precip. Probability", f"{precip}%")
+            if card.get("observed_at"):
+                table.add_row("Observed At", str(card["observed_at"]))
+            console.print(table)
+
+        elif card_type in ("weather_forecast_card",):
+            city = card.get("city", "Unknown")
+            country = card.get("country", "")
+            table = Table(title=f"Forecast - {city}, {country}", border_style="cyan", show_lines=True)
+            table.add_column("Date", style="bold")
+            table.add_column("Condition")
+            table.add_column("Max", style="red")
+            table.add_column("Min", style="blue")
+            table.add_column("Rain %", style="cyan")
+            table.add_column("UV", style="yellow")
+            for d in card.get("days", []):
+                table.add_row(
+                    str(d.get("date", "--")),
+                    str(d.get("condition", "--")),
+                    f"{d.get('temp_max_c', '--')}\u00b0C",
+                    f"{d.get('temp_min_c', '--')}\u00b0C",
+                    f"{d.get('precip_probability_pct', '--')}%",
+                    str(d.get("uv_index_max", "--")),
+                )
+            console.print(table)
+
+        elif card_type in ("weather_rain_card",):
+            city = card.get("city", "Unknown")
+            rain_likely = card.get("rain_likely", False)
+            prob = card.get("max_probability_pct", 0)
+            onset = card.get("onset_time", "--")
+            cond = card.get("condition_at_onset", "--")
+            style = "bold red" if rain_likely else "bold green"
+            label = "RAIN LIKELY" if rain_likely else "DRY CONDITIONS"
+            table = Table(title=f"Precipitation Check - {city}", border_style="cyan")
+            table.add_column("Detail", style="bold")
+            table.add_column("Value")
+            table.add_row("Status", f"[{style}]{label}[/{style}]")
+            table.add_row("Probability", f"{prob}%")
+            if rain_likely:
+                table.add_row("Onset Time", str(onset))
+                table.add_row("Condition", str(cond))
+            table.add_row("Hours Checked", str(card.get("hours_checked", "--")))
+            console.print(table)
+
+        elif card_type in ("conversation_card",):
+            response = card.get("response", "")
+            topics = card.get("recent_topics", [])
+            console.print(Panel(response, title="Alfred - Conversation", border_style="magenta", padding=(1, 2)))
+            if topics:
+                console.print(f"[dim magenta]Recent topics: {', '.join(topics[:5])}[/dim magenta]")
+
+        elif card_type in ("conversation_recall_card",):
+            results = card.get("results", [])
+            topics = card.get("topics", [])
+            table = Table(title="Conversation History Recall", border_style="magenta", show_lines=True)
+            table.add_column("When", style="dim", width=16)
+            table.add_column("Role", width=10)
+            table.add_column("Content")
+            for r in results[:5]:
+                ts = str(r.get("timestamp", ""))[:16]
+                table.add_row(ts, r.get("role", "--"), str(r.get("content", ""))[:100])
+            console.print(table)
+            if topics:
+                console.print(f"[dim magenta]Topics covered: {', '.join(topics[:6])}[/dim magenta]")
+
         else:
             console.print(Panel(json.dumps(card, indent=2), title=f"HUD Card: {card_type}", border_style="dim"))
 
@@ -942,6 +1242,37 @@ class TerminalDesktopHUD:
             self._gesture_task = None
         console.print("[yellow][GESTURES] Disarmed touchless hand tracking (camera released).[/yellow]")
 
+    def stop(self) -> None:
+        """Synchronous emergency teardown for signals and quick shutdown."""
+        self.is_running = False
+        self.stop_gestures()
+        self.stop_wakeword()
+        if self._current_tts_proc:
+            try:
+                self._current_tts_proc.terminate()
+            except Exception:
+                pass
+            self._current_tts_proc = None
+        if self._voice_duck_state is not None:
+            try:
+                _unduck_background_audio(self._voice_duck_state)
+            except Exception:
+                pass
+            self._voice_duck_state = None
+        if self._call_duck_state is not None:
+            try:
+                _unduck_background_audio(self._call_duck_state)
+            except Exception:
+                pass
+            self._call_duck_state = None
+        if self._tts_duck_state is not None:
+            try:
+                _unduck_background_audio(self._tts_duck_state)
+            except Exception:
+                pass
+            self._tts_duck_state = None
+        _restore_all_ducked_audio()
+
     async def disconnect(self) -> None:
         """Closes websocket connection, releases camera/mic peripherals, and cancels tasks cleanly."""
         self.is_running = False
@@ -963,6 +1294,35 @@ class TerminalDesktopHUD:
             except Exception:
                 pass
             self._current_tts_proc = None
+        if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+            self._voice_watchdog_task.cancel()
+        if self._call_watchdog_task and not self._call_watchdog_task.done():
+            self._call_watchdog_task.cancel()
+        if self._voice_duck_state is not None:
+            try:
+                _unduck_background_audio(self._voice_duck_state)
+            except Exception:
+                pass
+            self._voice_duck_state = None
+        if self._call_duck_state is not None:
+            try:
+                _unduck_background_audio(self._call_duck_state)
+            except Exception:
+                pass
+            self._call_duck_state = None
+        if self._tts_duck_state is not None:
+            try:
+                _unduck_background_audio(self._tts_duck_state)
+            except Exception:
+                pass
+            self._tts_duck_state = None
+        _restore_all_ducked_audio()
+        if self._receive_task and not self._receive_task.done():
+            self._receive_task.cancel()
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
         for t in self._bg_tasks:
             t.cancel()
         if self.websocket:
@@ -984,9 +1344,8 @@ class TerminalDesktopHUD:
             temp_audio_path = None
             call_duck_active = self._call_duck_state is not None
             voice_duck_active = self._voice_duck_state is not None
-            duck_state = None
             if not call_duck_active and not voice_duck_active:
-                duck_state = await asyncio.to_thread(_duck_background_audio, 20)
+                self._tts_duck_state = await asyncio.to_thread(_duck_background_audio, 20)
             try:
                 if self._tts_mgr is None:
                     from backend.voice.tts.manager import TTSManager
@@ -1038,14 +1397,16 @@ class TerminalDesktopHUD:
             except Exception as e:
                 logger.debug(f"[TTS Playback Error] {e}")
             finally:
-                if voice_duck_active and not call_duck_active:
-                    if self._voice_watchdog_task and not self._voice_watchdog_task.done():
-                        self._voice_watchdog_task.cancel()
-                    if self._voice_duck_state:
-                        await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
+                if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+                    self._voice_watchdog_task.cancel()
+                if self._tts_duck_state is not None:
+                    await asyncio.to_thread(_unduck_background_audio, self._tts_duck_state)
+                    self._tts_duck_state = None
+                if self._voice_duck_state is not None and not call_duck_active:
+                    await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
                     self._voice_duck_state = None
-                elif not call_duck_active and duck_state:
-                    await asyncio.to_thread(_unduck_background_audio, duck_state)
+                # Unconditionally sweep all streams to restore normal volume!
+                await asyncio.to_thread(_restore_all_ducked_audio)
                 if temp_audio_path:
                     try:
                         os.unlink(temp_audio_path)
@@ -1143,6 +1504,7 @@ class TerminalDesktopHUD:
                         self._voice_watchdog_task.cancel()
                     asyncio.create_task(asyncio.to_thread(_unduck_background_audio, self._voice_duck_state))
                     self._voice_duck_state = None
+                asyncio.create_task(asyncio.to_thread(_restore_all_ducked_audio))
 
                 if self._wakeword_listener and self.is_running:
                     async def _unpause():
@@ -1195,8 +1557,10 @@ class TerminalDesktopHUD:
     async def start_session(self, with_gestures: bool = False, with_wakeword: bool = False) -> None:
         """Runs the background receivers, armed daemons, and interactive REPL."""
         self._loop = asyncio.get_running_loop()
-        self._bg_tasks.append(asyncio.create_task(self._receive_loop()))
-        self._bg_tasks.append(asyncio.create_task(self._heartbeat_loop()))
+        self._receive_task = asyncio.create_task(self._receive_loop())
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._reconnect_task = asyncio.create_task(self._reconnect_supervisor())
+        self._bg_tasks.extend([self._receive_task, self._heartbeat_task, self._reconnect_task])
 
         if with_gestures:
             self.start_gestures()
@@ -1323,7 +1687,7 @@ class TerminalDesktopHUD:
         table.add_row("/devices", "List all active discovered devices on local subnet")
         table.add_row("/gestures on|off", "Arm or disarm live optical webcam gesture tracker")
         table.add_row("/wakeword on|off", "Arm or disarm live microphone 'Hey Alfred' wake word listener")
-        table.add_row("/gesture <NAME>", "Emulate gesture (CLOSED_FIST, OPEN_PALM, GUN_RIGHT, GUN_LEFT, PEACE_SIGN, THUMB_UP, THUMB_DOWN, AIR_TAP)")
+        table.add_row("/gesture <NAME>", "Emulate gesture (PEACE_SIGN [zen mode], THREE_FINGERS [media play/pause], CLOSED_FIST [mute], OPEN_PALM [unmute], GUN_RIGHT [next], GUN_LEFT [prev])")
         table.add_row("/media <ACTION>", "Emulate media action (play, pause, next_track, previous_track)")
         table.add_row("/vol <0-100>", "Set master cluster audio volume")
         table.add_row("/zen", "Toggle ambient minimal clock (Zen Mode)")
@@ -1451,10 +1815,13 @@ def main():
     def signal_handler(sig, frame):
         if active_hud:
             try:
-                active_hud.stop_gestures()
-                active_hud.stop_wakeword()
+                active_hud.stop()
             except Exception:
                 pass
+        try:
+            _restore_all_ducked_audio()
+        except Exception:
+            pass
         if not args.client_only:
             supervisor.stop_all()
         os._exit(0)
@@ -1480,8 +1847,9 @@ def main():
                 connected = await peripheral_hud.connect()
                 if connected:
                     peripheral_hud._loop = asyncio.get_running_loop()
-                    peripheral_hud._bg_tasks.append(asyncio.create_task(peripheral_hud._receive_loop()))
-                    peripheral_hud._bg_tasks.append(asyncio.create_task(peripheral_hud._heartbeat_loop()))
+                    peripheral_hud._receive_task = asyncio.create_task(peripheral_hud._receive_loop())
+                    peripheral_hud._heartbeat_task = asyncio.create_task(peripheral_hud._heartbeat_loop())
+                    peripheral_hud._bg_tasks.extend([peripheral_hud._receive_task, peripheral_hud._heartbeat_task])
                     if args.with_gestures:
                         peripheral_hud.start_gestures()
                     if args.with_wakeword:
@@ -1551,6 +1919,12 @@ def main():
     try:
         asyncio.run(_run())
     except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        try:
+            _restore_all_ducked_audio()
+        except Exception:
+            pass
         if not args.client_only:
             supervisor.stop_all()
     sys.exit(0)

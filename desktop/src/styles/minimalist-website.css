@@ -1,0 +1,806 @@
+/* ==========================================================================
+   VESPER EDITORIAL MINIMALIST WEBSITE & BRANDKIT DESIGN SYSTEM
+   Protocols: minimalist-ui & brandkit
+   Palette: Warm Bone/Off-White, Pure White, Ultra-light Grey, Off-black, Muted Pastels
+   Typography: Newsreader (Editorial Serif), Geist (Body & UI), Geist Mono (Technical)
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&display=swap');
+
+:root {
+  --canvas-bg: #F7F6F3;
+  --surface-bg: #FFFFFF;
+  --surface-alt: #FBFBFA;
+  --surface-inset: #F2F1ED;
+
+  --border-light: #EAEAEA;
+  --border-subtle: #E2E1DC;
+  --border-strong: #D1D0CA;
+
+  --text-dark: #111111;
+  --text-body: #2F3437;
+  --text-muted: #787774;
+  --text-ghost: #A5A4A0;
+
+  /* Muted Desaturated Spot Pastels */
+  --pastel-blue-bg: #E1F3FE;
+  --pastel-blue-text: #1F6C9F;
+  --pastel-green-bg: #EDF3EC;
+  --pastel-green-text: #346538;
+  --pastel-amber-bg: #FBF3DB;
+  --pastel-amber-text: #956400;
+  --pastel-rose-bg: #FDEBEC;
+  --pastel-rose-text: #9F2F2D;
+
+  --font-serif: 'Newsreader', Georgia, Cambria, serif;
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  --timing-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.vesper-website-root {
+  width: 100%;
+  min-height: 100vh;
+  background-color: var(--canvas-bg);
+  color: var(--text-body);
+  font-family: var(--font-sans);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  position: relative;
+}
+
+/* Subtle warm ambient grain texture */
+.vesper-website-root::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle at 50% 10%, rgba(240, 235, 225, 0.45), transparent 70%);
+  z-index: 0;
+}
+
+.website-content-container {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 1140px;
+  margin: 0 auto;
+  padding: 0 32px;
+}
+
+/* ==========================================================================
+   PHYSICAL KEYBOARD SHORTCUT MICRO-UI (<kbd>)
+   ========================================================================== */
+
+kbd.physical-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: var(--radius-xs);
+  background-color: #FFFFFF;
+  border: 1px solid var(--border-light);
+  border-bottom: 2px solid var(--border-subtle);
+  color: var(--text-dark);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+/* ==========================================================================
+   MUTED PASTEL TAGS & BADGES
+   ========================================================================== */
+
+.pill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  line-height: 1;
+}
+
+.pill-tag.blue {
+  background-color: var(--pastel-blue-bg);
+  color: var(--pastel-blue-text);
+}
+
+.pill-tag.green {
+  background-color: var(--pastel-green-bg);
+  color: var(--pastel-green-text);
+}
+
+.pill-tag.amber {
+  background-color: var(--pastel-amber-bg);
+  color: var(--pastel-amber-text);
+}
+
+.pill-tag.rose {
+  background-color: var(--pastel-rose-bg);
+  color: var(--pastel-rose-text);
+}
+
+/* ==========================================================================
+   NAVIGATION BAR
+   ========================================================================== */
+
+.website-navbar {
+  position: sticky;
+  top: 0;
+  width: 100%;
+  background-color: rgba(247, 246, 243, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border-light);
+  z-index: 100;
+  transition: all 0.2s ease;
+}
+
+.navbar-inner {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 1140px;
+  margin: 0 auto;
+  padding: 0 32px;
+}
+
+.navbar-brand-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.brand-monogram-box {
+  width: 28px;
+  height: 28px;
+  background-color: var(--text-dark);
+  color: #FFFFFF;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.05em;
+}
+
+.brand-title-text {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  color: var(--text-dark);
+}
+
+.navbar-links {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+
+.nav-link-item {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.nav-link-item:hover {
+  color: var(--text-dark);
+}
+
+.navbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.launch-deck-btn {
+  background-color: var(--text-dark);
+  color: #FFFFFF;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.launch-deck-btn:hover {
+  background-color: #2D2D2D;
+}
+
+.launch-deck-btn:active {
+  transform: scale(0.98);
+}
+
+/* ==========================================================================
+   HERO SECTION
+   ========================================================================== */
+
+.website-hero-section {
+  padding-top: 80px;
+  padding-bottom: 72px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.hero-tag-row {
+  margin-bottom: 24px;
+}
+
+.hero-editorial-heading {
+  font-family: var(--font-serif);
+  font-size: 56px;
+  line-height: 1.12;
+  font-weight: 400;
+  letter-spacing: -0.035em;
+  color: var(--text-dark);
+  max-width: 840px;
+  margin-bottom: 20px;
+}
+
+.hero-editorial-subtext {
+  font-size: 18px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  max-width: 660px;
+  margin-bottom: 36px;
+}
+
+.hero-action-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-bottom: 60px;
+}
+
+.hero-primary-btn {
+  background-color: var(--text-dark);
+  color: #FFFFFF;
+  border: 1px solid var(--text-dark);
+  border-radius: var(--radius-sm);
+  padding: 12px 22px;
+  font-size: 14px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.hero-primary-btn:hover {
+  background-color: #2D2D2D;
+  border-color: #2D2D2D;
+}
+
+.hero-primary-btn:active {
+  transform: scale(0.98);
+}
+
+.hero-secondary-btn {
+  background-color: transparent;
+  color: var(--text-dark);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 12px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.hero-secondary-btn:hover {
+  background-color: var(--surface-bg);
+  border-color: var(--border-strong);
+}
+
+/* ==========================================================================
+   FAUX-OS WINDOW CHROME PREVIEW (minimalist-ui Protocol)
+   ========================================================================== */
+
+.faux-os-window-shell {
+  width: 100%;
+  max-width: 960px;
+  background-color: #050507;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.08);
+  text-align: left;
+}
+
+.faux-os-top-bar {
+  height: 36px;
+  background-color: #0E0F14;
+  border-bottom: 1px solid #1E202A;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.window-controls-dots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.window-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #2A2B37;
+}
+
+.window-title-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #8C8E9C;
+  letter-spacing: 0.03em;
+}
+
+.window-status-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: #FFFFFF;
+  background-color: #191B24;
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid #282A38;
+}
+
+.faux-os-window-body {
+  padding: 28px 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: radial-gradient(circle at 50% 40%, #0E0F16 0%, #050507 80%);
+}
+
+.preview-avatar-host {
+  margin-bottom: 12px;
+}
+
+.preview-headline {
+  font-family: var(--font-sans);
+  font-size: 20px;
+  font-weight: 500;
+  color: #FFFFFF;
+  margin-bottom: 14px;
+  text-align: center;
+}
+
+.preview-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.preview-chip {
+  background-color: #151620;
+  border: 1px solid #252736;
+  color: #B0B2C0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 5px 12px;
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.preview-chip:hover {
+  background-color: #222434;
+  color: #FFFFFF;
+}
+
+/* ==========================================================================
+   BRANDKIT IDENTITY BOARD (brandkit Protocol)
+   ========================================================================== */
+
+.brandkit-section {
+  padding: 80px 0;
+  border-top: 1px solid var(--border-light);
+}
+
+.section-label-header {
+  margin-bottom: 40px;
+}
+
+.section-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  display: block;
+}
+
+.section-editorial-title {
+  font-family: var(--font-serif);
+  font-size: 38px;
+  font-weight: 400;
+  letter-spacing: -0.025em;
+  color: var(--text-dark);
+}
+
+.brandkit-grid-3col {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+
+.brandkit-card {
+  background-color: var(--surface-bg);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 32px 28px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 280px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.brandkit-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.03);
+}
+
+.brandkit-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.brandkit-num {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-ghost);
+  font-weight: 600;
+}
+
+.brandkit-visual-glyph {
+  width: 48px;
+  height: 48px;
+  background-color: var(--surface-alt);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dark);
+}
+
+.brandkit-title {
+  font-family: var(--font-sans);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-dark);
+  margin-bottom: 8px;
+}
+
+.brandkit-desc {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+/* ==========================================================================
+   BENTO FEATURE GRID (minimalist-ui Protocol)
+   ========================================================================== */
+
+.bento-section {
+  padding: 80px 0;
+  border-top: 1px solid var(--border-light);
+}
+
+.bento-grid-container {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 20px;
+}
+
+.bento-card {
+  background-color: var(--surface-bg);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 36px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.bento-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
+}
+
+.bento-card.col-8 {
+  grid-column: span 8;
+}
+
+.bento-card.col-4 {
+  grid-column: span 4;
+}
+
+.bento-card.col-6 {
+  grid-column: span 6;
+}
+
+.bento-card.col-12 {
+  grid-column: span 12;
+}
+
+.bento-header {
+  margin-bottom: 20px;
+}
+
+.bento-title {
+  font-family: var(--font-sans);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-dark);
+  margin-top: 10px;
+  margin-bottom: 8px;
+}
+
+.bento-summary {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+/* Specialist Pills inside Swarm Bento */
+.swarm-specialists-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.specialist-mini-box {
+  background-color: var(--surface-alt);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-xs);
+  padding: 10px 12px;
+}
+
+.specialist-mini-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dark);
+  display: block;
+}
+
+.specialist-mini-role {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Gesture Landmarks Mini Graphic */
+.gesture-diagram-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: var(--surface-alt);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-xs);
+  padding: 14px;
+  margin-top: 20px;
+}
+
+.gesture-point-metric {
+  display: flex;
+  flex-direction: column;
+}
+
+.point-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.point-value {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-dark);
+}
+
+/* ==========================================================================
+   TECHNICAL SPECIFICATIONS TABLE (Document Style)
+   ========================================================================== */
+
+.specs-section {
+  padding: 80px 0;
+  border-top: 1px solid var(--border-light);
+}
+
+.specs-document-card {
+  background-color: var(--surface-bg);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.specs-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.specs-table th {
+  background-color: var(--surface-alt);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.specs-table td {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 13px;
+  color: var(--text-body);
+}
+
+.specs-table tr:last-child td {
+  border-bottom: none;
+}
+
+.spec-category {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--text-dark);
+}
+
+.spec-benchmark {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dark);
+}
+
+/* ==========================================================================
+   ACCORDIONS (FAQ)
+   ========================================================================== */
+
+.faq-section {
+  padding: 80px 0;
+  border-top: 1px solid var(--border-light);
+}
+
+.faq-list {
+  display: flex;
+  flex-direction: column;
+  margin-top: 36px;
+}
+
+.faq-item {
+  border-bottom: 1px solid var(--border-light);
+}
+
+.faq-trigger {
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 24px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--text-dark);
+  transition: color 0.15s ease;
+}
+
+.faq-trigger:hover {
+  color: var(--text-body);
+}
+
+.faq-icon-glyph {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 400;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.faq-answer {
+  padding-bottom: 24px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  max-width: 720px;
+}
+
+/* ==========================================================================
+   FOOTER
+   ========================================================================== */
+
+.website-footer {
+  border-top: 1px solid var(--border-light);
+  padding: 60px 0 40px 0;
+  margin-top: 40px;
+  background-color: var(--canvas-bg);
+}
+
+.footer-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 40px;
+}
+
+.footer-bottom-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--border-light);
+  padding-top: 24px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Responsive adjustments */
+@media (max-width: 900px) {
+  .hero-editorial-heading {
+    font-size: 38px;
+  }
+  .brandkit-grid-3col {
+    grid-template-columns: 1fr;
+  }
+  .bento-card.col-8,
+  .bento-card.col-4,
+  .bento-card.col-6 {
+    grid-column: span 12;
+  }
+  .swarm-specialists-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}

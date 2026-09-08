@@ -240,7 +240,15 @@ async def test_gesture_worker_inference_and_dispatch():
     assert s.master_volume == 75
     assert s.current_media["is_playing"] is True
 
-    # 5. Verify PEACE_SIGN Zen mode toggle
+    # 5. Verify THREE_FINGERS Media Play/Pause toggle
+    initial_playing = s.current_media["is_playing"]
+    initial_vol = s.master_volume
+    await worker._dispatch_gesture("THREE_FINGERS", 0.92)
+    s = sync_manager.get_snapshot()
+    assert s.current_media["is_playing"] == (not initial_playing)
+    assert s.master_volume == initial_vol  # Volume untouched
+
+    # 5b. Verify PEACE_SIGN Zen mode toggle
     initial_zen = s.zen_mode
     await worker._dispatch_gesture("PEACE_SIGN", 0.92)
     s = sync_manager.get_snapshot()
@@ -337,6 +345,58 @@ async def test_gesture_worker_finger_gun_detection():
     point_up_lms[8] = MockPt(0.50, 0.35)  # Index points vertically up
     res_up, _ = GestureWorker._detect_finger_gun(point_up_lms)
     assert res_up == "NONE"
+
+
+@pytest.mark.asyncio
+async def test_gesture_worker_three_fingers_detection():
+    """Verifies that THREE_FINGERS is detected when index, middle, ring are extended and pinky is folded."""
+    class MockPt:
+        def __init__(self, x: float, y: float, z: float = 0.0):
+            self.x = x
+            self.y = y
+            self.z = z
+
+    def make_three_fingers_landmarks(pinky_folded: bool = True, ring_extended: bool = True) -> list:
+        lms = [MockPt(0.5, 0.8) for _ in range(21)]
+        lms[0] = MockPt(0.5, 0.8)       # Wrist
+        lms[5] = MockPt(0.46, 0.65)     # Index MCP
+        lms[6] = MockPt(0.46, 0.58)     # Index PIP
+        lms[8] = MockPt(0.46, 0.40)     # Index TIP (extended)
+
+        lms[9] = MockPt(0.50, 0.65)     # Middle MCP
+        lms[10] = MockPt(0.50, 0.56)    # Middle PIP
+        lms[12] = MockPt(0.50, 0.38)    # Middle TIP (extended)
+
+        lms[13] = MockPt(0.54, 0.66)    # Ring MCP
+        lms[14] = MockPt(0.54, 0.59)    # Ring PIP
+        if ring_extended:
+            lms[16] = MockPt(0.54, 0.42)  # Ring TIP (extended)
+        else:
+            lms[16] = MockPt(0.54, 0.72)  # Ring TIP (folded)
+
+        lms[17] = MockPt(0.58, 0.68)    # Pinky MCP
+        lms[18] = MockPt(0.58, 0.63)    # Pinky PIP
+        if pinky_folded:
+            lms[20] = MockPt(0.58, 0.74)  # Pinky TIP (folded towards wrist)
+        else:
+            lms[20] = MockPt(0.58, 0.45)  # Pinky TIP (extended)
+        return lms
+
+    # 1. Standard Three Fingers -> THREE_FINGERS
+    three_lms = make_three_fingers_landmarks(pinky_folded=True, ring_extended=True)
+    res, conf = GestureWorker._detect_three_fingers(three_lms)
+    assert res == "THREE_FINGERS"
+    assert conf >= 0.85
+
+    # 2. Pinky extended (Open Palm pose) -> NONE
+    palm_lms = make_three_fingers_landmarks(pinky_folded=False, ring_extended=True)
+    res_palm, _ = GestureWorker._detect_three_fingers(palm_lms)
+    assert res_palm == "NONE"
+
+    # 3. Ring folded (Peace Sign pose) -> NONE
+    peace_lms = make_three_fingers_landmarks(pinky_folded=True, ring_extended=False)
+    res_peace, _ = GestureWorker._detect_three_fingers(peace_lms)
+    assert res_peace == "NONE"
 
 
 @pytest.mark.asyncio

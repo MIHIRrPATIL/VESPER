@@ -12,6 +12,8 @@ from backend.agent.specialists.system_specialist import SystemSpecialist
 from backend.agent.specialists.task_specialist import TaskSpecialist
 from backend.agent.specialists.task_triage import AsyncTaskTriageWorker
 from backend.agent.specialists.vision_specialist import VisionSpecialist
+from backend.agent.specialists.weather_specialist import WeatherSpecialist
+from backend.agent.specialists.conversation_specialist import ConversationSpecialist
 
 __all__ = [
     "BaseSpecialist",
@@ -27,5 +29,8 @@ __all__ = [
     "GitHubSpecialist",
     "EmailSpecialist",
     "AsyncTaskTriageWorker",
+    "WeatherSpecialist",
+    "ConversationSpecialist",
 ]
+
 
