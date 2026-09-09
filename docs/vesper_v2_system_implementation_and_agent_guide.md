@@ -189,9 +189,9 @@ For proactive tasks (battery replenishment reminders, calendar scheduling):
 ## 6. Running and Validating the System
 
 ### Primary Startup Command
-To launch all services, peripheral sentries, touchless gesture tracking, and wake-word listening:
+To launch all services, peripheral sentries, touchless gesture tracking, wake-word listening, and presence-locking display sentry:
 ```bash
-.venv/bin/python scripts/run_vesper_services.py --with-gestures --with-wakeword
+.venv/bin/python scripts/run_vesper_services.py --with-gestures --with-wakeword --with-sentry
 ```
 
 ### Targeted Test Suite Verification
@@ -204,6 +204,9 @@ To launch all services, peripheral sentries, touchless gesture tracking, and wak
 
 # Verify Mobile Companion Contract
 .venv/bin/pytest backend/tests/test_mobile_companion.py
+
+# Verify Display Sentry, Presence Lock, and Caelestia Shell Recovery
+.venv/bin/pytest backend/tests/test_display_sentry.py
 
 # Verify Planner Conversational State & Email Refinement
 .venv/bin/pytest backend/tests/test_agent.py -k "email_draft"

@@ -140,7 +140,7 @@ cython_debug/
 .agents/
 .planning/
 .claude/
-agent/
+/agent/
 skills-lock.json
 
 

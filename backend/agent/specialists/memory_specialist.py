@@ -9,7 +9,9 @@ Features:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 import re
@@ -35,6 +37,10 @@ class MemorySpecialist(BaseSpecialist):
         self.llm = llm or LLMClient()
         # Tier 1 Working Memory: session conversation buffer
         self._working_buffer: List[Dict[str, str]] = []
+        # Cache for fast-path profile dossier lookups
+        self._profile_cache: Optional[SpecialistResult] = None
+        self._profile_cache_time: float = 0.0
+        self._user_name: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -139,7 +145,8 @@ class MemorySpecialist(BaseSpecialist):
     async def store_memory(
         self, statement: str, category: Optional[str] = None
     ) -> SpecialistResult:
-        """Stores a fact with conflict detection, deduplication, and superseding."""
+        """Stores a fact with conflict detection, deduplication, and superseding without blocking event loop."""
+        self._profile_cache = None  # Invalidate cache on write
         distilled = await self._distill_fact(statement)
         canonical = distilled["canonical_fact"]
         cat = category or distilled["category"]
@@ -149,20 +156,22 @@ class MemorySpecialist(BaseSpecialist):
         candidate_ids: set[str] = set()
         candidates = []
 
-        # Always inspect most recent active memories first
-        for cand in self.repo.list_memories(limit=25):
+        # Always inspect most recent active memories first (in thread)
+        recent_mems = await asyncio.to_thread(self.repo.list_memories, limit=25)
+        for cand in recent_mems:
             if cand.id not in candidate_ids:
                 candidate_ids.add(cand.id)
                 candidates.append(cand)
 
-        raw_words = [w.strip(".,!?:;\"'") for w in statement.split() if len(w.strip(".,!?:;\"'")) > 2]
-        canonical_words = [w.strip(".,!?:;\"'") for w in canonical.split() if len(w.strip(".,!?:;\"'")) > 2]
-        search_terms = list(dict.fromkeys(list(keywords) + canonical_words + raw_words))
-        for term in search_terms:
-            for cand in self.repo.search_by_text(term, limit=10):
-                if cand.id not in candidate_ids:
-                    candidate_ids.add(cand.id)
-                    candidates.append(cand)
+        # Search at most top 2 keywords in thread
+        for term in keywords[:2]:
+            clean_term = term.strip(".,!?:;\"'")
+            if len(clean_term) > 2:
+                term_matches = await asyncio.to_thread(self.repo.search_by_text, clean_term, limit=5)
+                for cand in term_matches:
+                    if cand.id not in candidate_ids:
+                        candidate_ids.add(cand.id)
+                        candidates.append(cand)
 
         def _norm(s: str) -> str:
             cleaned = re.sub(r"[^\w\s]", "", s.lower()).strip()
@@ -170,8 +179,8 @@ class MemorySpecialist(BaseSpecialist):
 
         # 2. Check for exact duplicate or superseding
         superseded_id: Optional[str] = None
+        potential_conflicts = []
         for cand in candidates:
-            # Check if active
             meta = cand.metadata if isinstance(cand.metadata, dict) else {}
             if meta.get("active") is False:
                 continue
@@ -193,7 +202,7 @@ class MemorySpecialist(BaseSpecialist):
 
             # Exact or near-exact duplicate: merge by incrementing access count
             if is_lexical_dup:
-                self.repo.record_access(cand.id)
+                await asyncio.to_thread(self.repo.record_access, cand.id)
                 return SpecialistResult(
                     success=True,
                     action="store_memory",
@@ -202,7 +211,13 @@ class MemorySpecialist(BaseSpecialist):
                     card_payload={"type": "memory_card", "action": "merged", "statement": canonical},
                 )
 
-            # Check for conflict / contradictory update using LLM
+            # Check overlap for conflict candidates
+            if cand_words and canon_words and (len(cand_words & canon_words) >= 2 or cand.category == cat):
+                potential_conflicts.append(cand)
+
+        # Check for conflict using at most ONE LLM call on top conflict candidate
+        if potential_conflicts:
+            top_cand = potential_conflicts[0]
             eval_messages = [
                 {
                     "role": "system",
@@ -211,35 +226,38 @@ class MemorySpecialist(BaseSpecialist):
                         '{"contradicts": true | false, "explanation": "brief rationale"}'
                     ),
                 },
-                {"role": "user", "content": f"Existing Fact: \"{cand.statement}\"\nNew Fact: \"{canonical}\""},
+                {"role": "user", "content": f"Existing Fact: \"{top_cand.statement}\"\nNew Fact: \"{canonical}\""},
             ]
             try:
-                eval_data, _ = await self.llm.generate_json(eval_messages, temperature=0.0)
+                eval_data, _ = await asyncio.wait_for(
+                    self.llm.generate_json(eval_messages, temperature=0.0),
+                    timeout=2.0,
+                )
                 if eval_data.get("contradicts"):
-                    superseded_id = cand.id
-                    break
+                    superseded_id = top_cand.id
             except Exception:
                 pass
 
-        # 3. Store new canonical memory
+        # 3. Store new canonical memory in thread
         meta_payload = {
             "active": True,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "superseded_old_id": superseded_id,
         }
 
-        created = self.repo.store_fact(
+        created = await asyncio.to_thread(
+            self.repo.store_fact,
             MemoryCreate(
                 statement=canonical,
                 category=cat,
                 confidence=1.0,
                 metadata=meta_payload,
-            )
+            ),
         )
 
-        # 4. If old memory was superseded, mark it inactive
+        # 4. If old memory was superseded, mark it inactive in thread
         if superseded_id:
-            self.repo.supersede(superseded_id, created.id)
+            await asyncio.to_thread(self.repo.supersede, superseded_id, created.id)
             speech = f"I have updated my records to reflect that {canonical}, superseding the previous entry, sir."
         else:
             speech = f"I have committed that to memory: {canonical}, sir."
@@ -278,13 +296,13 @@ class MemorySpecialist(BaseSpecialist):
         return (lex_score * 0.5) + (recency_score * 0.3) + (freq_score * 0.2)
 
     async def recall_memory(self, query: str, category: Optional[str] = None) -> SpecialistResult:
-        """Searches active memories, scores them, and synthesizes an articulate butler answer."""
+        """Searches active memories, scores them, and synthesizes an articulate butler answer without blocking."""
         query_words = [w for w in re.findall(r"\w+", query) if len(w) > 2]
         all_candidates: List[ShodhMemoryModel] = []
 
-        # Gather candidates by searching individual key terms
-        for kw in query_words[:3]:
-            res = self.repo.search_by_text(kw, limit=5)
+        # Gather candidates by searching top 2 key terms in thread
+        for kw in query_words[:2]:
+            res = await asyncio.to_thread(self.repo.search_by_text, kw, limit=5)
             all_candidates.extend(res)
 
         # Deduplicate candidates by ID and filter only active
@@ -300,7 +318,7 @@ class MemorySpecialist(BaseSpecialist):
         if not active_candidates:
             # Fallback search by category if provided
             if category:
-                active_candidates = self.repo.list_memories(category=category, limit=5)
+                active_candidates = await asyncio.to_thread(self.repo.list_memories, category=category, limit=5)
 
         if not active_candidates:
             return SpecialistResult(
@@ -314,9 +332,9 @@ class MemorySpecialist(BaseSpecialist):
         # Score and rank candidates
         ranked = sorted(active_candidates, key=lambda m: self._score_memory(m, query_words), reverse=True)[:4]
 
-        # Record access on top recalled memories
+        # Record access in thread
         for r in ranked:
-            self.repo.record_access(r.id)
+            asyncio.create_task(asyncio.to_thread(self.repo.record_access, r.id))
 
         facts_text = "\n".join([f"- {m.statement} (Category: {m.category})" for m in ranked])
 
@@ -331,7 +349,13 @@ class MemorySpecialist(BaseSpecialist):
             },
             {"role": "user", "content": f"User Query: {query}\n\nRecalled Memories:\n{facts_text}"},
         ]
-        synthesis, _ = await self.llm.generate_chat(messages, temperature=0.2, max_tokens=150)
+        try:
+            synthesis, _ = await asyncio.wait_for(
+                self.llm.generate_chat(messages, temperature=0.2, max_tokens=150),
+                timeout=3.0,
+            )
+        except Exception:
+            synthesis = ""
         synthesis = synthesis.strip() or f"According to my records, {ranked[0].statement}, sir."
 
         return SpecialistResult(
@@ -354,17 +378,24 @@ class MemorySpecialist(BaseSpecialist):
     # ── User Profile Dossier ─────────────────────────────────────────────────
 
     async def get_user_profile(self) -> SpecialistResult:
-        """Generates a complete 360-degree organized profile of the user."""
-        all_mem = self.repo.list_memories(limit=100)
+        """Generates a complete 360-degree organized profile of the user with in-memory caching."""
+        now_ts = time.time()
+        if self._profile_cache and (now_ts - self._profile_cache_time) < 60.0:
+            return self._profile_cache
+
+        all_mem = await asyncio.to_thread(self.repo.list_memories, limit=100)
         active_mem = [m for m in all_mem if not (isinstance(m.metadata, dict) and m.metadata.get("active") is False)]
 
         if not active_mem:
-            return SpecialistResult(
+            res = SpecialistResult(
                 success=True,
                 action="get_user_profile",
                 speech_summary="I have not yet recorded any personal facts or preferences about you, sir.",
                 card_payload={"type": "user_profile_card", "profile": {}},
             )
+            self._profile_cache = res
+            self._profile_cache_time = now_ts
+            return res
 
         grouped: Dict[str, List[str]] = {}
         for m in active_mem:
@@ -377,13 +408,16 @@ class MemorySpecialist(BaseSpecialist):
 
         speech = "Here is what I have committed to memory regarding your preferences and profile, sir: " + " | ".join(dossier_lines) + "."
 
-        return SpecialistResult(
+        res = SpecialistResult(
             success=True,
             action="get_user_profile",
             data={"profile": grouped, "total_memories": len(active_mem)},
             speech_summary=speech,
             card_payload={"type": "user_profile_card", "profile": grouped, "total": len(active_mem)},
         )
+        self._profile_cache = res
+        self._profile_cache_time = now_ts
+        return res
 
     # ── Forget Outdated Facts ────────────────────────────────────────────────
 

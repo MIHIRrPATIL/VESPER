@@ -250,7 +250,7 @@ async def test_task_specialist_list_mobile_notifications(notif_service: Notifica
         source_device_name="Pixel 8",
     )
 
-    specialist = TaskSpecialist()
+    specialist = TaskSpecialist(notif_service=notif_service)
     res = await specialist.execute("list_mobile_notifications", {})
 
     assert res.success is True

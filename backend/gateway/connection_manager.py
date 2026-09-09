@@ -45,6 +45,7 @@ class ClientSession:
     last_heartbeat: float = field(default_factory=time.time)
     authenticated: bool = False
     pending_ping: bool = False
+    _send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class ConnectionManager:
@@ -112,7 +113,8 @@ class ConnectionManager:
 
         try:
             raw_text = envelope.model_dump_json()
-            await session.websocket.send_text(raw_text)
+            async with session._send_lock:
+                await session.websocket.send_text(raw_text)
             return True
         except (WebSocketDisconnect, RuntimeError, Exception) as err:
             logger.warning(f"[GATEWAY] Failed to send envelope to '{session_id}': {err}")
@@ -134,11 +136,11 @@ class ConnectionManager:
             return 0
 
         raw_text = envelope.model_dump_json()
-        deliveries = []
 
         async def _safe_send(sess: ClientSession):
             try:
-                await sess.websocket.send_text(raw_text)
+                async with sess._send_lock:
+                    await sess.websocket.send_text(raw_text)
                 return True
             except Exception as err:
                 logger.warning(f"[GATEWAY] Broadcast failed for '{sess.session_id}': {err}")
@@ -176,9 +178,9 @@ class ConnectionManager:
                 stale_sessions: list[str] = []
 
                 for session_id, session in list(self._sessions.items()):
-                    # If a ping was already sent and no pong arrived within timeout
+                    # Evict only if no heartbeat received after interval + generous grace period (30s)
                     time_since_last = now - session.last_heartbeat
-                    if session.pending_ping and (time_since_last > (HEARTBEAT_INTERVAL_SECONDS + HEARTBEAT_TIMEOUT_SECONDS)):
+                    if session.pending_ping and (time_since_last > (HEARTBEAT_INTERVAL_SECONDS + 30.0)):
                         logger.warning(
                             f"[GATEWAY] Evicting dead client '{session.client_id}' "
                             f"(no pong for {time_since_last:.1f}s)"

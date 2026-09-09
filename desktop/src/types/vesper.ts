@@ -20,7 +20,10 @@ export type EventType =
   | 'AGENT_RESPONSE'
   | 'AGENT_SPEAKING'
   | 'AGENT_IDLE'
-  | 'GESTURE_EVENT';
+  | 'GESTURE_EVENT'
+  | 'NOTIFICATION_RELAY'
+  | 'NOTIFICATION_DIGEST'
+  | 'CALL_STATE';
 
 export type AgentState = 'IDLE' | 'LISTENING' | 'THINKING' | 'SPEAKING';
 

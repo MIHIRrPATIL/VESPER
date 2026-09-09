@@ -96,3 +96,75 @@ async def test_hud_heartbeat_ping_pong_keeps_alive():
     finally:
         supervisor.stop_all()
         await asyncio.sleep(1.0)
+
+
+@pytest.mark.asyncio
+async def test_hud_instant_stand_down_on_dismiss_utterance(monkeypatch):
+    """Verifies that saying 'Nothing, Jarvis' triggers instant 0ms stand-down, audio restoration, and no TTS delay."""
+    from unittest.mock import AsyncMock, patch
+    from backend.voice.stt import GroqSpeechToText
+
+    hud = TerminalDesktopHUD()
+    hud.is_running = True
+    hud.websocket = object()
+    hud._voice_duck_state = {"ducked": True}
+    sent_envelopes = []
+
+    async def mock_send_envelope(channel, event_type, payload):
+        sent_envelopes.append((channel, event_type, payload))
+
+    monkeypatch.setattr(hud, "send_envelope", mock_send_envelope)
+    monkeypatch.setattr(GroqSpeechToText, "transcribe_wav", AsyncMock(return_value="Nothing, Jarvis."))
+
+    # Generate mock PCM bytes (16000 samples * 2 bytes = 1s)
+    pcm = b"\x00\x00" * 16000
+    await hud._on_utterance_recorded(pcm)
+
+    # Voice duck state must be cleared immediately
+    assert hud._voice_duck_state is None
+    assert hud._is_handling_voice is False
+    # Envelope sent must be AGENT_IDLE with STAND_DOWN
+    assert len(sent_envelopes) == 1
+    ch, ev, payload = sent_envelopes[0]
+    assert ch == Channel.VOICE
+    assert ev == EventType.AGENT_IDLE
+    assert payload.get("reason") == "STAND_DOWN"
+
+
+@pytest.mark.asyncio
+async def test_hud_instant_gesture_cancel_during_voice_interaction(monkeypatch):
+    """Verifies that THUMB_DOWN during active voice listening cancels interaction immediately and restores audio."""
+    hud = TerminalDesktopHUD()
+    hud.is_running = True
+    hud.websocket = object()
+    hud._voice_duck_state = {"ducked": True}
+    sent_envelopes = []
+
+    async def mock_send_envelope(channel, event_type, payload):
+        sent_envelopes.append((channel, event_type, payload))
+
+    monkeypatch.setattr(hud, "send_envelope", mock_send_envelope)
+
+    # Initialize gestures with callback
+    hud.start_gestures()
+    try:
+        assert hud._gesture_worker is not None
+        callback = hud._gesture_worker.on_gesture_callback
+        assert callback is not None
+
+        # Simulate detecting THUMB_DOWN during active voice interaction
+        await callback("THUMB_DOWN", 0.92)
+
+        # Voice duck state must be restored immediately
+        assert hud._voice_duck_state is None
+        assert hud._is_handling_voice is False
+
+        # Must have sent INTERRUPT to Gateway
+        assert len(sent_envelopes) == 1
+        ch, ev, payload = sent_envelopes[0]
+        assert ch == Channel.SYSTEM
+        assert ev == EventType.INTERRUPT
+        assert payload.get("reason") == "USER_GESTURE_DISMISS"
+    finally:
+        hud.stop_gestures()
+

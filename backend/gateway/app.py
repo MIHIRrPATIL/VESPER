@@ -54,13 +54,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     discovery_beacon.start()
 
     # Start Proactive Agent (battery monitoring + VIP notification triage)
+    from backend.agent.proactive.action_queue import action_queue
+    action_queue.mark_as_server()
+
     from backend.agent.proactive_agent import proactive_agent
     proactive_agent.set_broadcast_callback(connection_manager.broadcast)
+    proactive_agent.set_send_to_session_callback(connection_manager.send_envelope)
     proactive_agent.start()
 
     # Register ProactiveAgent as a SyncManager listener for real-time battery eval
     from backend.sync.sync_manager import sync_manager
     sync_manager.add_listener(proactive_agent.on_state_change)
+
+    # Synchronize initial cluster master volume to match workstation hardware volume
+    try:
+        from backend.vision.gesture_service import _get_system_volume
+        initial_vol = _get_system_volume()
+        sync_manager.state.master_volume = initial_vol
+        logger.info(f"[GATEWAY] Synchronized initial master volume to hardware level: {initial_vol}%")
+    except Exception as vol_err:
+        logger.debug(f"[GATEWAY] Could not read hardware volume on startup: {vol_err}")
 
     logger.info("[GATEWAY] Online and ready for WebSocket / REST connections.")
 
@@ -101,6 +114,12 @@ def create_app() -> FastAPI:
     app.include_router(sync_router)
     app.include_router(camera_router)
     app.include_router(notifications_router)
+
+    @app.get("/briefing")
+    @app.get("/notifications/briefing")
+    async def get_briefing_alias(force_refresh: bool = False):
+        from backend.agent.proactive.briefing_manager import briefing_manager
+        return await briefing_manager.get_briefing(timeout=3.0, force_refresh=force_refresh)
 
     return app
 

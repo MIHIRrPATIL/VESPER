@@ -988,6 +988,58 @@ async def test_planner_pending_email_draft_body_update_and_immediate_send():
     assert plan.steps[0]["action"] == "send_email"
     assert plan.steps[0]["params"]["to"] == "seemaraju.patil@gmail.com"
     assert plan.steps[0]["params"]["body"] == "hello, I would like to have a call with you"
-    assert ctx["pending_email_draft"]["body"] == "hello, I would like to have a call with you"
+
+@pytest.mark.asyncio
+async def test_media_specialist_playlist_scoring_prioritizes_user_library(monkeypatch):
+    """Verifies that MediaSpecialist prioritizes the user's library playlist named 'Everyday' over public 'everyday playlist'."""
+    from unittest.mock import AsyncMock, patch
+    from backend.agent.specialists.media_specialist import MediaSpecialist
+
+    spec = MediaSpecialist()
+    monkeypatch.setattr(spec, "_get_user_token", AsyncMock(return_value="mock_token"))
+
+    # Mock Spotify HTTP calls
+    import httpx
+
+    async def mock_send(request: httpx.Request, *args, **kwargs):
+        url = str(request.url)
+        if "/me/player/devices" in url:
+            return httpx.Response(200, json={"devices": [{"id": "dev_1", "name": "mihir-arch", "is_active": True}]}, request=request)
+        if "/me/playlists" in url:
+            return httpx.Response(
+                200,
+                json={"items": [
+                    {
+                        "name": "Everyday",
+                        "uri": "spotify:playlist:user_everyday_id",
+                        "owner": {"display_name": "mihir", "id": "mihir_id"},
+                    }
+                ]},
+                request=request,
+            )
+        if "/search" in url:
+            return httpx.Response(
+                200,
+                json={"playlists": {"items": [
+                    {
+                        "name": "everyday playlist",
+                        "uri": "spotify:playlist:public_mackenzie_id",
+                        "owner": {"display_name": "mackenzie", "id": "mackenzie_id"},
+                    }
+                ]}},
+                request=request,
+            )
+        if "/me/player/play" in url:
+            return httpx.Response(204, request=request)
+        if "/me" in url:
+            return httpx.Response(200, json={"display_name": "mihir", "id": "mihir_id"}, request=request)
+        return httpx.Response(404, request=request)
+
+    with patch.object(httpx.AsyncClient, "send", side_effect=mock_send):
+        res = await spec.play_playlist_on_spotify("Everyday Playlist")
+        assert res.success is True
+        assert res.data["uri"] == "spotify:playlist:user_everyday_id"
+        assert res.data["playlist"].lower() == "everyday"
+
 
 

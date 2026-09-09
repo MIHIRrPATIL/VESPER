@@ -19,6 +19,12 @@ Designed from first principles for low latency, zero operating cost, touchless m
   - **Hardware & Edge Awareness (`DeviceProbe`)**: Automatically probes host architecture (Desktop, Orange Pi, Raspberry Pi, Jetson). If camera is disconnected or absent on an SBC, provides an articulate butler response instead of crashing.
   - **Decoupled Touchless Gestures (`GestureWorker`)**: Runs at throttled 5–8 FPS (80% CPU savings) with zero-CPU standby on camera-less SBCs (`CLOSED_FIST` $\to$ Mute/Pause, `OPEN_PALM` $\to$ Resume, `PEACE_SIGN` $\to$ Next Track, `POINTING_UP` $\to$ Prev Track, `VOLUME_DIAL` rotary knob, and `ROCK_ON` 1.0s hold to toggle gesture lock with anti-flapping buffer).
 
+- **Display Sentry & Offline Presence Lock (`DisplaySentryService`)**:
+  - **BlazeFace CPU Presence Detection**: High-speed offline face detection (<5ms inference) using Google MediaPipe Tasks (`blaze_face_short_range.tflite`).
+  - **Automated Session Lock & DPMS Sleep**: Locks desktop session (`hyprlock`) and engages DPMS display sleep after 10 consecutive absent frames (~15–20s).
+  - **Intelligent Wake & Caelestia Shell Recovery**: Wakes displays upon return or touchless gestures, audits Wayland layer surfaces (`is_caelestia_shell_healthy`), and restarts Caelestia Quickshell with an active border-exclusion barrier to preserve tiling margins.
+  - **Shared V4L2 Device Pipeline**: Eliminates camera contention on `/dev/video0` by sharing optical frames across gesture tracking and face presence.
+
 - **Cross-Device State Sync & Cluster Allocation (`backend/sync/`)**:
   - Real-time synchronization of master volume, Zen Mode, Focus Mode, active tasks, and currently playing media across Desktop, Orange Pi edge nodes, and mobile companions.
   - Single-pipe multiplexed WebSocket `Channel.SYNC` and full REST endpoint catalog (`/sync/state`, `/sync/devices`).

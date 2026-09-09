@@ -92,6 +92,24 @@ Continuous 60 FPS video tracking can saturate single-board computers. The `Gestu
   - `OPEN_PALM`: Resume playback / Unmute.
   - `VOLUME_DIAL:<level>`: Proportional volume slider.
   - `PEACE_SIGN`: Toggle Zen Mode on desk HUD.
+  - `THUMB_UP` / `THUMB_DOWN`: Instant confirm or reject staged proactive recommendations.
+
+### 2.4 Display Sentry & Presence Session Locking (`backend/vision/display_sentry.py`)
+
+The Display Sentry subsystem monitors desk occupancy, enforces session security via Hyprland, and manages display power cycles without interrupting touchless gesture tracking:
+- **BlazeFace CPU Presence Detection (`BlazeFaceDetector`)**:
+  - Executes offline face detection using Google MediaPipe Tasks API (`blaze_face_short_range.tflite`).
+  - Evaluates webcam frames in <5ms entirely on CPU with confidence threshold >= 0.35.
+  - Shared V4L2 Device Pipeline: Taps into `GestureService` frames directly, eliminating device contention on `/dev/video0`.
+- **Absence Session Locking & DPMS Sleep**:
+  - Tracks consecutive absent frames (default threshold: 10 frames / ~15–20s).
+  - When user absence is confirmed, spawns `hyprlock` and powers off displays via `hyprctl dispatch dpms off` across all active outputs (`eDP-1`, `DP-3`).
+- **Display Wake & Caelestia Shell Recovery**:
+  - Displays are powered back on upon return detection, wake word invocation, or any touchless gesture.
+  - **DRM Settle Barrier**: Waits 0.8s for kernel DRM/KMS handshaking to complete before querying compositor heads.
+  - **Layer Surface Health Audit (`is_caelestia_shell_healthy`)**: Interrogates `hyprctl layers` to verify that `caelestia-drawers`, `caelestia-background`, and `caelestia-border-exclusion` are actively attached to outputs.
+  - **Graceful Quickshell Recovery**: Dispatches `qs -c caelestia kill`, cleans stale runtime sockets in `$XDG_RUNTIME_DIR/quickshell/`, and relaunches `caelestia shell -d`.
+  - **Resizer Synchronization & Tiling Barrier**: Waits for `caelestia-border-exclusion` layer surfaces to appear in Hyprland before restarting `caelestia resizer -d`, preventing window margin corruption and tiling distortion.
 
 ---
 

@@ -11,6 +11,7 @@ import base64
 import json
 import logging
 from pathlib import Path
+import re
 import time
 from typing import Any, Dict, List, Optional
 import httpx
@@ -433,25 +434,38 @@ class MediaSpecialist(BaseSpecialist):
                 # 2. Gather candidates from user library and Spotify search
                 candidates = []
 
-                # A. User library
+                # A. User library (tagged with _from_library = True)
                 try:
                     pl_res = await client.get("https://api.spotify.com/v1/me/playlists?limit=50", headers=headers)
                     if pl_res.status_code == 200:
-                        candidates.extend([p for p in pl_res.json().get("items", []) if p])
+                        for p in pl_res.json().get("items", []):
+                            if p:
+                                p_copy = dict(p)
+                                p_copy["_from_library"] = True
+                                candidates.append(p_copy)
                 except Exception:
                     pass
 
-                # B. Spotify catalog search with limit=20
-                try:
-                    s_res = await client.get(
-                        f"https://api.spotify.com/v1/search?q={playlist_name}&type=playlist&limit=20",
-                        headers=headers,
-                    )
-                    if s_res.status_code == 200:
-                        search_items = [p for p in s_res.json().get("playlists", {}).get("items", []) if p]
-                        candidates.extend(search_items)
-                except Exception:
-                    pass
+                # Clean query by removing entity suffixes/prefixes ("playlist", "the", "my", "on spotify")
+                raw_q = playlist_name.lower().strip().replace('"', "")
+                clean_q = re.sub(r"\b(playlist|the|my|on spotify|spotify)\b", "", raw_q).strip()
+
+                # B. Spotify catalog search with limit=20 using both raw query and clean query
+                search_queries = [playlist_name]
+                if clean_q and clean_q != raw_q:
+                    search_queries.append(clean_q)
+
+                for sq in search_queries:
+                    try:
+                        s_res = await client.get(
+                            f"https://api.spotify.com/v1/search?q={sq}&type=playlist&limit=15",
+                            headers=headers,
+                        )
+                        if s_res.status_code == 200:
+                            search_items = [p for p in s_res.json().get("playlists", {}).get("items", []) if p]
+                            candidates.extend(search_items)
+                    except Exception:
+                        pass
 
                 if not candidates:
                     return SpecialistResult(
@@ -469,12 +483,14 @@ class MediaSpecialist(BaseSpecialist):
                         seen_uris.add(uri)
                         unique_candidates.append(p)
 
-                target_q = playlist_name.lower().strip().replace('"', "")
+                target_q = raw_q
 
                 def score_playlist(p: dict) -> float:
-                    name = str(p.get("name", "")).lower().strip().replace('"', "")
+                    raw_pname = str(p.get("name", "")).lower().strip().replace('"', "")
+                    clean_pname = re.sub(r"\b(playlist|the|my)\b", "", raw_pname).strip()
                     owner_name = str(p.get("owner", {}).get("display_name", "")).lower()
                     owner_id = str(p.get("owner", {}).get("id", "")).lower()
+                    is_in_library = bool(p.get("_from_library", False))
                     is_mine = (
                         (my_name and owner_name == my_name)
                         or (my_id and owner_id == my_id)
@@ -482,27 +498,41 @@ class MediaSpecialist(BaseSpecialist):
                     )
 
                     score = 0.0
-                    # Exact name match
-                    if name == target_q:
-                        score += 1000.0
-                    # Sequence similarity ratio
-                    ratio = difflib.SequenceMatcher(None, target_q, name).ratio()
-                    score += ratio * 300.0
-                    # Substring match with length penalty if vastly longer
-                    if target_q in name:
-                        score += 100.0 * (len(target_q) / max(len(name), 1))
-                    elif name in target_q:
-                        score += 80.0
-                    # Heavily prioritize user's own playlist
+
+                    # 1. Massively prioritize user-created and user-saved library playlists
                     if is_mine:
-                        score += 600.0
+                        score += 10000.0
+                    elif is_in_library:
+                        score += 5000.0
+
+                    # 2. Exact name matches (clean and raw)
+                    if clean_q and clean_pname and clean_pname == clean_q:
+                        score += 3000.0
+                    elif raw_pname == target_q:
+                        score += 2500.0
+
+                    # 3. Sequence similarity ratio (clean and raw)
+                    ratio_clean = difflib.SequenceMatcher(None, clean_q, clean_pname).ratio() if (clean_q and clean_pname) else 0.0
+                    ratio_raw = difflib.SequenceMatcher(None, target_q, raw_pname).ratio()
+                    score += max(ratio_clean, ratio_raw) * 500.0
+
+                    # 4. Substring containment with length factor
+                    if clean_q and clean_q in clean_pname:
+                        score += 400.0 * (len(clean_q) / max(len(clean_pname), 1))
+                    elif clean_pname and clean_pname in clean_q:
+                        score += 300.0
+                    elif target_q in raw_pname:
+                        score += 200.0 * (len(target_q) / max(len(raw_pname), 1))
+                    elif raw_pname in target_q:
+                        score += 150.0
+
                     return score
 
                 ranked = sorted(unique_candidates, key=score_playlist, reverse=True)
                 match = ranked[0]
                 best_score = score_playlist(match)
 
-                # If score is very low, check if this is an artist name
+                # If score is very low and query is not in user library, check if this is an artist name
                 if best_score < 150:
                     return await self.play_radio_on_spotify(playlist_name, device=device)
 

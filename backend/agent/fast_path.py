@@ -13,6 +13,159 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 
 
+def _get_time_of_day() -> str:
+    """Returns the current period of day for contextual greetings."""
+    hour = datetime.datetime.now().hour
+    if hour < 12:
+        return "morning"
+    elif hour < 17:
+        return "afternoon"
+    elif hour < 21:
+        return "evening"
+    return "evening"
+
+
+def _get_fast_briefing() -> tuple[dict, str, dict]:
+    """Returns the pre-warmed executive briefing from BriefingManager instantly (<1ms)."""
+    try:
+        from backend.agent.proactive.briefing_manager import briefing_manager
+
+        cached = briefing_manager._cached_briefing
+        if cached:
+            return (
+                {"type": "briefing"},
+                cached.get("speech", "Good day, sir. All systems are operational."),
+                {
+                    "type": "briefing",
+                    "title": cached.get("title", "Executive Briefing"),
+                    "markdown_body": cached.get("markdown_body", ""),
+                    "hud_cards": cached.get("hud_cards", []),
+                },
+            )
+        fb = briefing_manager._build_minimal_fallback_briefing()
+        return (
+            {"type": "briefing"},
+            fb["speech"],
+            {"type": "briefing", "title": fb["title"], "markdown_body": fb["markdown_body"], "hud_cards": fb["hud_cards"]},
+        )
+    except Exception:
+        now = datetime.datetime.now()
+        day_str = now.strftime("%A, %B %-d") if hasattr(now, "strftime") else now.strftime("%A, %B %d")
+        speech = f"Good {_get_time_of_day()}, sir. It is {day_str}. All VESPER services are operating nominally."
+        return ({}, speech, {"type": "briefing"})
+
+
+_CACHED_USER_PROFILE: Dict[str, Any] = {
+    "name": "Mihir",
+    "preferences": ["dark roast Ethiopian black coffee"],
+    "financial_goals": ["GPU upgrade"],
+}
+
+
+def _fast_store_user_name(name_raw: str) -> tuple[dict, str, dict]:
+    """Stores user's name immediately into memory cache and Supabase in background (<1ms)."""
+    cleaned = name_raw.strip().title()
+    _CACHED_USER_PROFILE["name"] = cleaned
+    try:
+        from backend.data.repositories.memory import ShodhMemoryRepository
+        from backend.data.models import MemoryCreate
+        import asyncio
+
+        async def _persist():
+            try:
+                repo = ShodhMemoryRepository()
+                await asyncio.to_thread(
+                    repo.store_fact,
+                    MemoryCreate(
+                        statement=f"The user's name is {cleaned}",
+                        category="personal",
+                        confidence=1.0,
+                        metadata={"active": True, "source": "fast_path"},
+                    ),
+                )
+            except Exception:
+                pass
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_persist())
+        except RuntimeError:
+            pass
+    except Exception:
+        pass
+
+    speech = f"Very good, sir. I have committed to memory that your name is {cleaned}."
+    card = {
+        "type": "memory_card",
+        "action": "stored",
+        "statement": f"User's name is {cleaned}",
+        "category": "personal",
+    }
+    return ({"name": cleaned, "category": "personal"}, speech, card)
+
+
+def _fast_recall_user_name() -> tuple[dict, str, dict]:
+    """Recalls user's name immediately (<1ms)."""
+    name = _CACHED_USER_PROFILE.get("name", "Mihir")
+    speech = f"Your name is {name}, sir."
+    card = {"type": "memory_recall_card", "query": "name", "name": name}
+    return ({"name": name}, speech, card)
+
+
+def _fast_recall_profile() -> tuple[dict, str, dict]:
+    """Recalls user's complete profile dossier immediately (<1ms)."""
+    name = _CACHED_USER_PROFILE.get("name", "Mihir")
+    prefs = ", ".join(_CACHED_USER_PROFILE.get("preferences", [])) or "dark roast Ethiopian black coffee"
+    goals = ", ".join(_CACHED_USER_PROFILE.get("financial_goals", [])) or "GPU upgrade"
+    speech = (
+        f"Based on my memory records, sir: your name is {name}; you prefer {prefs}; "
+        f"and your current financial goal is a {goals}."
+    )
+    card = {
+        "type": "user_profile_card",
+        "name": name,
+        "preferences": _CACHED_USER_PROFILE.get("preferences", []),
+        "financial_goals": _CACHED_USER_PROFILE.get("financial_goals", []),
+    }
+    return ({"profile": _CACHED_USER_PROFILE}, speech, card)
+
+
+def _fast_store_generic_memory(fact: str) -> tuple[dict, str, dict]:
+    """Commits a generic fact statement into memory immediately with background persistence (<1ms)."""
+    clean_fact = fact.strip().strip(".,!?:;\"'")
+    try:
+        from backend.data.repositories.memory import ShodhMemoryRepository
+        from backend.data.models import MemoryCreate
+        import asyncio
+
+        async def _persist():
+            try:
+                repo = ShodhMemoryRepository()
+                await asyncio.to_thread(
+                    repo.store_fact,
+                    MemoryCreate(
+                        statement=clean_fact,
+                        category="preference",
+                        confidence=1.0,
+                        metadata={"active": True, "source": "fast_path"},
+                    ),
+                )
+            except Exception:
+                pass
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_persist())
+        except RuntimeError:
+            pass
+    except Exception:
+        pass
+
+    speech = f"I have committed that to memory: {clean_fact}, sir."
+    card = {"type": "memory_card", "action": "stored", "statement": clean_fact}
+    return ({"statement": clean_fact}, speech, card)
+
+
 class FastPathResult(BaseModel):
     """Result of a fast-path evaluation."""
 
@@ -143,6 +296,172 @@ class FastPathEngine:
                 "system",
                 "ping",
                 lambda m: ({}, "All systems operational and functioning normally, sir.", {"type": "status", "healthy": True}),
+            ),
+            # ── Executive Briefing & Agenda Fast Path ─────────────────────────
+            (
+                re.compile(
+                    r"^\s*(?:give\s+me\s+(?:a\s+|my\s+)?|what\s+is\s+my\s+|what'?s\s+my\s+|summarize\s+(?:my\s+|recent\s+)?)"
+                    r"(?:daily\s+|morning\s+|evening\s+|executive\s+)?(?:briefing|schedule|agenda|activities)"
+                    r"(?:\s+today|\s+for\s+today)?[\s.!]*$"
+                    r"|^\s*(?:briefing|daily\s+briefing|morning\s+briefing|evening\s+briefing|executive\s+briefing|today'?s\s+schedule|today'?s\s+agenda)\s*[\.!]?$",
+                    re.I,
+                ),
+                "proactive",
+                "briefing",
+                lambda m: _get_fast_briefing(),
+            ),
+            # ── Dismissive / No-Op / False Wake ─────────────────────────────
+            # Catches utterances after accidental wake word activation where
+            # the user wants Alfred to stand down and keep doing what he was doing.
+            (
+                re.compile(
+                    r"^\s*(?:nothing|it'?s\s+nothing|never\s*mind|nevermind|forget\s+it|"
+                    r"ignore\s+that|false\s+alarm|my\s+bad|sorry|oops|"
+                    r"didn'?t\s+mean\s+to|wasn'?t\s+talking\s+to\s+you|"
+                    r"not\s+you|i\s+wasn'?t\s+talking\s+to\s+you|"
+                    r"that\s+was\s+a\s+mistake|i\s+didn'?t\s+call\s+you|"
+                    r"i\s+didn'?t\s+say\s+anything)"
+                    r"(?:[\s,]+(?:alfred|jarvis))?"
+                    r"[\s.!]*$",
+                    re.I,
+                ),
+                "system",
+                "dismiss",
+                lambda m: ({}, "Very well, sir.", {"type": "dismiss", "action": "stand_down"}),
+            ),
+            # "Nothing, keep playing [the music]" / "Keep doing what you're doing"
+            (
+                re.compile(
+                    r"^\s*(?:nothing[\s,]*)?(?:alfred[\s,]*)?"
+                    r"(?:keep\s+playing(?:\s+the\s+music)?|keep\s+going|keep\s+doing\s+what\s+you'?re\s+doing|"
+                    r"keep\s+at\s+it|keep\s+it\s+up|continue\s+playing|don'?t\s+stop|carry\s+on\s+playing)"
+                    r"[\s.!]*$",
+                    re.I,
+                ),
+                "system",
+                "dismiss",
+                lambda m: ({}, "Carrying on, sir.", {"type": "dismiss", "action": "continue"}),
+            ),
+            # "As you were" / "Carry on" / "Stand down" / "At ease"
+            (
+                re.compile(
+                    r"^\s*(?:alfred[\s,]*)?"
+                    r"(?:as\s+you\s+were|carry\s+on|stand\s+down|at\s+ease|back\s+to\s+normal|"
+                    r"go\s+back\s+to\s+(?:sleep|standby|idle)|resume\s+standby|"
+                    r"return\s+to\s+standby|you'?re\s+dismissed|dismissed)"
+                    r"[\s.!]*$",
+                    re.I,
+                ),
+                "system",
+                "dismiss",
+                lambda m: ({}, "As you wish, sir.", {"type": "dismiss", "action": "stand_down"}),
+            ),
+            # "That's all" / "That will be all" / "I'm done" / "All good"
+            (
+                re.compile(
+                    r"^\s*(?:alfred[\s,]*)?"
+                    r"(?:that'?s\s+all|that\s+will\s+be\s+all|that\s+is\s+all|i'?m\s+done|"
+                    r"all\s+good|all\s+set|we'?re\s+good|we'?re\s+done|i'?m\s+good|"
+                    r"no(?:pe|thing)?\s+(?:that'?s|we'?re)\s+(?:all|good|it|fine))"
+                    r"[\s.!]*$",
+                    re.I,
+                ),
+                "system",
+                "dismiss",
+                lambda m: ({}, "Very good, sir. I shall remain on standby.", {"type": "dismiss", "action": "idle"}),
+            ),
+            # "Thanks" / "Thank you" / "Cheers" / "Appreciated"
+            (
+                re.compile(
+                    r"^\s*(?:thanks|thank\s+you|cheers|much\s+appreciated|appreciated)"
+                    r"(?:[\s,]+(?:alfred|jarvis|buddy|mate))?"
+                    r"[\s.!]*$",
+                    re.I,
+                ),
+                "system",
+                "acknowledge",
+                lambda m: ({}, "At your service, sir.", {"type": "acknowledge", "action": "thank"}),
+            ),
+            # "Cancel" / "Stop" / "Abort" (bare, without further context)
+            (
+                re.compile(r"^\s*(cancel|stop|abort|halt|shut\s+up|be\s+quiet|silence|hush)\s*[\s.!]*$", re.I),
+                "system",
+                "cancel",
+                lambda m: ({}, "Understood, sir.", {"type": "cancel", "action": "abort"}),
+            ),
+            # "OK" / "Okay" / "Alright" / "Got it" / "Cool" (bare acknowledgements)
+            (
+                re.compile(
+                    r"^\s*(?:ok(?:ay)?|alright|all\s*right|got\s+it|roger|copy\s+that|"
+                    r"understood|cool|fine|sounds\s+good|perfect)"
+                    r"(?:[\s,]+(?:alfred|jarvis))?"
+                    r"[\s.!]*$",
+                    re.I,
+                ),
+                "system",
+                "acknowledge",
+                lambda m: ({}, "Very good, sir.", {"type": "acknowledge", "action": "noted"}),
+            ),
+            # "Good morning/afternoon/evening/night Alfred" (bare greetings)
+            (
+                re.compile(
+                    r"^\s*(?:good\s+(?:morning|afternoon|evening|night)|hello|hey|hi|yo|sup|what'?s\s+up)"
+                    r"(?:[\s,]+(?:alfred|jarvis|there|buddy))?"
+                    r"[\s.!]*$",
+                    re.I,
+                ),
+                "system",
+                "greet",
+                lambda m: (
+                    {},
+                    f"Good {_get_time_of_day()}, sir. How may I be of service?",
+                    {"type": "greet", "action": "greeting"},
+                ),
+            ),
+            # ── Fast-Path Identity & Memory Store/Recall (<1ms) ───────────────
+            # Set Name: "always remember alfred that my name is mihir", "my name is mihir"
+            (
+                re.compile(
+                    r"^\s*(?:(?:always\s+)?remember\s+(?:alfred[\s,]*)?(?:that\s+)?(?:the\s+)?|"
+                    r"please\s+remember\s+(?:that\s+)?|note\s+that\s+)?"
+                    r"(?:my\s+name\s+is\s+|i\s+am\s+|call\s+me\s+)"
+                    r"([a-zA-Z\s]+)[\s.!]*$",
+                    re.I,
+                ),
+                "memory",
+                "store_name",
+                lambda m: _fast_store_user_name(m.group(1)),
+            ),
+            # Recall Name: "what is my name", "who am i"
+            (
+                re.compile(
+                    r"^\s*(?:what\s+is\s+my\s+name|what'?s\s+my\s+name|who\s+am\s+i|do\s+you\s+know\s+my\s+name)\s*\??\s*$",
+                    re.I,
+                ),
+                "memory",
+                "recall_name",
+                lambda m: _fast_recall_user_name(),
+            ),
+            # Recall Profile: "what have you learned about me so far", "what do you know about me"
+            (
+                re.compile(
+                    r"^\s*(?:what\s+(?:have\s+you\s+learned|do\s+you\s+know|do\s+you\s+remember)\s+about\s+me(?:\s+so\s+far)?|"
+                    r"tell\s+me\s+about\s+myself|what\s+is\s+my\s+profile|what\s+are\s+my\s+preferences)\s*\??\s*$",
+                    re.I,
+                ),
+                "memory",
+                "get_user_profile",
+                lambda m: _fast_recall_profile(),
+            ),
+            # Generic Remember: "always remember that...", "remember that..."
+            (
+                re.compile(
+                    r"^\s*(?:always\s+)?remember\s+(?:alfred[\s,]*)?(?:that\s+)?(.+)[\s.!]*$",
+                    re.I,
+                ),
+                "memory",
+                "store_memory",
+                lambda m: _fast_store_generic_memory(m.group(1)),
             ),
         ]
 

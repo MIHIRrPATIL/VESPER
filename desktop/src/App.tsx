@@ -106,6 +106,24 @@ export function App() {
         if (typeof payload.wakeword_active === 'boolean') {
           setIsWakeWordArmed(payload.wakeword_active);
         }
+      } else if (type === 'NOTIFICATION_DIGEST' || envelope.channel === 'NOTIFY') {
+        const notif = payload.notification || {};
+        const title = notif.title || payload.title || 'Executive Briefing';
+        const text = payload.speech || notif.text || '';
+        if (text) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              sender: 'agent',
+              text: `[${title.toUpperCase()}]\n${text}`,
+              markdown: payload.markdown_body,
+              timestamp: Date.now(),
+              cards: payload.hud_cards || [],
+              intent: 'BRIEFING',
+            },
+          ]);
+        }
       }
     },
     []

@@ -126,3 +126,107 @@ def test_wakeword_single_dispatch_guarantee():
     assert event.detected is True
     assert dispatch_count == 1  # Must be called EXACTLY once, not twice
 
+
+def test_wake_phrase_parser():
+    """Verifies parsing of various wake words, prefixes, and attached commands."""
+    detector = WakeWordDetector()
+    
+    # Standalone wake phrases
+    term, canon, cmd = detector._parse_wake_phrase("Alfred")
+    assert term == "alfred" and canon == "alfred" and cmd == ""
+
+    term, canon, cmd = detector._parse_wake_phrase("Hey Alfred!")
+    assert term == "hey alfred" and canon == "alfred" and cmd == ""
+
+    term, canon, cmd = detector._parse_wake_phrase("Jarvis.")
+    assert term == "jarvis" and canon == "jarvis" and cmd == ""
+
+    term, canon, cmd = detector._parse_wake_phrase("Hey, Jarvis")
+    assert term == "hey jarvis" and canon == "jarvis" and cmd == ""
+
+    term, canon, cmd = detector._parse_wake_phrase("Wake up Alfred")
+    assert term == "wake up alfred" and canon == "alfred" and cmd == ""
+
+    # Attached commands in same sentence
+    term, canon, cmd = detector._parse_wake_phrase("Alfred play the everyday playlist")
+    assert term == "alfred" and canon == "alfred" and cmd == "play the everyday playlist"
+
+    term, canon, cmd = detector._parse_wake_phrase("Hey Alfred, what time is it?")
+    assert term == "hey alfred" and canon == "alfred" and cmd == "what time is it"
+
+    term, canon, cmd = detector._parse_wake_phrase("Jarvis, turn on the lights")
+    assert term == "jarvis" and canon == "jarvis" and cmd == "turn on the lights"
+
+    # Non-wake phrases must not match
+    term, canon, cmd = detector._parse_wake_phrase("Hello there")
+    assert term is None and canon is None and cmd == ""
+
+    term, canon, cmd = detector._parse_wake_phrase("What time is it?")
+    assert term is None and canon is None and cmd == ""
+
+    term, canon, cmd = detector._parse_wake_phrase("Testing one two three")
+    assert term is None and canon is None and cmd == ""
+
+
+def test_utterance_verification_pending_event_pickup():
+    """Verifies that when _pending_wake_event is set, process_frame yields detected=True."""
+    detector = WakeWordDetector()
+    
+    # Initially no wake event
+    event = detector.process_frame(b"\x00" * 640)
+    assert event.detected is False
+
+    # Simulate utterance verifier confirming "alfred"
+    pending = WakeWordEvent(
+        detected=True,
+        wake_word="alfred",
+        confidence=0.98,
+        is_speech=True,
+        transcript="Alfred",
+        remaining_command="play music",
+        command_pcm=b"\x01\x00" * 8000,
+    )
+    detector._pending_wake_event = pending
+
+    # Next frame must return the confirmed wake event
+    pickup_event = detector.process_frame(b"\x00" * 640)
+    assert pickup_event.detected is True
+    assert pickup_event.wake_word == "alfred"
+    assert pickup_event.confidence == 0.98
+    assert pickup_event.remaining_command == "play music"
+    assert detector._pending_wake_event is None
+
+
+def test_listener_attached_command_dispatch():
+    """Verifies that an event with an attached command directly dispatches to on_utterance_complete."""
+    wakes = []
+    utterances = []
+
+    listener = WakeWordListener(
+        on_wake_word=lambda e: wakes.append(e),
+        on_utterance_complete=lambda pcm: utterances.append(pcm),
+        sample_rate=16000,
+    )
+
+    # Trigger wake with attached command
+    mock_pcm = b"\x02\x00" * 1600
+    event = WakeWordEvent(
+        detected=True,
+        wake_word="alfred",
+        confidence=0.98,
+        transcript="Alfred, pause music",
+        remaining_command="pause music",
+        command_pcm=mock_pcm,
+    )
+    
+    # Inject directly via on_wake_word and on_utterance_complete pattern
+    listener.on_wake_word(event)
+    if listener.on_utterance_complete and event.command_pcm:
+        listener.on_utterance_complete(event.command_pcm)
+
+    assert len(wakes) == 1
+    assert wakes[0].wake_word == "alfred"
+    assert len(utterances) == 1
+    assert utterances[0] == mock_pcm
+
+

@@ -146,17 +146,37 @@ def normalize_spoken_emails(text: str) -> str:
     return t
 
 
+# Pre-compile incomplete command patterns (verbs missing object/target after preposition)
+_INCOMPLETE_COMMAND_PATTERN = re.compile(
+    r"^(?:(?:can|could|would|will)\s+you\s+|please\s+|i\s+(?:want|need|would\s+like)\s+to\s+)?"
+    r"(?:send|write|mail|email|compose|text|message|search|look\s+up|look\s+into|find|remind\s+me|create|add|schedule|set|tell\s+me|ask)"
+    r"(?:\s+(?:an?|the|some)?\s*(?:email|message|reminder|task|note|event))?"
+    r"\s+(?:about|for|to|at|with|into|onto|from)$",
+    re.I,
+)
+
+_PREPOSITION_STRANDING_ADJECTIVES = {
+    "concerned", "worried", "thinking", "talking", "waiting", "looking",
+    "cared", "listened", "applied", "aware", "known", "spoken", "interested",
+}
+
+
 def detect_cut_off_utterance(query: str) -> bool:
-    """Detects whether an utterance was cut off mid-speech by VAD or user hesitation."""
+    """Detects whether an utterance was genuinely cut off mid-speech by VAD or user hesitation.
+
+    Preserves valid interrogative sentences and phrasal relative clauses (e.g.
+    'Any new emails that I need to be concerned about?') while catching genuine
+    mid-speech truncations (trailing conjunctions, articles, dangling prepositions
+    in imperative commands).
+    """
     clean = query.strip()
     if not clean:
         return False
 
-    # Trailing ellipsis or dash markers indicate abrupt pause
+    # 1. Explicit trailing ellipsis or dash markers indicate abrupt halt
     if re.search(r"(\.\.\.|…|--|-)\s*$", clean):
         return True
 
-    # Strip trailing punctuation for word analysis
     words = re.sub(r"[^\w\s]", "", clean).strip().split()
     if not words:
         return False
@@ -164,30 +184,61 @@ def detect_cut_off_utterance(query: str) -> bool:
     last_word = words[-1].lower()
     q_lower = clean.lower().strip("?!.")
 
-    # Check if query consists solely of introductory openers without an actual action
+    # 2. Complete questions ending in '?' with sufficient length are complete
+    if clean.endswith("?") and len(words) >= 3:
+        return False
+
+    # 3. Query consisting solely of introductory openers without an action
     stripped_openers = re.sub(
-        r"\b(can you|could you|would you|will you|please|i want to|i would like to|i need to|tell me|check if|see if|write an email to)\b",
+        r"^(?:can\s+you|could\s+you|would\s+you|will\s+you|please|i\s+want\s+to|i\s+would\s+like\s+to|i\s+need\s+to|tell\s+me|check\s+if|see\s+if|write\s+an\s+email\s+to|hey\s+alfred|hey\s+jarvis)\s*$",
         "",
         q_lower,
     ).strip()
     if not stripped_openers:
         return True
 
-    # Dangling trailing prepositions / conjunctions
-    dangling_tokens = {
-        "from", "to", "at", "with", "about", "for", "into", "saying",
-        "because", "and", "or", "while", "whereby", "onto", "toward", "towards",
-    }
+    # 4. Hard trailing tokens that are NEVER complete sentence endings:
+    # - Articles
+    if last_word in ("a", "an", "the"):
+        return True
 
-    if last_word in dangling_tokens:
-        # Check if this is a legitimate inverted question ending in a preposition
+    # - Possessive & demonstrative determiners
+    if last_word in ("my", "your", "his", "her", "their", "our", "its", "this", "that", "these", "those"):
+        return True
+
+    # - Coordinating & subordinating conjunctions
+    if last_word in ("and", "or", "but", "because", "while", "although", "whereas", "since", "if", "unless", "whether"):
+        return True
+
+    # - Auxiliary infinitive fragments (e.g. "i want to", "remember to", "need to")
+    if last_word == "to" and len(words) >= 2 and words[-2].lower() in ("want", "need", "like", "have", "going", "try", "supposed", "ought"):
+        return True
+
+    # 5. Imperative action commands missing their target after a preposition (e.g. "Send an email about", "Tell me about")
+    if _INCOMPLETE_COMMAND_PATTERN.match(q_lower):
+        return True
+
+    # 6. Check for dangling prepositions in incomplete statements
+    dangling_prepositions = {"from", "to", "at", "with", "about", "for", "into", "onto", "toward", "towards"}
+    if last_word in dangling_prepositions:
+        # Preposition stranding after known adjectives/participles is valid (e.g. "concerned about", "worried about")
+        if len(words) >= 2 and words[-2].lower() in _PREPOSITION_STRANDING_ADJECTIVES:
+            return False
+
+        # Relative clauses with subordinate markers are complete (e.g. "... that I need to be ... about")
+        if any(marker in q_lower for marker in ("that i", "which i", "who i", "what i", "where i", "what we")):
+            return False
+
+        # Inverted wh-questions (e.g. "What is this for", "Who are you speaking with")
         is_legitimate_inverted_q = bool(
-            re.match(r"^(who|where|what|which)\b", q_lower)
+            re.match(r"^(who|where|what|which|is|are|was|were|do|does|did|can|could|would|should|any)\b", q_lower)
             and len(words) >= 3
-            and words[1] in ("is", "are", "was", "were", "did", "do", "does", "should", "could", "would", "can")
         )
-        if not is_legitimate_inverted_q:
-            return True
+        if is_legitimate_inverted_q:
+            return False
+
+        # Otherwise, short fragment ending in a preposition is cut off
+        return True
 
     return False
 
@@ -346,7 +397,7 @@ class AlfredSupervisor:
 
         pending_cutoff = self.session_context.get("pending_incomplete_utterance")
         if pending_cutoff:
-            if re.search(r"\b(cancel|never mind|forget it|stop|ignore that)\b", normalized_query, re.I):
+            if re.search(r"\b(cancel|never mind|forget it|stop|ignore that|nothing|no thanks|no alfred|nevermind|stand down|dismiss)\b", normalized_query, re.I):
                 self.session_context["pending_incomplete_utterance"] = None
                 return AlfredResponse(
                     speech_text="Understood, sir. Previous instruction cancelled.",
@@ -468,9 +519,28 @@ class AlfredSupervisor:
             and not (isinstance(exec_result.specialist_results[0].data, dict) and exec_result.specialist_results[0].data.get("sources"))
         )
 
+        # Direct high-confidence web research answer bypass (<1ms synthesis)
+        direct_research_answer: Optional[str] = None
+        if (
+            len(exec_result.specialist_results) == 1
+            and exec_result.specialist_results[0].action in ("web_search", "quick_lookup")
+            and exec_result.specialist_results[0].success
+            and isinstance(exec_result.specialist_results[0].data, dict)
+            and exec_result.specialist_results[0].data.get("answer")
+        ):
+            direct_ans = str(exec_result.specialist_results[0].data["answer"]).strip()
+            if direct_ans:
+                h = datetime.datetime.now().hour
+                time_salutation = "Good morning" if h < 12 else ("Good afternoon" if h < 17 else "Good evening")
+                direct_research_answer = f"{time_salutation}, sir. {direct_ans}"
+
         if plan.plan_type == "direct" and exec_result.direct_response:
             raw_response = exec_result.direct_response
             eval_res = OutputEvaluator.evaluate(raw_response)
+        elif direct_research_answer:
+            # Guaranteed instant (<1ms) answer synthesis when research specialist provides exact fact
+            raw_response = direct_research_answer
+            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results)
         elif is_pure_finance:
             # Guaranteed 100% numerical accuracy bypass: specialist speech_summary formatted without LLM rounding
             raw_response = " ".join([r.speech_summary for r in exec_result.specialist_results if r.speech_summary])
@@ -560,7 +630,7 @@ class AlfredSupervisor:
 
             messages.append({"role": "user", "content": f"User query: '{cleaned_query}'. Please present this update to me in your persona."})
 
-            raw_response, _ = await self.llm.generate_chat(messages, temperature=0.3, max_tokens=350)
+            raw_response, _ = await self.llm.generate_chat(messages, temperature=0.3, max_tokens=180)
             if not raw_response:
                 summaries = [r.speech_summary for r in exec_result.specialist_results if r.speech_summary]
                 raw_response = " ".join(summaries) if summaries else "I have completed the task, sir."

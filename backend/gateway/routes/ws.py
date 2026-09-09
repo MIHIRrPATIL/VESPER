@@ -15,6 +15,7 @@ from backend.shared.events import (
     Channel,
     ClientEnvelope,
     ClientHelloPayload,
+    ClientType,
     EventType,
     ServerEnvelope,
     ServerHelloPayload,
@@ -83,6 +84,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             ).model_dump(),
         )
         await manager.send_envelope(session.session_id, server_hello)
+
+        # Trigger proactive executive startup briefing for interactive HUD & Desktop companions
+        if "startup_briefing" in session.capabilities or session.client_id in ("vesper-desktop-terminal", "vesper-desktop-companion"):
+            from backend.agent.proactive_agent import proactive_agent
+            asyncio.create_task(proactive_agent.deliver_startup_briefing(session_id=session.session_id))
 
         # ── 2. Message Loop Phase ──────────────────────────────────────────
         while True:

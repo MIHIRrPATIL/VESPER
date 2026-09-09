@@ -188,3 +188,20 @@ async def clear_notifications() -> Dict[str, Any]:
         "message": "All notifications cleared",
         "unread_count": 0,
     }
+
+
+@router.get("/briefing")
+async def get_executive_briefing(force_refresh: bool = Query(False)) -> Dict[str, Any]:
+    """Retrieves the instantaneous executive briefing (time, date, schedule, tasks, activities)."""
+    from backend.agent.proactive.briefing_manager import briefing_manager
+
+    return await briefing_manager.get_briefing(timeout=3.0, force_refresh=force_refresh)
+
+
+@router.post("/briefing/deliver")
+async def trigger_executive_briefing(force: bool = Query(True)) -> Dict[str, Any]:
+    """Dispatches the executive briefing across the cluster."""
+    from backend.agent.proactive_agent import proactive_agent
+
+    await proactive_agent.deliver_startup_briefing(force=force)
+    return {"status": "dispatched"}

@@ -263,7 +263,7 @@ class MessageRouter:
 
                 try:
                     target_url = f"{AGENT_SERVICE_URL}/query"
-                    timeout_config = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)
+                    timeout_config = httpx.Timeout(connect=15.0, read=60.0, write=10.0, pool=10.0)
                     async with httpx.AsyncClient(timeout=timeout_config) as http_client:
                         try:
                             agent_res = await http_client.post(
@@ -384,7 +384,7 @@ class MessageRouter:
             media_copy["is_playing"] = new_playing
             await sync_manager.update_state({"current_media": media_copy}, source_device_id=session.client_id)
 
-            _control_media_player("play-pause")
+            await asyncio.to_thread(_control_media_player, "play-pause")
             action_name = "play" if new_playing else "pause"
             logger.info(f"[GESTURE] THREE_FINGERS toggled media playback from '{session.client_id}' -> {action_name} (Volume untouched)")
 
@@ -419,9 +419,9 @@ class MessageRouter:
             cancelled_count = self.tasks.cancel_all()
             logger.info(f"[GESTURE] CLOSED_FIST interrupt aborted {cancelled_count} active task(s)")
 
-            _set_system_mute(True)
-            _set_system_volume(0)
-            _control_media_player("pause")
+            await asyncio.to_thread(_set_system_mute, True)
+            await asyncio.to_thread(_set_system_volume, 0)
+            await asyncio.to_thread(_control_media_player, "pause")
             cur_state = sync_manager.get_snapshot()
             media_copy = dict(cur_state.current_media)
             media_copy["is_playing"] = False
@@ -462,9 +462,9 @@ class MessageRouter:
             # Resume playback / Unmute to default level and Rearm Wake Word Listener
             current_vol = sync_manager.get_snapshot().master_volume
             restore_vol = current_vol if current_vol > 0 else 50
-            _set_system_mute(False)
-            _set_system_volume(restore_vol)
-            _control_media_player("play")
+            await asyncio.to_thread(_set_system_mute, False)
+            await asyncio.to_thread(_set_system_volume, restore_vol)
+            await asyncio.to_thread(_control_media_player, "play")
             cur_state = sync_manager.get_snapshot()
             media_copy = dict(cur_state.current_media)
             media_copy["is_playing"] = True
@@ -527,7 +527,7 @@ class MessageRouter:
         elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT", "GUN_RIGHT", "GUN_POINT_RIGHT"):
             # Next Track playback control
             logger.info(f"[GESTURE] Triggered NEXT_TRACK media control from '{session.client_id}' ({gesture})")
-            _control_media_player("next")
+            await asyncio.to_thread(_control_media_player, "next")
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.SYSTEM,
@@ -539,7 +539,7 @@ class MessageRouter:
         elif gesture in ("PREV_TRACK", "PREVIOUS_TRACK", "SWIPE_LEFT", "GUN_LEFT", "GUN_POINT_LEFT"):
             # Previous Track playback control
             logger.info(f"[GESTURE] Triggered PREV_TRACK media control from '{session.client_id}' ({gesture})")
-            _control_media_player("previous")
+            await asyncio.to_thread(_control_media_player, "previous")
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.SYSTEM,
@@ -570,10 +570,15 @@ class MessageRouter:
                 return
 
             # Otherwise Step Volume Up (+10%)
+            now = time.time()
+            if getattr(self, "_last_vol_change", 0.0) and (now - self._last_vol_change < 0.15):
+                return
+            self._last_vol_change = now
+
             current_vol = sync_manager.get_snapshot().master_volume
             new_vol = min(100, current_vol + 10)
-            _set_system_mute(False)
-            _set_system_volume(new_vol)
+            await asyncio.to_thread(_set_system_mute, False)
+            await asyncio.to_thread(_set_system_volume, new_vol)
             await sync_manager.update_state({"master_volume": new_vol}, source_device_id=session.client_id)
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
@@ -583,7 +588,46 @@ class MessageRouter:
             )
             await self.manager.broadcast(broadcast_envelope)
 
+        elif gesture in ("CANCEL", "DISMISS", "STAND_DOWN"):
+            cancelled_count = self.tasks.cancel_all()
+            logger.info(f"[GESTURE] {gesture} aborted {cancelled_count} active task(s)")
+            if cancelled_count > 0:
+                interrupt_envelope = ServerEnvelope(
+                    uuid=envelope.uuid,
+                    channel=Channel.SYSTEM,
+                    type=EventType.INTERRUPT,
+                    payload={"source": f"GESTURE:{gesture}", "reason": "USER_GESTURE_CANCEL", "cancelled_tasks": cancelled_count},
+                )
+                await self.manager.broadcast(interrupt_envelope)
+            idle_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.VOICE,
+                type=EventType.AGENT_IDLE,
+                payload={"state": "IDLE", "reason": "GESTURE_CANCEL"},
+            )
+            await self.manager.broadcast(idle_envelope)
+
         elif gesture in ("THUMB_DOWN", "REJECT", "VOLUME_DOWN"):
+            # Check if there are active in-flight voice or reasoning tasks to cancel immediately
+            if self.tasks.active_count > 0:
+                cancelled_count = self.tasks.cancel_all()
+                logger.info(f"[GESTURE] THUMB_DOWN aborted {cancelled_count} active task(s)")
+                interrupt_envelope = ServerEnvelope(
+                    uuid=envelope.uuid,
+                    channel=Channel.SYSTEM,
+                    type=EventType.INTERRUPT,
+                    payload={"source": f"GESTURE:{gesture}", "reason": "USER_GESTURE_CANCEL", "cancelled_tasks": cancelled_count},
+                )
+                await self.manager.broadcast(interrupt_envelope)
+                idle_envelope = ServerEnvelope(
+                    uuid=envelope.uuid,
+                    channel=Channel.VOICE,
+                    type=EventType.AGENT_IDLE,
+                    payload={"state": "IDLE", "reason": "GESTURE_CANCEL"},
+                )
+                await self.manager.broadcast(idle_envelope)
+                return
+
             # Check if there is an active proactive staged recommendation awaiting confirmation
             from backend.agent.proactive.action_queue import action_queue
             recent_prompted = action_queue.get_recent_prompted_action(max_age_sec=15.0)
@@ -605,11 +649,16 @@ class MessageRouter:
                 return
 
             # Otherwise Step Volume Down (-10%)
+            now = time.time()
+            if getattr(self, "_last_vol_change", 0.0) and (now - self._last_vol_change < 0.15):
+                return
+            self._last_vol_change = now
+
             current_vol = sync_manager.get_snapshot().master_volume
             new_vol = max(0, current_vol - 10)
-            _set_system_volume(new_vol)
+            await asyncio.to_thread(_set_system_volume, new_vol)
             if new_vol == 0:
-                _set_system_mute(True)
+                await asyncio.to_thread(_set_system_mute, True)
             await sync_manager.update_state({"master_volume": new_vol}, source_device_id=session.client_id)
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
@@ -646,6 +695,7 @@ class MessageRouter:
             try:
                 level = int(gesture.split(":")[1])
                 clamped = max(0, min(100, level))
+                await asyncio.to_thread(_set_system_volume, clamped)
                 await sync_manager.update_state({"master_volume": clamped}, source_device_id=session.client_id)
                 broadcast_envelope = ServerEnvelope(
                     uuid=envelope.uuid,

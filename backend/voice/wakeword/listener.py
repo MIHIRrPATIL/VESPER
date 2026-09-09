@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from typing import Callable, Optional
@@ -32,7 +33,7 @@ class WakeWordListener:
         on_wake_word: Optional[Callable[[WakeWordEvent], None]] = None,
         on_utterance_complete: Optional[Callable[[bytes], None]] = None,
         on_audio_frame: Optional[Callable[[WakeWordEvent], None]] = None,
-        threshold: float = 0.5,
+        threshold: float = 0.45,
         sample_rate: int = 16000,
         device_index: Optional[int] = None,
         chunk_samples: int = 1280,
@@ -40,12 +41,13 @@ class WakeWordListener:
         self.on_wake_word = on_wake_word
         self.on_utterance_complete = on_utterance_complete
         self.on_audio_frame = on_audio_frame
-        self.threshold = threshold
+        env_th = os.getenv("WAKEWORD_THRESHOLD")
+        self.threshold = float(env_th) if env_th else threshold
         self.sample_rate = sample_rate
         self.chunk_samples = chunk_samples
         self.device_index = device_index if device_index is not None else get_best_input_device(sample_rate=sample_rate)
         self.detector = WakeWordDetector(
-            threshold=threshold,
+            threshold=self.threshold,
             sample_rate=sample_rate,
             on_wake_word=self._handle_detector_wake,
         )
@@ -147,9 +149,11 @@ class WakeWordListener:
                             pass
 
                     if event.detected and not self.is_paused:
+                        remaining_cmd = getattr(event, "remaining_command", "")
                         logger.info(
                             f"[WakeWordListener] Wake word detected: '{event.wake_word}' "
                             f"(confidence: {event.confidence:.2f})"
+                            + (f" [attached command: '{remaining_cmd}']" if remaining_cmd else "")
                         )
                         if self.on_wake_word:
                             try:
@@ -158,13 +162,27 @@ class WakeWordListener:
                                 logger.error(f"[WakeWordListener] Error in wake callback: {cb_err}")
 
                         if self.on_utterance_complete:
-                            utterance = self._collect_command_utterance(stream)
-                            if utterance and len(utterance) >= int(self.sample_rate * 2 * 0.4):
+                            # If command was already attached in the wake utterance, pass it directly!
+                            if remaining_cmd and getattr(event, "command_pcm", None):
                                 try:
-                                    self.on_utterance_complete(utterance)
+                                    self.on_utterance_complete(event.command_pcm)
                                 except Exception as cb_err:
                                     logger.error(f"[WakeWordListener] Error in utterance complete callback: {cb_err}")
-                            self.detector.reset()
+                                self.detector.reset()
+                            elif (
+                                str(getattr(event, "wake_word", "")).lower().strip() in ("wake up", "wake up alfred", "wake up jarvis")
+                                or str(getattr(event, "matched_term", "")).lower().strip() in ("wake up", "wake up alfred", "wake up jarvis")
+                                or any(phrase in str(getattr(event, "transcript", "")).lower() for phrase in ("wake up alfred", "wake up jarvis", "wake up"))
+                            ):
+                                # Direct wake command completed on wake word trigger; do not collect trailing utterance
+                                self.detector.reset()
+                            else:
+                                utterance = self._collect_command_utterance(stream)
+                                try:
+                                    self.on_utterance_complete(utterance or b"")
+                                except Exception as cb_err:
+                                    logger.error(f"[WakeWordListener] Error in utterance complete callback: {cb_err}")
+                                self.detector.reset()
 
         except Exception as e:
             logger.warning(
@@ -190,7 +208,7 @@ class WakeWordListener:
 
         captured = bytearray()
         start_t = time.time()
-        max_duration = 8.0  # seconds max speech window
+        max_duration = 6.0  # seconds max speech window
 
         while not self._stop_event.is_set() and not self.is_paused and (time.time() - start_t < max_duration):
             try:

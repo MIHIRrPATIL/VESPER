@@ -191,6 +191,7 @@ class TaskSpecialist(BaseSpecialist):
             if t_min <= created <= t_max:
                 return "created_window"
             elif created < t_min:
+                # Tasks from prior days without a deadline are backlog items
                 return "backlog"
             else:
                 return "future"
@@ -216,10 +217,12 @@ class TaskSpecialist(BaseSpecialist):
         repo: Optional[TaskRepository] = None,
         triage_worker: Optional[AsyncTaskTriageWorker] = None,
         calendar_tool: Optional[GoogleCalendarTool] = None,
+        notif_service: Optional[Any] = None,
     ) -> None:
         self.repo = repo or TaskRepository()
         self.triage_worker = triage_worker or AsyncTaskTriageWorker()
         self.calendar = calendar_tool or GoogleCalendarTool()
+        self.notif_service = notif_service
 
     @property
     def name(self) -> str:
@@ -419,11 +422,23 @@ class TaskSpecialist(BaseSpecialist):
                     description=f"Automated reminder set by Alfred: {reminder_text}",
                 )
 
-                # 2. Persist in Supabase task repo as reminder
+                # 2. Persist in Supabase task repo as reminder with parsed deadline
+                parsed_deadline: Optional[datetime.datetime] = None
+                start_val = cal_event.get("start")
+                if start_val:
+                    try:
+                        parsed_deadline = datetime.datetime.fromisoformat(start_val)
+                    except Exception:
+                        pass
+                if not parsed_deadline and time_str:
+                    t_min, _ = self._resolve_filter_range(date_val=time_str)
+                    parsed_deadline = t_min
+
                 task_obj = self.repo.create(
                     TaskCreate(
                         title=f"Reminder: {reminder_text} ({cal_event.get('start', time_str)})",
                         priority=priority,
+                        deadline=parsed_deadline,
                         metadata={
                             "item_type": "reminder",
                             "reminder_text": reminder_text,
@@ -596,12 +611,20 @@ class TaskSpecialist(BaseSpecialist):
                         t for t in all_tasks
                         if self._classify_task_timing(t, t_min, t_max, local_tz) in ("scheduled", "created_window")
                     ][:limit]
+                    overdue_list = [
+                        t for t in all_tasks
+                        if self._classify_task_timing(t, t_min, t_max, local_tz) == "overdue"
+                    ]
                     task_items = [{"id": t.id, "title": t.title, "priority": t.priority, "done": t.done} for t in filtered]
                     if not task_items:
-                        speech = "You have no tasks scheduled for today, sir."
+                        if overdue_list:
+                            speech = f"You have no tasks scheduled specifically for today, sir, though you have {len(overdue_list)} overdue item{'s' if len(overdue_list) != 1 else ''} from earlier."
+                        else:
+                            speech = "You have no tasks scheduled for today, sir."
                     else:
                         titles = ", ".join([f"'{t['title']}'" for t in task_items[:3]])
-                        speech = f"You have {len(task_items)} task{'s' if len(task_items) != 1 else ''} scheduled for today: {titles}."
+                        extra = f" You also have {len(overdue_list)} overdue item{'s' if len(overdue_list) != 1 else ''}." if overdue_list else ""
+                        speech = f"You have {len(task_items)} task{'s' if len(task_items) != 1 else ''} scheduled for today: {titles}.{extra}"
                 else:
                     tasks = all_tasks[:limit]
                     task_items = [{"id": t.id, "title": t.title, "priority": t.priority, "done": t.done} for t in tasks]
@@ -858,32 +881,41 @@ class TaskSpecialist(BaseSpecialist):
                 raw_notifications = []
                 unread_count = 0
 
-                # 1. First attempt: Query live Gateway REST API across cluster
-                gateway_url = os.getenv("GATEWAY_URL", "http://127.0.0.1:8000")
-                try:
-                    import httpx
-                    async with httpx.AsyncClient(timeout=1.5) as client:
-                        resp = await client.get(
-                            f"{gateway_url}/api/notifications",
-                            params={"limit": limit, "unread_only": unread_only, "app_filter": app_filter},
-                        )
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            raw_notifications = data.get("notifications", [])
-                            unread_count = data.get("unread_count", len(raw_notifications))
-                except Exception as net_err:
-                    logger.debug(f"[Tasks] Direct Gateway query notice: {net_err}; checking local store.")
-
-                # 2. Fallback: Query local in-memory notification service
-                if not raw_notifications:
-                    from backend.sync.notification_service import notification_service
-                    local_notifs = notification_service.get_recent_notifications(
+                if self.notif_service is not None:
+                    local_notifs = self.notif_service.get_recent_notifications(
                         limit=limit,
                         unread_only=unread_only,
                         app_filter=app_filter,
                     )
                     raw_notifications = [n.to_dict() for n in local_notifs]
-                    unread_count = notification_service.get_unread_count()
+                    unread_count = self.notif_service.get_unread_count()
+                else:
+                    # 1. First attempt: Query live Gateway REST API across cluster
+                    gateway_url = os.getenv("GATEWAY_URL", "http://127.0.0.1:8000")
+                    try:
+                        import httpx
+                        async with httpx.AsyncClient(timeout=1.5) as client:
+                            resp = await client.get(
+                                f"{gateway_url}/api/notifications",
+                                params={"limit": limit, "unread_only": unread_only, "app_filter": app_filter},
+                            )
+                            if resp.status_code == 200:
+                                data = resp.json()
+                                raw_notifications = data.get("notifications", [])
+                                unread_count = data.get("unread_count", len(raw_notifications))
+                    except Exception as net_err:
+                        logger.debug(f"[Tasks] Direct Gateway query notice: {net_err}; checking local store.")
+
+                    # 2. Fallback: Query local in-memory notification service
+                    if not raw_notifications:
+                        from backend.sync.notification_service import notification_service
+                        local_notifs = notification_service.get_recent_notifications(
+                            limit=limit,
+                            unread_only=unread_only,
+                            app_filter=app_filter,
+                        )
+                        raw_notifications = [n.to_dict() for n in local_notifs]
+                        unread_count = notification_service.get_unread_count()
 
                 # 3. Cross-reference unread emails for complete communication situational awareness
                 email_brief = ""

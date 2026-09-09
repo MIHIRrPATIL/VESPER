@@ -248,12 +248,26 @@ def _set_system_mute(muted: bool) -> None:
         logger.warning(f"[VolumeCtrl] Failed to set mute: {e}")
 
 
+_LAST_MEDIA_ACTION_TIME: float = 0.0
+
+
 def _control_media_player(action: str) -> None:
-    """Controls running media players (Spotify, Apple Music, browsers) across Linux, macOS, and Windows."""
+    """Controls running media players (Spotify, Apple Music, browsers) across Linux, macOS, and Windows.
+
+    Uses real player status inspection to make toggles strictly idempotent and avoid
+    rapid double-toggle oscillations across multi-process callers.
+    """
+    global _LAST_MEDIA_ACTION_TIME
+    now = time.time()
+    if action in ("play-pause", "toggle") and (now - _LAST_MEDIA_ACTION_TIME < 1.0):
+        logger.debug(f"[MediaCtrl] Suppressed rapid toggle ({now - _LAST_MEDIA_ACTION_TIME:.2f}s since last)")
+        return
+    _LAST_MEDIA_ACTION_TIME = now
+
     try:
         if sys.platform == "darwin":
             # macOS AppleScript for Spotify or Music.app
-            osascript_action = "playpause" if action in ("play", "pause") else ("next track" if action == "next" else "previous track")
+            osascript_action = "playpause" if action in ("play", "pause", "play-pause", "toggle") else ("next track" if action == "next" else "previous track")
             subprocess.run(
                 ["osascript", "-e", f'tell application "Spotify" to {osascript_action}'],
                 timeout=2, check=False,
@@ -263,8 +277,17 @@ def _control_media_player(action: str) -> None:
 
         playerctl = shutil.which("playerctl")
         if playerctl:
+            target_cmd = action
+            if action in ("play-pause", "toggle"):
+                status_res = subprocess.run(
+                    [playerctl, "-p", "spotify,%any", "status"],
+                    capture_output=True, text=True, timeout=1, check=False,
+                )
+                curr_status = status_res.stdout.strip().lower()
+                target_cmd = "pause" if curr_status == "playing" else "play"
+
             subprocess.run(
-                [playerctl, action],
+                [playerctl, "-p", "spotify,%any", target_cmd],
                 timeout=2, check=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
@@ -273,25 +296,25 @@ def _control_media_player(action: str) -> None:
 
 
 DEFAULT_GESTURE_COOLDOWNS: Dict[str, float] = {
-    "VOLUME_DIAL": 0.12,
-    "THUMB_UP": 0.35,
-    "THUMB_DOWN": 0.35,
-    "VOLUME_UP": 0.35,
-    "VOLUME_DOWN": 0.35,
-    "CLOSED_FIST": 1.5,
-    "OPEN_PALM": 1.5,
-    "PEACE_SIGN": 2.0,
-    "THREE_FINGERS": 1.5,
-    "PLAY_PAUSE": 1.5,
-    "MEDIA_PLAY_PAUSE": 1.5,
-    "POINTING_UP": 2.0,
-    "NEXT_TRACK": 1.6,
-    "PREV_TRACK": 1.6,
-    "GUN_RIGHT": 1.6,
-    "GUN_LEFT": 1.6,
-    "AIR_TAP": 1.2,
-    "GESTURE_TOGGLE": 2.5,
-    "ROCK_ON": 2.5,
+    "VOLUME_DIAL": 0.08,
+    "THUMB_UP": 0.25,
+    "THUMB_DOWN": 0.25,
+    "VOLUME_UP": 0.25,
+    "VOLUME_DOWN": 0.25,
+    "CLOSED_FIST": 0.9,
+    "OPEN_PALM": 0.9,
+    "PEACE_SIGN": 1.2,
+    "THREE_FINGERS": 0.9,
+    "PLAY_PAUSE": 0.9,
+    "MEDIA_PLAY_PAUSE": 0.9,
+    "POINTING_UP": 1.2,
+    "NEXT_TRACK": 0.9,
+    "PREV_TRACK": 0.9,
+    "GUN_RIGHT": 0.9,
+    "GUN_LEFT": 0.9,
+    "AIR_TAP": 0.6,
+    "GESTURE_TOGGLE": 2.0,
+    "ROCK_ON": 2.0,
 }
 
 
@@ -420,6 +443,20 @@ class GestureWorker:
         status = "PAUSED" if self.state.tracking_paused else "RESUMED"
         logger.info(f"[GestureWorker] Gesture tracking {status}")
         return self.state.tracking_paused
+
+    def resume_tracking(self) -> None:
+        """Explicitly unpauses gesture tracking."""
+        self.state.tracking_paused = False
+        self._toggle_gesture_start = 0.0
+        self._toggle_gesture_fired = False
+        self._toggle_lockout_until = 0.0
+        self._gesture_awaiting_release.clear()
+        logger.info("[GestureWorker] Gesture tracking explicitly RESUMED")
+
+    def pause_tracking(self) -> None:
+        """Explicitly pauses gesture tracking."""
+        self.state.tracking_paused = True
+        logger.info("[GestureWorker] Gesture tracking explicitly PAUSED")
 
     async def _run_loop(self) -> None:
         """Main throttled gesture evaluation loop."""
@@ -705,12 +742,15 @@ class GestureWorker:
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
             result = recognizer.recognize(mp_image)
 
+            hand_lms = result.hand_landmarks[0] if (result.hand_landmarks and len(result.hand_landmarks) > 0) else None
             if result.gestures and len(result.gestures) > 0:
                 top = result.gestures[0][0]
                 category = top.category_name
                 score = float(top.score)
-                # Rock On (ILoveYou) held for 1.0s toggles gesture lock state
-                if category == "ILoveYou" and score >= 0.50:
+                # Rock On (ILoveYou with anatomical confirmation if landmarks present) or Open Palm held for 1.0s resumes gesture tracking
+                is_rock_on = (category == "ILoveYou" and score >= 0.80) and (hand_lms is None or self._is_rock_on_anatomy(hand_lms))
+                is_open_palm = (category == "Open_Palm" and score >= 0.70)
+                if is_rock_on or is_open_palm:
                     if self._toggle_gesture_start == 0.0:
                         self._toggle_gesture_start = now
                     elif (now - self._toggle_gesture_start) >= 1.0 and not self._toggle_gesture_fired:
@@ -727,6 +767,46 @@ class GestureWorker:
         except Exception:
             pass
         return "NONE", 0.0
+
+    @staticmethod
+    def _is_rock_on_anatomy(hand_lms: Any) -> bool:
+        """Verifies intentional Rock On / Sign of the Horns anatomical structure.
+
+        Requires:
+        - Index and Pinky fingers extended away from wrist.
+        - Middle and Ring fingers tightly curled into the palm.
+        """
+        if not hand_lms or len(hand_lms) < 21:
+            return False
+
+        def get_pt(p: Any) -> Tuple[float, float]:
+            if hasattr(p, "x"):
+                return float(p.x), float(p.y)
+            elif isinstance(p, dict):
+                return float(p.get("x", 0.0)), float(p.get("y", 0.0))
+            return float(p[0]), float(p[1])
+
+        def dist_2d(p1: Any, p2: Any) -> float:
+            x1, y1 = get_pt(p1)
+            x2, y2 = get_pt(p2)
+            return math.hypot(x1 - x2, y1 - y2)
+
+        wrist = hand_lms[0]
+        index_pip = hand_lms[6]
+        index_tip = hand_lms[8]
+        middle_pip = hand_lms[10]
+        middle_tip = hand_lms[12]
+        ring_pip = hand_lms[14]
+        ring_tip = hand_lms[16]
+        pinky_pip = hand_lms[18]
+        pinky_tip = hand_lms[20]
+
+        index_ext = dist_2d(index_tip, wrist) > dist_2d(index_pip, wrist) * 1.15
+        pinky_ext = dist_2d(pinky_tip, wrist) > dist_2d(pinky_pip, wrist) * 1.15
+        middle_folded = dist_2d(middle_tip, wrist) < dist_2d(middle_pip, wrist) * 1.10
+        ring_folded = dist_2d(ring_tip, wrist) < dist_2d(ring_pip, wrist) * 1.10
+
+        return bool(index_ext and pinky_ext and middle_folded and ring_folded)
 
     @staticmethod
     def _detect_finger_gun(hand_lms: Any) -> Tuple[str, float]:
@@ -774,43 +854,40 @@ class GestureWorker:
         pinky_tip = hand_lms[20]
 
         # 1. Ring and Pinky MUST be folded into the palm
-        ring_folded = dist_2d(ring_tip, wrist) < dist_2d(ring_pip, wrist) * 1.15
-        pinky_folded = dist_2d(pinky_tip, wrist) < dist_2d(pinky_pip, wrist) * 1.15
+        ring_folded = dist_2d(ring_tip, wrist) < dist_2d(ring_pip, wrist) * 1.25
+        pinky_folded = dist_2d(pinky_tip, wrist) < dist_2d(pinky_pip, wrist) * 1.25
         if not (ring_folded and pinky_folded):
             return "NONE", 0.0
 
         # 2. Middle finger: folded (single-barrel pistol) or extended (double-barrel pistol)
-        middle_folded = dist_2d(middle_tip, wrist) < dist_2d(middle_pip, wrist) * 1.15
-        middle_extended = dist_2d(middle_tip, wrist) > dist_2d(middle_pip, wrist) * 1.20
+        middle_folded = dist_2d(middle_tip, wrist) < dist_2d(middle_pip, wrist) * 1.25
+        middle_extended = dist_2d(middle_tip, wrist) > dist_2d(middle_pip, wrist) * 1.15
         if not (middle_folded or middle_extended):
             return "NONE", 0.0
 
         # 3. Index finger MUST be extended and straight
-        index_extended = dist_2d(index_tip, wrist) > dist_2d(index_pip, wrist) * 1.20
+        index_extended = dist_2d(index_tip, wrist) > dist_2d(index_pip, wrist) * 1.15
         segment_sum = dist_2d(index_pip, index_mcp) + dist_2d(index_dip, index_pip) + dist_2d(index_tip, index_dip)
         total_len = dist_2d(index_tip, index_mcp)
-        index_straight = (total_len / max(0.001, segment_sum)) > 0.75
+        index_straight = (total_len / max(0.001, segment_sum)) > 0.65
         if not (index_extended and index_straight):
             return "NONE", 0.0
 
         # 4. Thumb extended (cocked hammer)
-        thumb_extended = dist_2d(thumb_tip, wrist) > dist_2d(thumb_mcp, wrist) * 1.05
+        thumb_extended = dist_2d(thumb_tip, wrist) > dist_2d(thumb_mcp, wrist) * 1.02
         if not thumb_extended:
             return "NONE", 0.0
 
         # 5. Orientation check: Index finger barrel vector from MCP (5) to TIP (8)
-        # In mirrored screen coordinates: user's right has x_mirrored > 0
-        # x_mirrored = 1.0 - x
-        # dx_mirrored = (1.0 - index_tip.x) - (1.0 - index_mcp.x) = index_mcp.x - index_tip.x
         imcp_x, imcp_y, _ = get_pt(index_mcp)
         itip_x, itip_y, _ = get_pt(index_tip)
         dx_mirrored = imcp_x - itip_x
         dy = itip_y - imcp_y
 
-        # Dominantly horizontal pointing
-        if abs(dx_mirrored) < 0.08:
+        # Dominantly horizontal pointing (relaxed from 1.20 to 0.70 to allow natural wrist angles)
+        if abs(dx_mirrored) < 0.06:
             return "NONE", 0.0
-        if abs(dx_mirrored) <= 1.20 * abs(dy):
+        if abs(dx_mirrored) <= 0.70 * abs(dy):
             return "NONE", 0.0
 
         if dx_mirrored > 0:
@@ -820,13 +897,11 @@ class GestureWorker:
 
     @staticmethod
     def _detect_three_fingers(hand_lms: Any) -> Tuple[str, float]:
-        """Classifies three fingers extended (Index, Middle, Ring extended; Pinky folded).
+        """Classifies three fingers extended.
 
-        Used for pure Media Play/Pause toggle without modifying master volume or muting.
-
-        Anatomy:
-        - Pinky finger: Folded into the palm.
-        - Index, Middle, and Ring fingers: Extended away from the wrist past their PIP joints.
+        Supports both:
+        1. Classic Three Fingers: Index, Middle, Ring extended; Pinky curled.
+        2. Counting / European Three Fingers: Thumb, Index, Middle extended; Ring & Pinky curled.
 
         Returns:
             ("THREE_FINGERS", 0.90) if detected
@@ -847,27 +922,70 @@ class GestureWorker:
             x2, y2, _ = get_pt(p2)
             return math.hypot(x1 - x2, y1 - y2)
 
+        def dist_3d(p1: Any, p2: Any) -> float:
+            x1, y1, z1 = get_pt(p1)
+            x2, y2, z2 = get_pt(p2)
+            return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2)
+
         wrist = hand_lms[0]
+        thumb_tip = hand_lms[4]
+        thumb_ip = hand_lms[3]
+
+        index_mcp = hand_lms[5]
         index_pip = hand_lms[6]
+        index_dip = hand_lms[7]
         index_tip = hand_lms[8]
+
+        middle_mcp = hand_lms[9]
         middle_pip = hand_lms[10]
+        middle_dip = hand_lms[11]
         middle_tip = hand_lms[12]
+
+        ring_mcp = hand_lms[13]
         ring_pip = hand_lms[14]
+        ring_dip = hand_lms[15]
         ring_tip = hand_lms[16]
+
+        pinky_mcp = hand_lms[17]
         pinky_pip = hand_lms[18]
+        pinky_dip = hand_lms[19]
         pinky_tip = hand_lms[20]
 
-        # 1. Pinky MUST be folded into the palm
-        pinky_folded = dist_2d(pinky_tip, wrist) < dist_2d(pinky_pip, wrist) * 1.15
-        if not pinky_folded:
-            return "NONE", 0.0
+        def is_ext(tip: Any, pip: Any, mcp: Any) -> bool:
+            d_tm_2d = dist_2d(tip, mcp)
+            d_pm_2d = dist_2d(pip, mcp)
+            d_tw_2d = dist_2d(tip, wrist)
+            d_pw_2d = dist_2d(pip, wrist)
 
-        # 2. Index, Middle, and Ring fingers MUST be extended
-        index_extended = dist_2d(index_tip, wrist) > dist_2d(index_pip, wrist) * 1.18
-        middle_extended = dist_2d(middle_tip, wrist) > dist_2d(middle_pip, wrist) * 1.18
-        ring_extended = dist_2d(ring_tip, wrist) > dist_2d(ring_pip, wrist) * 1.18
+            d_tm_3d = dist_3d(tip, mcp)
+            d_pm_3d = dist_3d(pip, mcp)
+            d_tw_3d = dist_3d(tip, wrist)
+            d_pw_3d = dist_3d(pip, wrist)
 
-        if index_extended and middle_extended and ring_extended:
+            ext_2d = (d_tm_2d > d_pm_2d * 1.20) and (d_tw_2d > d_pw_2d * 1.08)
+            ext_3d = (d_tm_3d > d_pm_3d * 1.20) and (d_tw_3d > d_pw_3d * 1.08)
+            return ext_2d or ext_3d
+
+        index_ext = is_ext(index_tip, index_pip, index_mcp)
+        middle_ext = is_ext(middle_tip, middle_pip, middle_mcp)
+        ring_ext = is_ext(ring_tip, ring_pip, ring_mcp)
+        pinky_ext = is_ext(pinky_tip, pinky_pip, pinky_mcp)
+
+        thumb_ext = (
+            dist_2d(thumb_tip, index_mcp) > dist_2d(thumb_ip, index_mcp) * 1.10
+            or dist_3d(thumb_tip, pinky_mcp) > dist_3d(thumb_ip, pinky_mcp) * 1.12
+        )
+
+        # Pattern 1: Classic Three Fingers (Index + Middle + Ring extended, Pinky folded)
+        if index_ext and middle_ext and ring_ext and not pinky_ext:
+            return "THREE_FINGERS", 0.90
+
+        # Pattern 2: European Three Fingers (Thumb + Index + Middle extended, Ring and Pinky folded)
+        if thumb_ext and index_ext and middle_ext and not ring_ext and not pinky_ext:
+            return "THREE_FINGERS", 0.90
+
+        # Pattern 3: Boy Scout / "W" Three Fingers (Middle + Ring + Pinky extended, Index folded)
+        if middle_ext and ring_ext and pinky_ext and not index_ext:
             return "THREE_FINGERS", 0.90
 
         return "NONE", 0.0
@@ -925,13 +1043,15 @@ class GestureWorker:
                         if dx_recent >= 0.035 or speed_recent >= 0.22:
                             is_hand_moving = True
 
-            # ── 1. Check for Deliberate Lock Gesture (Rock On hold 1.0s) ─────
+            # ── 1. Check for Deliberate Lock Gesture (Rock On deliberate hold 2.0s) ─────
+            cur_lms = result.hand_landmarks[0] if (result.hand_landmarks and len(result.hand_landmarks) > 0) else None
             if result.gestures and len(result.gestures) > 0:
                 top_gesture = result.gestures[0][0]
                 category = top_gesture.category_name
                 score = float(top_gesture.score)
 
-                if category == "ILoveYou" and score >= 0.50:
+                is_rock_on = (category == "ILoveYou" and score >= 0.85) and (cur_lms is None or self._is_rock_on_anatomy(cur_lms))
+                if is_rock_on:
                     if now >= self._toggle_lockout_until and not is_hand_moving:
                         if self._toggle_gesture_start == 0.0:
                             self._toggle_gesture_start = now
@@ -943,7 +1063,7 @@ class GestureWorker:
                             self._pinch_streak = 0
                             return "GESTURE_TOGGLE:PAUSED", score
                 else:
-                    if self._toggle_gesture_start > 0.0 and category != "ILoveYou":
+                    if self._toggle_gesture_start > 0.0 and not is_rock_on:
                         self._toggle_gesture_start = 0.0
                         self._toggle_gesture_fired = False
 
@@ -1056,9 +1176,10 @@ class GestureWorker:
                     {"master_volume": 0, "current_media": media_copy},
                     source_device_id="gesture_worker",
                 )
-                # Real system effect: mute + pause running media player
-                await asyncio.to_thread(_set_system_mute, True)
-                await asyncio.to_thread(_control_media_player, "pause")
+                # Real system effect: mute + pause running media player (standalone only)
+                if not self.on_gesture_callback and not self.gateway_url:
+                    await asyncio.to_thread(_set_system_mute, True)
+                    await asyncio.to_thread(_control_media_player, "pause")
 
             elif gesture in ("OPEN_PALM", "RESUME", "PLAY", "UNMUTE"):
                 restore_vol = getattr(self, "_saved_volume", 60)
@@ -1069,10 +1190,11 @@ class GestureWorker:
                     {"master_volume": restore_vol, "current_media": media_copy},
                     source_device_id="gesture_worker",
                 )
-                # Real system effect: unmute + restore volume + resume media player
-                await asyncio.to_thread(_set_system_mute, False)
-                await asyncio.to_thread(_set_system_volume, restore_vol)
-                await asyncio.to_thread(_control_media_player, "play")
+                # Real system effect: unmute + restore volume + resume media player (standalone only)
+                if not self.on_gesture_callback and not self.gateway_url:
+                    await asyncio.to_thread(_set_system_mute, False)
+                    await asyncio.to_thread(_set_system_volume, restore_vol)
+                    await asyncio.to_thread(_control_media_player, "play")
 
             elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT", "GUN_RIGHT", "GUN_POINT_RIGHT"):
                 logger.info(f"[GestureWorker] Dispatched NEXT_TRACK media action ({gesture})")
@@ -1083,24 +1205,24 @@ class GestureWorker:
                 await asyncio.to_thread(_control_media_player, "previous")
 
             elif gesture in ("THUMB_UP", "VOLUME_UP"):
-                # Step volume up +10% (real system + state)
-                sys_vol = _get_system_volume()
-                new_vol = min(100, sys_vol + 10)
+                # Step volume up +10% (sync state + real system)
+                new_vol = min(100, cur_vol + 10)
                 await sync_manager.update_state(
                     {"master_volume": new_vol},
                     source_device_id="gesture_worker",
                 )
-                await asyncio.to_thread(_set_system_volume, new_vol)
+                if not self.on_gesture_callback and not self.gateway_url:
+                    await asyncio.to_thread(_set_system_volume, new_vol)
 
             elif gesture in ("THUMB_DOWN", "VOLUME_DOWN"):
-                # Step volume down -10% (real system + state)
-                sys_vol = _get_system_volume()
-                new_vol = max(0, sys_vol - 10)
+                # Step volume down -10% (sync state + real system)
+                new_vol = max(0, cur_vol - 10)
                 await sync_manager.update_state(
                     {"master_volume": new_vol},
                     source_device_id="gesture_worker",
                 )
-                await asyncio.to_thread(_set_system_volume, new_vol)
+                if not self.on_gesture_callback and not self.gateway_url:
+                    await asyncio.to_thread(_set_system_volume, new_vol)
 
             elif gesture.startswith("VOLUME_DIAL:"):
                 # Pinch + rotate analog volume dial → set absolute volume
@@ -1124,7 +1246,8 @@ class GestureWorker:
                     {"current_media": media_copy},
                     source_device_id="gesture_worker",
                 )
-                await asyncio.to_thread(_control_media_player, "play-pause")
+                if not self.on_gesture_callback and not self.gateway_url:
+                    await asyncio.to_thread(_control_media_player, "play-pause")
                 logger.info(f"[GestureWorker] THREE_FINGERS toggled playback -> {'PLAY' if new_playing else 'PAUSE'} (Volume untouched: {cur_vol}%)")
 
             elif gesture in ("PEACE_SIGN", "VICTORY", "TOGGLE_ZEN", "ZEN_MODE"):
