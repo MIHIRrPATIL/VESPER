@@ -21,7 +21,7 @@ export const CommandInput: React.FC<CommandInputProps> = ({ onSubmit }) => {
   return (
     <div 
       className="command-input-wrapper-glow"
-      style={{ width: '100%', maxWidth: '64rem', margin: 0, zIndex: 20 }}
+      style={{ width: '100%', maxWidth: '72rem', margin: 0, zIndex: 20 }}
       onClick={() => inputRef.current?.focus()}
     >
       <BorderGlow 

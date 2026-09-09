@@ -13,8 +13,10 @@ interface BentoCardProps extends React.ComponentPropsWithoutRef<"div"> {
   background?: ReactNode;
   Icon?: React.ElementType;
   description?: string;
+  headerRight?: ReactNode;
   href?: string;
   cta?: string;
+  children?: ReactNode;
 }
 
 const BentoGrid = ({ children, className, ...props }: BentoGridProps) => {
@@ -34,8 +36,10 @@ const BentoCard = ({
   background,
   Icon,
   description,
+  headerRight,
   href,
   cta,
+  children,
   ...props
 }: BentoCardProps) => (
   <BorderGlow
@@ -44,23 +48,31 @@ const BentoCard = ({
     glowColor="0 0 100"
     colors={['#ffffff', '#ffffff', '#ffffff']}
     backgroundColor="#1C1C1C"
-    borderRadius={8}
+    borderRadius={10}
     glowRadius={12}
-    glowIntensity={0.2}
+    glowIntensity={0.15}
     coneSpread={50}
     fillOpacity={0.02}
   >
     <div
-      className="bento-card-inner"
+      className="bento-card-inner !p-5 flex flex-col justify-between h-full"
       {...props}
     >
       <div className="bento-bg">{background}</div>
-      <div className="bento-card-content">
-        <div className="bento-card-top-row">
-          {Icon && <Icon className="bento-icon" />}
+      <div className="bento-card-content flex flex-col gap-2 h-full">
+        <div className="bento-card-top-row flex items-center justify-between w-full mb-1">
+          <div className="flex items-center gap-2.5">
+            {Icon && (
+              <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.05] border border-white/[0.08] text-[#E8E3DA] shrink-0">
+                <Icon size={16} strokeWidth={1.8} />
+              </div>
+            )}
+            <h3 className="bento-title !text-base font-sans font-semibold text-[#E8E3DA] tracking-tight">{name}</h3>
+          </div>
+          {headerRight}
         </div>
-        <h3 className="bento-title">{name}</h3>
-        <p className="bento-desc">{description}</p>
+        {description && <p className="bento-desc !text-xs text-[#8E8A83] font-sans leading-relaxed">{description}</p>}
+        {children && <div className="mt-2.5 flex-1 flex flex-col justify-start">{children}</div>}
       </div>
     </div>
   </BorderGlow>

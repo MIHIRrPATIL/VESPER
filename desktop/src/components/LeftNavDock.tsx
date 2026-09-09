@@ -1,5 +1,5 @@
 import React from 'react';
-import { Mic, Eye, Moon, Volume2, VolumeX, Activity } from 'lucide-react';
+import { Mic, Eye, Moon, Volume2, VolumeX } from 'lucide-react';
 import { Dock, DockIcon, DockItem, DockLabel } from './ui/dock';
 import { cn } from '../lib/utils';
 
@@ -12,8 +12,6 @@ interface LeftNavDockProps {
   onToggleWakeWord: () => void;
   isCameraActive: boolean;
   onToggleCamera: () => void;
-  isActivityActive: boolean;
-  onToggleActivity: () => void;
 }
 
 export const LeftNavDock: React.FC<LeftNavDockProps> = ({
@@ -25,8 +23,6 @@ export const LeftNavDock: React.FC<LeftNavDockProps> = ({
   onToggleWakeWord,
   isCameraActive,
   onToggleCamera,
-  isActivityActive,
-  onToggleActivity,
 }) => {
   return (
     <aside className="left-nav-dock-container" aria-label="Primary Navigation">
@@ -98,24 +94,8 @@ export const LeftNavDock: React.FC<LeftNavDockProps> = ({
             <Eye size={20} strokeWidth={2} />
           </DockIcon>
         </DockItem>
-
-        {/* Activity / Logs Drawer Control */}
-        <DockItem 
-          onClick={onToggleActivity} 
-          ariaLabel={isActivityActive ? 'Activity: Open' : 'Activity: Closed'}
-          className={cn(
-            'rounded-[18px] p-2 transition-colors cursor-pointer border',
-            isActivityActive 
-              ? 'bg-white/[0.12] text-white border-white/20' 
-              : 'bg-white/[0.04] text-[#E8E3DA]/60 border-transparent hover:border-white/10 hover:text-[#E8E3DA] hover:bg-white/[0.08]'
-          )}
-        >
-          <DockLabel>{isActivityActive ? 'Activity: Open' : 'Activity: Closed'}</DockLabel>
-          <DockIcon>
-            <Activity size={20} strokeWidth={2} />
-          </DockIcon>
-        </DockItem>
       </Dock>
     </aside>
   );
 };
+

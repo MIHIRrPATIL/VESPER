@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
  */
 
 export type SidePanelDirection = "left" | "right" | "top" | "bottom";
-export type SidePanelVariant = "default" | "inset" | "straight";
+export type SidePanelVariant = "default" | "inset" | "straight" | "headroom";
 
 export type SidePanelDrawerProps = React.ComponentProps<typeof DrawerPrimitive.Root> & {
   direction?: SidePanelDirection;
@@ -74,6 +74,9 @@ export const SidePanelContent = React.forwardRef<
       : direction === "left" 
       ? "my-4 ml-4 h-[calc(100vh-2rem)] rounded-2xl border" 
       : "m-4 rounded-2xl border",
+    headroom: direction === "right"
+      ? "!inset-y-auto !top-56 !bottom-auto !mr-4 !h-[calc(100vh-15.5rem)] !max-h-[620px] rounded-2xl border"
+      : "my-4 mr-4 h-[calc(100vh-2rem)] rounded-2xl border",
     straight: "rounded-none",
   };
 

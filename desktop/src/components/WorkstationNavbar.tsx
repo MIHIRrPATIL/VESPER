@@ -22,7 +22,7 @@ export const WorkstationNavbar: React.FC<WorkstationNavbarProps> = ({
   const navItems = [
     { label: 'WORKSTATION', href: '#center', onClick: () => onSelectView('center') },
     { label: 'DIRECTIVES', href: '#voice', onClick: () => onSelectView('voice') },
-    { label: 'TELEMETRY', href: '#telemetry', onClick: () => onSelectView('telemetry') },
+    { label: 'TRANSACTIONS', href: '#transactions', onClick: () => onSelectView('transactions') },
     { label: 'LOGS', href: '#logs', onClick: () => onSelectView('logs') },
   ];
 
