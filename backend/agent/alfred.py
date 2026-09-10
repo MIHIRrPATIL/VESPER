@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from backend.agent.evaluator import OutputEvaluator
 from backend.agent.fast_path import FastPathEngine
 from backend.agent.llm import LLMClient
+from backend.agent.normalizer import normalize_entities
 from backend.agent.planner import SwarmPlanner
 from backend.agent.registry import SpecialistRegistry, registry as default_registry
 
@@ -37,6 +38,7 @@ class AlfredResponse(BaseModel):
     plan_type: str = "direct"
     specialist_actions: List[Dict[str, Any]] = Field(default_factory=list)
     latency_ms: float = 0.0
+    navigate_to: Optional[str] = None
 
 
 ALFRED_SYNTHESIS_PROMPT = """You are Alfred, an intelligent, poised, and impeccably articulate British personal assistant inspired by J.A.R.V.I.S.
@@ -52,6 +54,7 @@ Specialist Execution Outcomes:
 
 Persona Directives:
 - Speak with quiet confidence, British elegance, and subtle wit when appropriate.
+- CRITICAL OUTPUT FORMAT: Output ONLY the final spoken dialogue as Alfred. NEVER include internal reasoning, chain-of-thought, notes to self, preamble ("The user is asking...", "Let me check...", "Looking at the specialist outcomes..."), or mention of system instructions.
 - State facts, financial figures, dates, and titles with absolute precision.
 - CRITICAL TEMPORAL GROUNDING & DATES:
   * Current reference time: {current_datetime} ({current_day}).
@@ -73,7 +76,17 @@ Persona Directives:
 - EMAIL ACTIONS & DRAFTS:
   * For email drafts or dispatch, speak with utmost brevity (1-2 sentences max).
   * State the recipient and subject, and ask for confirmation ('Would you like me to send it, sir?').
-  * NEVER output internal reasoning, justifications, chain-of-thought, or headers like 'Reasoning:', 'Explanation:', 'To:', 'Subject:' in the speech response.
+- CRITICAL SPORTS FIXTURES, LIVE SCORES & TIMEZONE TRANSLATION:
+  * Reference Timezone: The user is located in Indian Standard Time (IST, UTC+5:30).
+  * Major international sports fixtures (UEFA Champions League, La Liga, Premier League) are typically published in ET (US Eastern, UTC-4), BST (UK, UTC+1), or CET/CEST (Central European, UTC+2).
+  * Timelines & Kickoffs: Convert match kickoffs accurately to IST:
+    - 12:45 PM ET (16:45 UTC) = 10:15 PM IST (same day)
+    - 15:00 ET (3:00 PM ET / 19:00 UTC) = 12:30 AM IST (past midnight / early following morning)
+    - 18:45 CET = 10:15 PM IST
+    - 21:00 CET = 12:30 AM IST
+  * Carefully scan ALL web source snippets for the queried team or tournament fixtures. Do not rely solely on an AI overview if the web snippets list specific match schedules.
+  * If the kickoff time has already passed relative to the current reference time (e.g. kickoff was 10:15 PM IST and current time is 11:00 PM IST), state that the match is currently in progress / underway, identify the opponent and venue, and report whatever current score or status is provided in the verified sources.
+  * If a live in-game score is not yet finalized or published in the web snippets, truthfully state that the match is underway and report the kickoff time and score if known, rather than citing an older finished match from last week.
 - SANDBOX / MOCK DATA DISCLOSURE: If any specialist outcome indicates source="sandbox" or source="sandbox_inbox", explicitly state that you are referencing offline sandbox data as live account credentials are not yet connected.
 """
 
@@ -394,6 +407,7 @@ class AlfredSupervisor:
 
         # 0. Spoken Normalization & Utterance Continuation
         normalized_query = normalize_spoken_emails(cleaned_query)
+        normalized_query = normalize_entities(normalized_query)
 
         pending_cutoff = self.session_context.get("pending_incomplete_utterance")
         if pending_cutoff:
@@ -455,6 +469,7 @@ class AlfredSupervisor:
                 plan_type="fast_path",
                 specialist_actions=[{"agent": fp_result.intent, "action": fp_result.action, "params": fp_result.params}],
                 latency_ms=elapsed_ms,
+                navigate_to=fp_result.navigate_to,
             )
 
         # ── 2. Stage 1: Swarm Planning (with compact multi-turn history & session context)
@@ -520,9 +535,22 @@ class AlfredSupervisor:
         )
 
         # Direct high-confidence web research answer bypass (<1ms synthesis)
+        # Never bypass for live sports, match scores, fixtures, or time-sensitive queries
+        # because search engines frequently return stale canned answers while raw snippets contain
+        # real-time fixtures requiring IST timezone translation.
+        is_live_or_time_sensitive = any(
+            w in cleaned_query.lower() for w in [
+                "score", "scores", "match", "matches", "game", "games", "live", "vs", "versus",
+                "fixture", "fixtures", "today", "tonight", "ucl", "champions league",
+                "premier league", "la liga", "cup", "playing", "kickoff", "kick off",
+                "tournament", "standings"
+            ]
+        )
+
         direct_research_answer: Optional[str] = None
         if (
-            len(exec_result.specialist_results) == 1
+            not is_live_or_time_sensitive
+            and len(exec_result.specialist_results) == 1
             and exec_result.specialist_results[0].action in ("web_search", "quick_lookup")
             and exec_result.specialist_results[0].success
             and isinstance(exec_result.specialist_results[0].data, dict)
@@ -569,7 +597,7 @@ class AlfredSupervisor:
                             if s.get("snippet")
                         ]
                         if snippets:
-                            extra_facts.append("  Verified Web Sources:\n" + "\n".join(snippets[:3]))
+                            extra_facts.append("  Verified Web Sources:\n" + "\n".join(snippets[:5]))
                     if r.data.get("answer"):
                         extra_facts.append(f"  Direct Answer/Fact: {r.data['answer']}")
                     if r.data.get("album") or r.data.get("movie"):
@@ -628,7 +656,7 @@ class AlfredSupervisor:
                 if content:
                     messages.append({"role": turn.get("role", "user"), "content": content})
 
-            messages.append({"role": "user", "content": f"User query: '{cleaned_query}'. Please present this update to me in your persona."})
+            messages.append({"role": "user", "content": f"User query: '{cleaned_query}'. Provide ONLY your direct spoken butler response as Alfred. No preamble, no chain of thought, no notes to self."})
 
             raw_response, _ = await self.llm.generate_chat(messages, temperature=0.3, max_tokens=180)
             if not raw_response:
@@ -800,6 +828,27 @@ class AlfredSupervisor:
             except Exception:
                 pass
 
+        # Deterministic page navigation resolution based on query, plan, and HUD cards
+        navigate_to = None
+        plan_str = f"{plan.plan_type} {' '.join(str(s) for s in plan.steps)}".lower()
+        query_lower = cleaned_query.lower()
+        cards_str = " ".join((c.get("type", "") + " " + c.get("title", "")).lower() for c in eval_res.hud_cards)
+
+        if any(w in query_lower for w in ["agenda", "task", "todo", "calendar", "schedule"]) or "calendar" in plan_str or "task" in plan_str or "agenda" in cards_str:
+            navigate_to = "agenda"
+        elif any(w in query_lower for w in ["finance", "ledger", "transaction", "bank", "account", "balance", "spending", "expense"]) or "finance" in plan_str or "transaction" in cards_str:
+            navigate_to = "transactions"
+        elif any(w in query_lower for w in ["workstation", "overview", "cockpit"]):
+            navigate_to = "center"
+        elif any(w in query_lower for w in ["service", "telemetry", "hardware", "device", "node", "swarm status"]) or "telemetry" in plan_str:
+            navigate_to = "services"
+        elif any(w in query_lower for w in ["tool", "emitter"]):
+            navigate_to = "tools"
+        elif any(w in query_lower for w in ["log", "event stream", "audit"]):
+            navigate_to = "logs"
+        elif any(w in query_lower for w in ["directive", "voice agent"]):
+            navigate_to = "voice"
+
         return AlfredResponse(
             speech_text=eval_res.speech_text,
             markdown_body=eval_res.markdown_body,
@@ -808,4 +857,5 @@ class AlfredSupervisor:
             plan_type=plan.plan_type,
             specialist_actions=action_records,
             latency_ms=total_elapsed_ms,
+            navigate_to=navigate_to,
         )

@@ -554,7 +554,7 @@ def run_gesture_monitor(fps: float = 6.0):
     print(f"  • {CYAN}Thumbs Down{RESET}     -> Volume Down (-10%)")
     print(f"  • {CYAN}Pointing Up{RESET}     -> Toggle Focus Mode")
     print(f"  • {CYAN}Rock On{RESET}          -> Lock / Unlock Gestures (Hold 1s)")
-    print(f"  • {CYAN}Air Tap / Pinch{RESET} -> Select Widget\n")
+    print(f"  • {CYAN}Shaka / Hang Loose{RESET} -> Toggle Advisories Drawer / Select (SHAKA)\n")
     print(f"{YELLOW}Hold your hand 1-3 feet in front of your webcam to trigger gestures.{RESET}")
     print(f"{DIM}(Press Ctrl+C to exit monitor){RESET}\n")
 
@@ -585,6 +585,8 @@ def run_gesture_monitor(fps: float = 6.0):
         "NEXT_TRACK": 1.6,
         "PREV_TRACK": 1.6,
         "AIR_TAP": 1.2,
+        "SHAKA": 1.2,
+        "HANG_LOOSE": 1.2,
         "GESTURE_TOGGLE": 2.5,
         "ROCK_ON": 2.5,
     }
@@ -709,6 +711,8 @@ def run_gesture_monitor(fps: float = 6.0):
                     act_str = f"{CYAN}[FOCUS: {'ON' if snap.focus_mode else 'OFF'}]{RESET}"
                 elif gesture in ("ROCK_ON", "GESTURE_LOCK") or gesture.startswith("GESTURE_TOGGLE"):
                     act_str = f"{YELLOW}[GESTURES: {'PAUSED' if worker.state.tracking_paused else 'ACTIVE'}]{RESET}"
+                elif gesture in ("SHAKA", "HANG_LOOSE"):
+                    act_str = f"{GREEN}[SHAKA: TOGGLE ADVISORIES DECK]{RESET}"
                 elif gesture == "AIR_TAP":
                     act_str = f"{GREEN}[AIR TAP SELECT]{RESET}"
 

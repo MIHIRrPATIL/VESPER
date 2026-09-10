@@ -103,9 +103,14 @@ function classifyLandmarkGeometry(landmarks: Landmark[]): { gesture: string; con
     return { gesture: 'PEACE_SIGN', confidence: 0.90 };
   }
 
-  // Three Fingers: Index, Middle, & Ring extended, pinky folded
-  if (indexExt && middleExt && ringExt && pinkyFold) {
-    return { gesture: 'THREE_FINGERS', confidence: 0.90 };
+  // Finger Gun & Thumb Geometry
+  const thumbTip = landmarks[4];
+  const thumbMcp = landmarks[2];
+  const thumbExt = Math.hypot(thumbTip.x - wrist.x, thumbTip.y - wrist.y) > Math.hypot(thumbMcp.x - wrist.x, thumbMcp.y - wrist.y) * 1.15;
+
+  // Three Fingers: Index, Middle, & Ring extended, pinky firmly folded, thumb NOT extended
+  if (indexExt && middleExt && ringExt && pinkyFold && !pinkyExt && !thumbExt) {
+    return { gesture: 'THREE_FINGERS', confidence: 0.92 };
   }
 
   // Rock On: Index & Pinky extended, middle & ring folded
@@ -114,10 +119,6 @@ function classifyLandmarkGeometry(landmarks: Landmark[]): { gesture: string; con
   }
 
   // Finger Gun (Pistol): Index extended & straight, thumb extended, ring & pinky folded
-  const thumbTip = landmarks[4];
-  const thumbMcp = landmarks[2];
-  const thumbExt = Math.hypot(thumbTip.x - wrist.x, thumbTip.y - wrist.y) > Math.hypot(thumbMcp.x - wrist.x, thumbMcp.y - wrist.y) * 1.05;
-
   if (indexExt && ringFold && pinkyFold && thumbExt && (middleFold || middleExt)) {
     // Check horizontal orientation of index barrel (from MCP to TIP)
     // In mirrored coordinates (matching user perspective): dx = indexMcp.x - indexTip.x
@@ -285,8 +286,9 @@ class CameraGestureManager {
     if (detectedGesture !== 'NONE' && detectedScore >= 0.50) {
       const isZenGesture = detectedGesture === 'PEACE_SIGN';
       const isToggleGesture = detectedGesture === 'ROCK_ON';
-      const requiredStreak = isZenGesture ? 3 : (isToggleGesture ? 4 : 2);
-      const cooldownMs = isZenGesture ? 2000 : (detectedGesture.startsWith('VOLUME_') ? 350 : (detectedGesture.startsWith('GUN_') ? 1600 : 800));
+      const isThreeFingers = detectedGesture === 'THREE_FINGERS';
+      const requiredStreak = isZenGesture ? 3 : (isToggleGesture ? 4 : (isThreeFingers ? 4 : 2));
+      const cooldownMs = isZenGesture ? 2000 : (isThreeFingers ? 1800 : (detectedGesture.startsWith('VOLUME_') ? 350 : (detectedGesture.startsWith('GUN_') ? 1600 : 800)));
 
       if (detectedGesture === this.lastGestureName) {
         this.consecutiveCount++;

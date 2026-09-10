@@ -40,19 +40,86 @@ logger = logging.getLogger("vesper.vision.display_sentry")
 MODEL_PATH = Path(__file__).resolve().parent / "models" / "blaze_face_short_range.tflite"
 
 
-def is_display_on() -> bool:
-    """Queries Hyprland via hyprctl to check if any active monitor has DPMS enabled."""
+def _lock_windows() -> None:
+    """Locks user session on Windows."""
     try:
-        res = subprocess.run(
-            ["hyprctl", "monitors", "-j"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            monitors = json.loads(res.stdout)
-            return any(m.get("dpmsStatus", False) for m in monitors)
+        import ctypes
+        ctypes.windll.user32.LockWorkStation()
+    except Exception as e:
+        logger.warning(f"[DisplaySentry] Could not lock Windows workstation: {e}")
+
+
+def _turn_display_off_windows() -> None:
+    """Powers off monitors on Windows using SendMessage SC_MONITORPOWER."""
+    try:
+        import ctypes
+        HWND_BROADCAST = 0xFFFF
+        WM_SYSCOMMAND = 0x0112
+        SC_MONITORPOWER = 0xF170
+        ctypes.windll.user32.PostMessageA(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)
+    except Exception as e:
+        logger.warning(f"[DisplaySentry] Could not power off Windows display via SendMessage: {e}")
+        try:
+            cmd = '(Add-Type \'[DllImport("user32.dll")]public static extern int SendMessage(int hWnd, int hMsg, int wParam, int lParam);\' -Name a -Passthru)::SendMessage(0xffff, 0x0112, 0xf170, 2)'
+            subprocess.run(["powershell", "-Command", cmd], check=False, timeout=3)
+        except Exception:
+            pass
+
+
+def _turn_display_on_windows() -> None:
+    """Wakes monitors on Windows by posting input events and SC_MONITORPOWER -1."""
+    try:
+        import ctypes
+        MOUSEEVENTF_MOVE = 0x0001
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_MOVE, 0, 1, 0, 0)
+        time.sleep(0.05)
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_MOVE, 0, -1, 0, 0)
+
+        HWND_BROADCAST = 0xFFFF
+        WM_SYSCOMMAND = 0x0112
+        SC_MONITORPOWER = 0xF170
+        ctypes.windll.user32.PostMessageA(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, -1)
+    except Exception as e:
+        logger.warning(f"[DisplaySentry] Could not wake Windows display: {e}")
+
+
+def _is_display_on_windows() -> bool:
+    """Checks if desktop is accessible on Windows."""
+    try:
+        import ctypes
+        hdesktop = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0001)
+        if hdesktop == 0:
+            return False
+        ctypes.windll.user32.CloseDesktop(hdesktop)
+        return True
+    except Exception:
+        return True
+
+
+def is_display_on() -> bool:
+    """Queries display power status across Linux (Hyprland / xset) and Windows."""
+    if sys.platform == "win32":
+        return _is_display_on_windows()
+
+    try:
+        if shutil.which("hyprctl"):
+            res = subprocess.run(
+                ["hyprctl", "monitors", "-j"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                monitors = json.loads(res.stdout)
+                return any(m.get("dpmsStatus", False) for m in monitors)
+
+        if shutil.which("xset"):
+            res = subprocess.run(["xset", "q"], capture_output=True, text=True, timeout=2, check=False)
+            if "Monitor is Off" in res.stdout:
+                return False
+            if "Monitor is On" in res.stdout:
+                return True
     except Exception as e:
         logger.debug(f"[DisplaySentry] Error querying DPMS status: {e}")
     return True
@@ -61,28 +128,74 @@ def is_display_on() -> bool:
 def _get_active_monitor_names() -> List[str]:
     """Queries Hyprland for active monitor names (e.g. eDP-1, DP-3)."""
     try:
-        res = subprocess.run(
-            ["hyprctl", "monitors", "-j"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            data = json.loads(res.stdout)
-            names = [m.get("name") for m in data if m.get("name")]
-            if names:
-                return names
+        if shutil.which("hyprctl"):
+            res = subprocess.run(
+                ["hyprctl", "monitors", "-j"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                data = json.loads(res.stdout)
+                names = [m.get("name") for m in data if m.get("name") and not m.get("disabled")]
+                if names:
+                    return names
     except Exception:
         pass
     return ["eDP-1", "DP-3"]
 
 
+def _wait_for_monitors_ready(timeout_sec: float = 6.0) -> bool:
+    """Waits for all connected/enabled monitors to complete DPMS wake and DRM modesetting."""
+    if not shutil.which("hyprctl"):
+        return True
+
+    start_time = time.time()
+    while time.time() - start_time < timeout_sec:
+        try:
+            res = subprocess.run(
+                ["hyprctl", "monitors", "all", "-j"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                try:
+                    monitors = json.loads(res.stdout)
+                except Exception:
+                    return True
+
+                if isinstance(monitors, list):
+                    active = [m for m in monitors if not m.get("disabled", False)]
+                    if active and all(m.get("dpmsStatus", False) for m in active):
+                        # All active monitors have completed link training and reported DPMS active.
+                        # Allow 0.6s settling delay for DRM modesetting before Caelestia layers bind.
+                        time.sleep(0.6)
+                        return True
+            else:
+                return True
+        except Exception as e:
+            logger.debug(f"[DisplaySentry] Monitor readiness probe glitch: {e}")
+            return True
+        time.sleep(0.2)
+
+    time.sleep(0.5)
+    return False
+
+
 def turn_display_off(lock: bool = True) -> bool:
-    """Locks user session and powers off displays via Hyprland DPMS."""
+    """Locks user session and powers off displays across Linux and Windows."""
     try:
+        if sys.platform == "win32":
+            if lock:
+                _lock_windows()
+            _turn_display_off_windows()
+            logger.info("[DisplaySentry] Display powered OFF (Windows standby engaged)")
+            return True
+
         if lock and shutil.which("hyprlock"):
-            # Check if hyprlock is already running before spawning
             check = subprocess.run(["pidof", "hyprlock"], capture_output=True, text=True, check=False)
             if not check.stdout.strip():
                 subprocess.Popen(
@@ -94,12 +207,16 @@ def turn_display_off(lock: bool = True) -> bool:
                 )
                 time.sleep(0.3)
 
-        # Dispatch DPMS off globally and explicitly across active outputs
-        subprocess.run(["hyprctl", "dispatch", "dpms", "off"], check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for m in _get_active_monitor_names():
-            subprocess.run(["hyprctl", "dispatch", "dpms", "off", m], check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if shutil.which("hyprctl"):
+            subprocess.run(["hyprctl", "dispatch", "dpms", "off"], check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info("[DisplaySentry] Display powered OFF (DPMS sleep engaged)")
+            return True
 
-        logger.info("[DisplaySentry] Display powered OFF (DPMS sleep engaged)")
+        if shutil.which("xset"):
+            subprocess.run(["xset", "dpms", "force", "off"], check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info("[DisplaySentry] Display powered OFF (xset sleep engaged)")
+            return True
+
         return True
     except Exception as e:
         logger.error(f"[DisplaySentry] Failed to power off display: {e}")
@@ -107,7 +224,7 @@ def turn_display_off(lock: bool = True) -> bool:
 
 
 def is_caelestia_shell_healthy() -> bool:
-    """Verifies that Quickshell process is alive AND Caelestia layer surfaces are mapped in Hyprland."""
+    """Verifies that Quickshell process is alive AND Caelestia layer surfaces are mapped across all active monitors in Hyprland."""
     try:
         # 1. Process check
         qs_check = subprocess.run(["pgrep", "-x", "qs"], capture_output=True, text=True, check=False)
@@ -116,7 +233,7 @@ def is_caelestia_shell_healthy() -> bool:
         if not qs_check.stdout.strip():
             return False
 
-        # 2. Hyprland layer-shell surface check
+        # 2. Hyprland layer-shell surface check across active monitors
         if shutil.which("hyprctl"):
             layers_res = subprocess.run(["hyprctl", "layers"], capture_output=True, text=True, timeout=2, check=False)
             if layers_res.returncode == 0:
@@ -124,7 +241,23 @@ def is_caelestia_shell_healthy() -> bool:
                 # If mock stdout is empty or identical to the PID string, pass to accommodate unit tests
                 if not stdout.strip() or stdout.strip() == qs_check.stdout.strip():
                     return True
-                # Real Hyprland layer-shell namespaces registered by Caelestia
+
+                active_monitors = _get_active_monitor_names()
+                if active_monitors and "Monitor " in stdout:
+                    sections = stdout.split("Monitor ")
+                    for m_name in active_monitors:
+                        m_section = ""
+                        for s in sections[1:]:
+                            if s.startswith(m_name) or s.startswith(f"{m_name}:"):
+                                m_section = s
+                                break
+                        if m_section:
+                            if not any(ns in m_section for ns in ("caelestia-drawers", "caelestia-background", "caelestia-border-exclusion")):
+                                logger.warning(f"[DisplaySentry] Monitor {m_name} is missing Caelestia layer surfaces")
+                                return False
+                    return True
+
+                # Fallback check
                 if any(ns in stdout for ns in ("caelestia-drawers", "caelestia-background", "caelestia-border-exclusion")):
                     return True
                 return False
@@ -150,34 +283,34 @@ def ensure_caelestia_running(force_restart: bool = False) -> None:
         shell_healthy = is_caelestia_shell_healthy()
 
         if force_restart or not shell_healthy:
-            # 2. Clean shutdown of any existing Quickshell instances
+            # 2. Clean shutdown of any existing Quickshell and resizer instances
             subprocess.run(
-                ["qs", "-c", "caelestia", "kill"],
+                ["caelestia", "shell", "-k"],
                 check=False,
                 timeout=2,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            # Brief grace period for graceful exit
-            for _ in range(4):
+            subprocess.run(
+                ["pkill", "-9", "-f", "caelestia resizer"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            # Grace period for graceful exit
+            for _ in range(6):
                 c = subprocess.run(["pgrep", "-x", "qs"], capture_output=True, text=True, check=False)
                 if not c.stdout.strip():
                     break
-                time.sleep(0.05)
+                time.sleep(0.08)
 
             # Fallback force termination if still lingering
             subprocess.run(["pkill", "-9", "-x", "qs"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["pkill", "-9", "-f", "qs -c caelestia"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.15)
 
-            runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-            qs_dir = Path(runtime_dir) / "quickshell"
-            if qs_dir.exists():
-                try:
-                    shutil.rmtree(qs_dir, ignore_errors=True)
-                except Exception:
-                    pass
-
-            # Launch Caelestia Quickshell
+            # Launch Caelestia Quickshell cleanly
             if shutil.which("hyprctl"):
                 subprocess.run(
                     ["hyprctl", "dispatch", "exec", "caelestia shell -d"],
@@ -200,8 +333,8 @@ def ensure_caelestia_running(force_restart: bool = False) -> None:
             # its border-exclusion layer surfaces in Hyprland BEFORE starting the resizer.
             # Starting the resizer prematurely causes window tiling to break.
             if shutil.which("hyprctl"):
-                for _ in range(10):
-                    time.sleep(0.15)
+                for _ in range(15):
+                    time.sleep(0.2)
                     try:
                         chk = subprocess.run(["hyprctl", "layers"], capture_output=True, text=True, timeout=1, check=False)
                         if "caelestia-border-exclusion" in chk.stdout or "caelestia-drawers" in chk.stdout:
@@ -271,27 +404,31 @@ restart_caelestia_services = ensure_caelestia_running
 
 
 def turn_display_on(recover_caelestia: bool = True) -> bool:
-    """Powers on displays via Hyprland DPMS and recovers Caelestia services."""
+    """Powers on displays across Linux (Hyprland / xset) and Windows, recovering Caelestia services."""
     try:
-        for cmd in (
-            ["hyprctl", "dispatch", "dpms", "on"],
-            ["hyprctl", "dispatch", "dpms", "on", "eDP-1"],
-            ["hyprctl", "dispatch", "dpms", "on", "DP-3"],
-        ):
-            subprocess.run(cmd, check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if sys.platform == "win32":
+            _turn_display_on_windows()
+            logger.info("[DisplaySentry] Display powered ON (Windows wake engaged)")
+            return True
 
-        logger.info("[DisplaySentry] Display powered ON (DPMS wake)")
+        if shutil.which("hyprctl"):
+            subprocess.run(["hyprctl", "dispatch", "dpms", "on"], check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info("[DisplaySentry] Display powered ON (DPMS wake)")
 
-        if recover_caelestia:
-            # Allow monitor hardware and Hyprland DRM modesetting to settle
-            time.sleep(0.8)
-            # If layer surfaces were dropped or desynced during DPMS sleep, restart shell cleanly; else refresh devices
-            ensure_caelestia_running(force_restart=not is_caelestia_shell_healthy())
+            if recover_caelestia:
+                # Wait for all monitors (e.g. DP-3 and eDP-1) to complete link training and modesetting
+                _wait_for_monitors_ready(timeout_sec=6.0)
+                # Force restart Caelestia shell on display wake so layer surfaces re-bind cleanly
+                ensure_caelestia_running(force_restart=True)
+
+            return True
+
+        if shutil.which("xset"):
+            subprocess.run(["xset", "dpms", "force", "on"], check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info("[DisplaySentry] Display powered ON (xset wake engaged)")
+            return True
 
         return True
-    except Exception as e:
-        logger.error(f"[DisplaySentry] Failed to power on display: {e}")
-        return False
     except Exception as e:
         logger.error(f"[DisplaySentry] Failed to power on display: {e}")
         return False

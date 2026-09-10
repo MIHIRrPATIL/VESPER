@@ -6,7 +6,7 @@ import { ProactiveAlert } from '../types/vesper';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const AUTO_DISMISS_MS = 8000;
+const AUTO_DISMISS_MS = 5000;
 const MAX_VISIBLE = 5;
 const TOAST_GAP = 8;
 const DISMISS_THRESHOLD = 120;
@@ -26,16 +26,24 @@ interface ToastProps {
   alert: ProactiveAlert;
   index: number;
   onDismiss: (id: string) => void;
+  onResolve: (id: string, resolution: 'confirmed' | 'dismissed') => void;
 }
 
-const Toast: React.FC<ToastProps> = ({ alert, index, onDismiss }) => {
+const Toast: React.FC<ToastProps> = ({ alert, index, onDismiss, onResolve }) => {
   const [isPaused, setIsPaused] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isCall = !!alert.callState;
+  const isActionable =
+    isCall ||
+    alert.actionRequired === true ||
+    !!alert.stagedActionId ||
+    !!alert.stagedAction ||
+    alert.appName?.toLowerCase().includes('alfred');
 
-  // Auto-dismiss timer (pause on hover -- Caelestia behavior)
+  // Auto-dismiss timer (5 seconds, pause on hover).
+  // Calls stay visible while ringing; actionable advisories remain in drawer!
   useEffect(() => {
-    if (isPaused || isCall) return;
+    if (isPaused || (isCall && alert.callState?.state === 'ringing')) return;
 
     timerRef.current = setTimeout(() => {
       onDismiss(alert.id);
@@ -44,7 +52,7 @@ const Toast: React.FC<ToastProps> = ({ alert, index, onDismiss }) => {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [alert.id, isPaused, isCall, onDismiss]);
+  }, [alert.id, isPaused, isCall, alert.callState?.state, onDismiss]);
 
   const handleDragEnd = useCallback(
     (_: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
@@ -90,13 +98,20 @@ const Toast: React.FC<ToastProps> = ({ alert, index, onDismiss }) => {
           {alert.urgency === 'critical' && (
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
           )}
+          {isActionable && !isCall && (
+            <span className="px-1.5 py-0.2 rounded font-mono text-[9px] text-[#D1CFC0] bg-white/[0.06] border border-white/10 uppercase">
+              Action Required
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <span className="font-mono text-[10px] text-[#A1A1AA]">
             {timeAgo(alert.timestamp)}
           </span>
           <button
+            type="button"
             className="flex items-center justify-center w-5 h-5 rounded-md border border-white/[0.08] bg-white/[0.04] text-[#8E8A83] hover:text-[#E8E3DA] hover:bg-white/[0.12] transition-colors cursor-pointer"
+            onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
               onDismiss(alert.id);
@@ -122,13 +137,22 @@ const Toast: React.FC<ToastProps> = ({ alert, index, onDismiss }) => {
       {/* Call actions */}
       {isCall && alert.callState?.state === 'ringing' && (
         <div className="flex items-center gap-2 mt-3 pt-2.5 border-t border-white/[0.08]">
-          <button className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/20 bg-white/[0.12] hover:bg-white/[0.2] text-[#E8E3DA] font-mono text-xs font-semibold transition-colors cursor-pointer">
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/20 bg-white/[0.12] hover:bg-white/[0.2] text-[#E8E3DA] font-mono text-xs font-semibold transition-colors cursor-pointer"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
             <Phone size={13} />
             <span>Answer</span>
           </button>
           <button
+            type="button"
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/[0.1] bg-transparent text-[#A1A1AA] hover:text-[#E8E3DA] hover:bg-white/[0.08] font-mono text-xs transition-colors cursor-pointer"
-            onClick={() => onDismiss(alert.id)}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDismiss(alert.id);
+            }}
           >
             <PhoneOff size={13} />
             <span>Decline</span>
@@ -139,12 +163,25 @@ const Toast: React.FC<ToastProps> = ({ alert, index, onDismiss }) => {
       {/* Staged action buttons */}
       {alert.actionRequired && !isCall && (
         <div className="flex items-center gap-2 mt-3 pt-2.5 border-t border-white/[0.08]">
-          <button className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/20 bg-white/[0.10] hover:bg-white/[0.18] text-[#E8E3DA] font-mono text-xs font-semibold transition-colors cursor-pointer">
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/20 bg-white/[0.10] hover:bg-white/[0.18] text-[#E8E3DA] font-mono text-xs font-semibold transition-colors cursor-pointer"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onResolve(alert.id, 'confirmed');
+            }}
+          >
             <span>Confirm</span>
           </button>
           <button
+            type="button"
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/[0.1] bg-transparent text-[#A1A1AA] hover:text-[#E8E3DA] hover:bg-white/[0.08] font-mono text-xs transition-colors cursor-pointer"
-            onClick={() => onDismiss(alert.id)}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onResolve(alert.id, 'dismissed');
+            }}
           >
             <span>Dismiss</span>
           </button>
@@ -167,18 +204,29 @@ export const ProactiveToastContainer: React.FC = () => {
   }, []);
 
   const handleDismiss = useCallback((id: string) => {
-    notificationStore.dismissAlert(id);
+    notificationStore.dismissToast(id);
   }, []);
 
-  const visibleAlerts = notificationStore.activeAlerts.slice(0, MAX_VISIBLE);
+  const handleResolve = useCallback((id: string, resolution: 'confirmed' | 'dismissed') => {
+    notificationStore.resolveAlert(id, resolution);
+  }, []);
+
+  const visibleAlerts = notificationStore.activeToasts.slice(0, MAX_VISIBLE);
 
   return (
-    <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2 pointer-events-none w-80">
+    <div className="fixed top-16 right-4 z-[100] flex flex-col gap-2 pointer-events-none w-80">
       <AnimatePresence mode="popLayout">
         {visibleAlerts.map((alert, i) => (
-          <Toast key={alert.id} alert={alert} index={i} onDismiss={handleDismiss} />
+          <Toast
+            key={alert.id}
+            alert={alert}
+            index={i}
+            onDismiss={handleDismiss}
+            onResolve={handleResolve}
+          />
         ))}
       </AnimatePresence>
     </div>
   );
 };
+

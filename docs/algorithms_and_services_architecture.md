@@ -65,7 +65,7 @@ VESPER is a distributed, ambient AI desk companion and autonomous agent platform
 * **Internal Components**:
   1. **Alfred Supervisor (`alfred.py`)**: Top-level persona synthesis, conversation history sliding window, temporal grounding injection, and fast-path execution bypass.
   2. **Swarm Planner (`planner.py`)**: 2-stage planning engine that converts unstructured natural language into an executable DAG of specialist tool invocations.
-  3. **Semantic Router (`semantic_router.py`)**: 3-tier routing hierarchy (Deterministic fast-path -> TF-IDF cosine similarity -> Groq LLM fallback).
+  3. **Semantic Router (`semantic_router.py`)**: 3-tier routing hierarchy (Deterministic fast-path -> FastEmbed `all-MiniLM-L6-v2` dense embeddings with batched matmul -> Groq LLM fallback).
   4. **12 Cognitive Specialists**:
      * `TaskSpecialist`: Calendars, reminders, today-isolated daily agenda, and todo lifecycle.
      * `MediaSpecialist`: Spotify playback, YouTube search, track controls, and volume adjustments.

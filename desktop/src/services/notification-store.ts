@@ -1,4 +1,5 @@
 import { gatewayService } from './gateway';
+import { deviceService } from './device-service';
 import {
   VesperEnvelope,
   MobileNotification,
@@ -29,6 +30,28 @@ const INTENT_TO_HUD_TYPE: Record<string, HudCardType> = {
   PLAY_SONG: 'spotify',
   PLAY_PLAYLIST: 'spotify',
   MUSIC: 'spotify',
+  EMAIL: 'email',
+  EMAILS: 'email',
+  INBOX: 'email',
+  GMAIL: 'email',
+  READ_EMAIL: 'email',
+  SEARCH_EMAIL: 'email',
+  TASK: 'task',
+  TASKS: 'task',
+  TODO: 'task',
+  AGENDA: 'task',
+  CALENDAR: 'calendar',
+  SCHEDULE: 'calendar',
+  BRIEFING: 'briefing',
+  MORNING_BRIEFING: 'briefing',
+  DESK_RETURN: 'briefing',
+  RESEARCH: 'research',
+  SEARCH: 'research',
+  WEB_SEARCH: 'research',
+  GITHUB: 'github',
+  SYSTEM: 'system_status',
+  STATUS: 'system_status',
+  DEVICES: 'system_status',
 };
 
 // ── Store ───────────────────────────────────────────────────────────────────
@@ -43,7 +66,49 @@ class NotificationStore {
   // Maximum visible toast stack
   public readonly MAX_VISIBLE_TOASTS = 5;
 
+  // Zen Mode state and statistics
+  private _zenMode: boolean = false;
+  private _heldNotificationsCount: number = 0;
+
+  constructor() {
+    if (typeof window !== 'undefined') {
+      try {
+        const savedNotifs = sessionStorage.getItem('vesper_session_notifications');
+        if (savedNotifs) this._notifications = JSON.parse(savedNotifs);
+        const savedAlerts = sessionStorage.getItem('vesper_session_alerts');
+        if (savedAlerts) this._alerts = JSON.parse(savedAlerts);
+        const savedHud = sessionStorage.getItem('vesper_session_hud_outputs');
+        if (savedHud) this._hudOutputs = JSON.parse(savedHud);
+      } catch (e) {
+        console.error('[NotificationStore] Failed to hydrate from sessionStorage:', e);
+      }
+    }
+  }
+
   // ── Public getters ──────────────────────────────────────────────────────
+
+  get zenMode(): boolean {
+    return this._zenMode;
+  }
+
+  get heldNotificationsCount(): number {
+    return this._heldNotificationsCount;
+  }
+
+  setZenMode(enabled: boolean): void {
+    if (this._zenMode === enabled) return;
+    this._zenMode = enabled;
+    if (enabled) {
+      this._heldNotificationsCount = 0;
+      this.dismissAllToasts();
+    }
+    this._notify();
+  }
+
+  resetZenStats(): void {
+    this._heldNotificationsCount = 0;
+    this._notify();
+  }
 
   get notifications(): readonly MobileNotification[] {
     return this._notifications;
@@ -55,6 +120,20 @@ class NotificationStore {
 
   get activeAlerts(): readonly ProactiveAlert[] {
     return this._alerts.filter((a) => !a.dismissed);
+  }
+
+  get activeToasts(): readonly ProactiveAlert[] {
+    return this._alerts.filter((a) => !a.dismissed && !a.toastDismissed);
+  }
+
+  get activeProactiveAlerts(): readonly ProactiveAlert[] {
+    return this._alerts.filter(
+      (a) => !a.dismissed && (a.actionRequired || !!a.stagedActionId || !!a.stagedAction || a.appName?.toLowerCase().includes('alfred'))
+    );
+  }
+
+  get pendingProactiveCount(): number {
+    return this.activeProactiveAlerts.length;
   }
 
   get hudOutputs(): readonly HudOutput[] {
@@ -79,6 +158,15 @@ class NotificationStore {
   }
 
   private _notify(): void {
+    if (typeof window !== 'undefined') {
+      try {
+        sessionStorage.setItem('vesper_session_notifications', JSON.stringify(this._notifications));
+        sessionStorage.setItem('vesper_session_alerts', JSON.stringify(this._alerts));
+        sessionStorage.setItem('vesper_session_hud_outputs', JSON.stringify(this._hudOutputs));
+      } catch (e) {
+        // Ignore quota limits
+      }
+    }
     for (const listener of this._listeners) {
       try {
         listener();
@@ -172,14 +260,31 @@ class NotificationStore {
       const cards: any[] = payload.hud_cards || [];
       const intent = (payload.intent || '').toUpperCase();
 
+      // Dismiss older active HUD outputs so they don't linger in the drawer
+      // when a new response arrives
+      if (cards.length > 0 || INTENT_TO_HUD_TYPE[intent]) {
+        for (const h of this._hudOutputs) {
+          h.dismissed = true;
+        }
+      }
+
       // Explicit HUD cards from the response
       if (cards.length > 0) {
         for (const card of cards) {
           const cardType = this._inferCardType(card.type, intent);
+          const rawTitle = card.title && card.title !== 'PARALLEL' ? card.title : null;
+          const displayTitle =
+            rawTitle ||
+            (card.name ? (card.type?.includes('playlist') ? `Playlist: ${card.name}` : card.name) : null) ||
+            (card.station ? `Radio: ${card.station}` : null) ||
+            card.track ||
+            card.song ||
+            (cardType === 'spotify' ? 'Spotify Playback' : (intent && intent !== 'PARALLEL' ? intent : 'HUD Output'));
+
           this._addHudOutput({
             id: crypto.randomUUID(),
             type: cardType,
-            title: card.title || intent || 'HUD Output',
+            title: displayTitle,
             timestamp: Date.now(),
             intent,
             data: card.data || card,
@@ -192,10 +297,11 @@ class NotificationStore {
       // Intent-based HUD output (even without explicit cards)
       const mappedType = INTENT_TO_HUD_TYPE[intent];
       if (mappedType) {
+        const fallbackTitle = (intent && intent !== 'PARALLEL' ? intent : 'HUD Output');
         this._addHudOutput({
           id: crypto.randomUUID(),
           type: mappedType,
-          title: payload.response?.substring(0, 80) || intent,
+          title: payload.response?.substring(0, 80) || fallbackTitle,
           timestamp: Date.now(),
           intent,
           data: {
@@ -224,6 +330,10 @@ class NotificationStore {
       }
     }
     this._notifications.unshift(notif);
+    // If in Zen mode, increment held notifications count for debriefing
+    if (this._zenMode) {
+      this._heldNotificationsCount++;
+    }
     // Cap at 100 stored notifications
     if (this._notifications.length > 100) {
       this._notifications = this._notifications.slice(0, 100);
@@ -232,6 +342,23 @@ class NotificationStore {
   }
 
   private _addProactiveAlert(alert: ProactiveAlert): void {
+    // If in Zen mode, check for upcoming task / calendar deadline exemption
+    if (this._zenMode) {
+      const isTaskOrCalendar =
+        alert.domain === 'tasks' ||
+        alert.domain === 'calendar' ||
+        alert.appName?.toLowerCase().includes('calendar') ||
+        alert.appName?.toLowerCase().includes('task') ||
+        (alert.title && /deadline|due|meeting|starts in|agenda/i.test(alert.title)) ||
+        (alert.body && /deadline|due|meeting|starts in|agenda/i.test(alert.body));
+
+      if (!isTaskOrCalendar) {
+        // Suppress on-screen toast popup during focus session
+        alert.toastDismissed = true;
+        this._heldNotificationsCount++;
+      }
+    }
+
     this._alerts.unshift(alert);
     // Cap at 50
     if (this._alerts.length > 50) {
@@ -317,11 +444,50 @@ class NotificationStore {
     this._notify();
   }
 
+  dismissToast(id: string): void {
+    const alert = this._alerts.find((a) => a.id === id);
+    if (alert && !alert.toastDismissed) {
+      alert.toastDismissed = true;
+      this._notify();
+    }
+  }
+
+  dismissAllToasts(): void {
+    let changed = false;
+    for (const a of this._alerts) {
+      if (!a.toastDismissed) {
+        a.toastDismissed = true;
+        changed = true;
+      }
+    }
+    if (changed) this._notify();
+  }
+
   dismissAlert(id: string): void {
     const alert = this._alerts.find((a) => a.id === id);
     if (alert) {
+      alert.toastDismissed = true;
       alert.dismissed = true;
       this._notify();
+    }
+  }
+
+  async resolveAlert(id: string, resolution: 'confirmed' | 'dismissed'): Promise<void> {
+    const alert = this._alerts.find((a) => a.id === id);
+    if (!alert) return;
+
+    // Instantly dismiss toast and mark resolved in UI
+    alert.toastDismissed = true;
+    alert.dismissed = true;
+    this._notify();
+
+    const stagedId = alert.stagedActionId || (alert.stagedAction as any)?.id || (alert.stagedAction as any)?.action_id;
+    if (stagedId) {
+      try {
+        await deviceService.resolveAction(stagedId, resolution);
+      } catch (err) {
+        console.warn('[NotificationStore] Failed to resolve staged action on backend:', err);
+      }
     }
   }
 
@@ -369,11 +535,18 @@ class NotificationStore {
   private _inferCardType(cardType?: string, intent?: string): HudCardType {
     if (cardType) {
       const ct = cardType.toLowerCase();
+      if (ct.includes('email')) return 'email';
+      if (ct.includes('task') || ct.includes('todo') || ct.includes('agenda')) return 'task';
+      if (ct.includes('calendar') || ct.includes('event')) return 'calendar';
       if (ct.includes('weather')) return 'weather';
       if (ct.includes('youtube') || ct.includes('video')) return 'youtube';
       if (ct.includes('recipe') || ct.includes('cook')) return 'recipe';
-      if (ct.includes('transaction') || ct.includes('finance') || ct.includes('bank')) return 'transaction';
-      if (ct.includes('spotify') || ct.includes('music') || ct.includes('playlist')) return 'spotify';
+      if (ct.includes('transaction') || ct.includes('finance') || ct.includes('bank') || ct.includes('debt') || ct.includes('balance') || ct.includes('goal')) return 'transaction';
+      if (ct.includes('spotify') || ct.includes('music') || ct.includes('playlist') || ct.includes('track')) return 'spotify';
+      if (ct.includes('briefing')) return 'briefing';
+      if (ct.includes('research') || ct.includes('scrape') || ct.includes('crawl')) return 'research';
+      if (ct.includes('github') || ct.includes('issue') || ct.includes('commit') || ct.includes('repo')) return 'github';
+      if (ct.includes('system') || ct.includes('device') || ct.includes('process') || ct.includes('volume') || ct.includes('battery')) return 'system_status';
       if (ct.includes('tool')) return 'tool_call';
     }
     if (intent) {

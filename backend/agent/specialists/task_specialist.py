@@ -14,6 +14,7 @@ import asyncio
 import datetime
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from backend.agent.specialists.base import BaseSpecialist, SpecialistResult
@@ -360,6 +361,25 @@ class TaskSpecialist(BaseSpecialist):
                 },
             },
             {
+                "name": "update_task",
+                "description": "Renames, updates, or reschedules an existing task, reminder, or calendar event by title, time anchor (e.g. '9 o'clock event'), or ID.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Title or time identifier of the existing task or event (e.g. '9 o'clock event', 'Event', 'Attend the 8 o'clock')."},
+                        "task_id": {"type": "string", "description": "Optional unique ID if known."},
+                        "new_title": {"type": "string", "description": "New title or summary for the task/event (e.g. 'AWS Workshop')."},
+                        "new_time": {"type": "string", "description": "Optional new time or date if rescheduling (e.g. '10:00 AM', 'tomorrow at 3pm'). Leave empty if only renaming."},
+                        "priority": {
+                            "type": "string",
+                            "enum": ["low", "normal", "high"],
+                            "description": "Optional updated priority.",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
                 "name": "clear_reminders",
                 "description": "Deletes or clears all active reminders and their synced calendar entries.",
                 "parameters": {"type": "object", "properties": {}},
@@ -386,6 +406,19 @@ class TaskSpecialist(BaseSpecialist):
                         "limit": {"type": "integer", "description": "Maximum number of notifications to return (default: 5)"},
                         "unread_only": {"type": "boolean", "description": "Whether to return unread alerts only (default: false)"},
                         "app": {"type": "string", "description": "Optional app name or package filter (e.g. 'whatsapp', 'slack', 'gmail')"},
+                    },
+                },
+            },
+            {
+                "name": "search_mobile_notifications",
+                "description": "Searches stored mobile notifications (WhatsApp, Telegram, Slack, SMS, Gmail) by sender/contact name, app, or keyword content.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Keyword, topic, or question to search for in notification content."},
+                        "sender": {"type": "string", "description": "Sender, contact, or group name (e.g. 'Tia Shah', 'Mom')."},
+                        "app": {"type": "string", "description": "Optional app name or package filter (e.g. 'whatsapp', 'slack', 'gmail')."},
+                        "limit": {"type": "integer", "description": "Maximum number of notifications to return (default: 5)."},
                     },
                 },
             },
@@ -478,12 +511,13 @@ class TaskSpecialist(BaseSpecialist):
                 # If the title clearly requests a reminder with a time anchor, or is classified as reminder, delegate to set_reminder!
                 action_type = classify_action_type(title)
                 extracted_time = extract_time_phrase(title)
+                time_param = params.get("time") or params.get("start_time") or extracted_time
 
-                if action_type == "reminder" or (action_type == "event" and extracted_time):
+                if action_type == "reminder" or (action_type == "event" and time_param):
                     norm_title = normalize_title(title)
-                    time_found = str(params.get("time") or extracted_time or "today").strip()
+                    time_found = str(time_param or "today").strip()
                     if action_type == "event":
-                        return await self.execute("schedule_event", {"summary": norm_title, "time": time_found})
+                        return await self.execute("schedule_event", {"summary": norm_title, "start_time": time_found})
                     return await self.execute("set_reminder", {"reminder": norm_title, "time": time_found, "priority": params.get("priority")})
 
                 # Clean conversational noise and trailing dates
@@ -496,25 +530,60 @@ class TaskSpecialist(BaseSpecialist):
                 elif "low" in p_str:
                     priority = PriorityLevel.LOW
 
+                # Check if a time parameter is present to set deadline
+                parsed_deadline: Optional[datetime.datetime] = None
+                if time_param and str(time_param).lower() not in ("today", "none", ""):
+                    try:
+                        s_dt, _ = self.calendar._parse_event_time(str(time_param))
+                        parsed_deadline = s_dt
+                    except Exception as te:
+                        logger.debug(f"[Tasks] Could not parse task time '{time_param}': {te}")
+
                 # Instant creation in Supabase (<30ms)
                 task_obj = self.repo.create(
                     TaskCreate(
                         title=title,
                         priority=priority,
-                        metadata={"item_type": "task"},
+                        deadline=parsed_deadline,
+                        metadata={
+                            "item_type": "task",
+                            "time_str": str(time_param) if time_param else None,
+                        },
                     )
                 )
+
+                # Auto-sync task to Google Calendar
+                try:
+                    cal_res = await self.calendar.sync_task_event(
+                        task_id=task_obj.id,
+                        title=task_obj.title,
+                        deadline=task_obj.deadline,
+                        done=task_obj.done,
+                        priority=task_obj.priority.value if hasattr(task_obj.priority, "value") else str(task_obj.priority),
+                        is_reminder=False,
+                    )
+                    if cal_res.get("id"):
+                        new_meta = dict(task_obj.metadata or {})
+                        new_meta["calendar_event_id"] = cal_res["id"]
+                        new_meta["synced_to_calendar"] = True
+                        self.repo.update(task_obj.id, {"metadata": new_meta})
+                except Exception as ce:
+                    logger.warning(f"[TaskSpecialist] Calendar auto-sync failed for task {task_obj.id}: {ce}")
 
                 # Fire Async AI Triage in background
                 asyncio.create_task(
                     self.triage_worker.triage_task_in_background(task_obj.id, task_obj.title)
                 )
 
+                time_note = ""
+                if parsed_deadline:
+                    time_note = f" for {self._format_spoken_datetime(parsed_deadline.isoformat())}"
+
                 return SpecialistResult(
                     success=True,
                     action=action,
-                    data={"task_id": task_obj.id, "title": task_obj.title, "priority": task_obj.priority},
-                    speech_summary=f"Added '{task_obj.title}' to your task list, sir.",
+                    data={"task_id": task_obj.id, "title": task_obj.title, "priority": task_obj.priority, "deadline": str(parsed_deadline)},
+                    speech_summary=f"Added '{task_obj.title}'{time_note} to your task list, sir.",
                     card_payload={
                         "type": "task_created",
                         "title": task_obj.title,
@@ -545,12 +614,33 @@ class TaskSpecialist(BaseSpecialist):
                     location=location,
                 )
 
+                # Persist in local repo as event so it can be updated or deleted seamlessly
+                parsed_deadline: Optional[datetime.datetime] = None
+                try:
+                    s_dt, _ = self.calendar._parse_event_time(start_time, end_time)
+                    parsed_deadline = s_dt
+                except Exception:
+                    pass
+
+                task_obj = self.repo.create(
+                    TaskCreate(
+                        title=summary,
+                        priority=PriorityLevel.NORMAL,
+                        deadline=parsed_deadline,
+                        metadata={
+                            "item_type": "event",
+                            "start_time_str": start_time,
+                            "calendar_event_id": cal_event.get("id"),
+                        },
+                    )
+                )
+
                 time_display = self._format_spoken_datetime(cal_event.get("start")) or start_time
                 speech = f"Scheduled '{summary}' {time_display} on your Google Calendar, sir."
                 return SpecialistResult(
                     success=True,
                     action="schedule_event",
-                    data=cal_event,
+                    data={**cal_event, "task_id": task_obj.id},
                     speech_summary=speech,
                     card_payload={"type": "calendar_event_card", "event": cal_event},
                 )
@@ -685,28 +775,79 @@ class TaskSpecialist(BaseSpecialist):
             # ── 7. Complete Task ──────────────────────────────────────────────
             elif act in ["complete_task", "mark_done", "complete", "finish_task"]:
                 task_id = str(params.get("task_id") or params.get("id") or "").strip()
-                success = self.repo.mark_done(task_id, done=True)
-                if success:
+                target = self.repo.get(task_id) if task_id else None
+                if not target:
+                    title_query = str(params.get("title") or params.get("query") or params.get("task") or "").lower().strip()
+                    if title_query:
+                        tasks = self.repo.list(include_completed=False, limit=50)
+                        target = next((t for t in tasks if title_query in t.title.lower()), None)
+
+                if target:
+                    self.repo.mark_done(target.id, done=True)
+                    # Update linked Google Calendar event
+                    try:
+                        cal_id = target.metadata.get("calendar_event_id") if target.metadata else None
+                        await self.calendar.sync_task_event(
+                            task_id=target.id,
+                            title=target.title,
+                            deadline=target.deadline,
+                            done=True,
+                            priority=target.priority.value if hasattr(target.priority, "value") else str(target.priority),
+                            is_reminder=(target.metadata.get("item_type") == "reminder" if target.metadata else False),
+                            calendar_event_id=cal_id,
+                        )
+                    except Exception as ce:
+                        logger.warning(f"[TaskSpecialist] Failed to update calendar on task completion: {ce}")
+
                     return SpecialistResult(
                         success=True,
                         action=action,
-                        data={"task_id": task_id, "done": True},
-                        speech_summary="Marked the item as completed, sir.",
-                        card_payload={"type": "task_completed", "id": task_id},
+                        data={"task_id": target.id, "done": True, "title": target.title},
+                        speech_summary=f"Marked '{target.title}' as completed, sir.",
+                        card_payload={"type": "task_completed", "id": target.id, "title": target.title},
                     )
                 return SpecialistResult(success=False, action=action, error=f"Task '{task_id}' not found.")
 
-            # ── 7b. Delete Task / Reminder ────────────────────────────────────
-            elif act in ["delete_task", "remove_task", "delete_reminder", "remove_reminder", "delete"]:
+            # ── 7b. Delete Task / Reminder / Event ────────────────────────────
+            elif act in [
+                "delete_task", "remove_task", "delete_reminder", "remove_reminder",
+                "delete", "delete_event", "remove_event", "cancel_event",
+            ]:
                 task_id = str(params.get("task_id") or params.get("id") or "").strip()
-                title_query = str(params.get("title") or params.get("query") or params.get("reminder") or "").lower().strip()
+                title_query = str(
+                    params.get("title")
+                    or params.get("query")
+                    or params.get("reminder")
+                    or params.get("event")
+                    or params.get("task")
+                    or ""
+                ).lower().strip()
 
                 tasks = self.repo.list(include_completed=True, limit=50)
                 target = None
                 if task_id:
                     target = next((t for t in tasks if t.id == task_id), None)
                 elif title_query:
-                    target = next((t for t in tasks if title_query in t.title.lower()), None)
+                    # 1. Title keyword matching
+                    q_kw = re.sub(r"\b(the|event|task|meeting|reminder)\b", "", title_query).strip()
+                    for t in tasks:
+                        t_lower = t.title.lower()
+                        if title_query in t_lower or t_lower in title_query or (q_kw and q_kw in t_lower):
+                            target = t
+                            break
+
+                    # 2. Time-based matching if query contains time (e.g. "8 o'clock")
+                    if not target:
+                        m_time = re.search(r"(\d{1,2})", title_query)
+                        if m_time:
+                            hour_val = int(m_time.group(1))
+                            for t in tasks:
+                                if t.deadline and getattr(t.deadline, "hour", None) in (hour_val, (hour_val + 12) % 24):
+                                    target = t
+                                    break
+                                elif f"{hour_val}" in t.title.lower() or (t.metadata and f"{hour_val}" in str(t.metadata.get("time_str", ""))):
+                                    target = t
+                                    break
 
                 if target:
                     # Clean up linked calendar event if exists
@@ -721,9 +862,206 @@ class TaskSpecialist(BaseSpecialist):
                         speech_summary=f"Deleted '{target.title}', sir.",
                         card_payload={"type": "task_deleted", "id": target.id, "title": target.title},
                     )
+
+                # Fallback: Check Google Calendar events directly
+                if title_query:
+                    cal_events = await self._fetch_calendar_events(max_results=20)
+                    for ev in cal_events:
+                        ev_summary = str(ev.get("summary", "")).lower()
+                        if title_query in ev_summary or ev_summary in title_query:
+                            await self.calendar.delete_event(ev.get("id"))
+                            return SpecialistResult(
+                                success=True,
+                                action=action,
+                                data={"calendar_id": ev.get("id"), "title": ev.get("summary")},
+                                speech_summary=f"Removed '{ev.get('summary')}' from your calendar, sir.",
+                                card_payload={"type": "task_deleted", "title": ev.get("summary")},
+                            )
+                    m_time = re.search(r"(\d{1,2})", title_query)
+                    if m_time:
+                        hour_val = int(m_time.group(1))
+                        for ev in cal_events:
+                            ev_start = str(ev.get("start", "")).lower()
+                            if f"{hour_val}:" in ev_start or f"{hour_val} " in ev_start:
+                                await self.calendar.delete_event(ev.get("id"))
+                                return SpecialistResult(
+                                    success=True,
+                                    action=action,
+                                    data={"calendar_id": ev.get("id"), "title": ev.get("summary")},
+                                    speech_summary=f"Removed '{ev.get('summary')}' from your calendar, sir.",
+                                    card_payload={"type": "task_deleted", "title": ev.get("summary")},
+                                )
+
                 return SpecialistResult(success=False, action=action, error="No matching task found to delete.")
 
-            # ── 7c. Clear All Reminders ───────────────────────────────────────
+            # ── 7c. Update / Rename / Reschedule Task or Event ────────────────
+            elif act in [
+                "update_task", "rename_task", "reschedule_task", "edit_task",
+                "update_event", "rename_event", "reschedule_event", "modify_task",
+            ]:
+                task_id = str(params.get("task_id") or params.get("id") or "").strip()
+                query_str = str(
+                    params.get("query")
+                    or params.get("old_title")
+                    or params.get("event")
+                    or params.get("task")
+                    or ""
+                ).strip()
+                new_title = str(params.get("new_title") or params.get("title") or "").strip()
+                new_time = str(params.get("new_time") or params.get("time") or params.get("start_time") or "").strip()
+
+                if params.get("new_title"):
+                    new_title = str(params["new_title"]).strip()
+                elif query_str and not new_title:
+                    m_to = re.search(r"\bto\s+([A-Za-z0-9\s]+)$", query_str, re.IGNORECASE)
+                    if m_to:
+                        new_title = m_to.group(1).strip()
+                        query_str = query_str[:m_to.start()].strip()
+
+                if new_title:
+                    new_title = normalize_title(new_title)
+
+                target = None
+                tasks = self.repo.list(include_completed=False, limit=50)
+
+                # 1. Match by ID
+                if task_id:
+                    target = next((t for t in tasks if t.id == task_id), None)
+
+                # 2. Match by title or time in Supabase repo
+                if not target and query_str:
+                    q_clean = query_str.lower()
+                    q_kw = re.sub(r"\b(the|event|task|meeting|reminder)\b", "", q_clean).strip()
+                    for t in tasks:
+                        t_title = t.title.lower()
+                        if q_clean in t_title or (q_kw and q_kw in t_title):
+                            target = t
+                            break
+
+                    if not target:
+                        m_hour = re.search(r"(\d{1,2})", q_clean)
+                        if m_hour:
+                            target_hour = int(m_hour.group(1))
+                            for t in tasks:
+                                if t.deadline:
+                                    h = getattr(t.deadline, "hour", None)
+                                    if h in (target_hour, (target_hour + 12) % 24):
+                                        target = t
+                                        break
+                                elif f"{target_hour}" in t.title.lower() or (t.metadata and f"{target_hour}" in str(t.metadata.get("time_str", ""))):
+                                    target = t
+                                    break
+
+                if target:
+                    updates: Dict[str, Any] = {}
+                    updated_title = target.title
+                    if new_title:
+                        updated_title = new_title
+                        updates["title"] = updated_title
+
+                    # Resolve deadline
+                    deadline_to_sync = target.deadline
+                    if new_time:
+                        try:
+                            s_dt, _ = self.calendar._parse_event_time(new_time)
+                            deadline_to_sync = s_dt
+                            updates["deadline"] = s_dt
+                        except Exception as te:
+                            logger.debug(f"[Tasks] Could not parse new time '{new_time}': {te}")
+                    elif deadline_to_sync is None and query_str:
+                        # Auto-heal: If deadline was missing, parse time from query (e.g. "9 o'clock")
+                        m_hour = re.search(r"(\d{1,2})\s*(?:o'?clock|am|pm)?", query_str.lower())
+                        if m_hour:
+                            try:
+                                s_dt, _ = self.calendar._parse_event_time(m_hour.group(0))
+                                deadline_to_sync = s_dt
+                                updates["deadline"] = s_dt
+                            except Exception:
+                                pass
+
+                    if updates:
+                        self.repo.update(target.id, updates)
+
+                    # Update on Google Calendar
+                    cal_id = target.metadata.get("calendar_event_id") if target.metadata else None
+                    try:
+                        cal_res = await self.calendar.sync_task_event(
+                            task_id=target.id,
+                            title=updated_title,
+                            deadline=deadline_to_sync,
+                            done=target.done,
+                            priority=target.priority.value if hasattr(target.priority, "value") else str(target.priority),
+                            is_reminder=(target.metadata.get("item_type") == "reminder" if target.metadata else False),
+                            calendar_event_id=cal_id,
+                        )
+                        if cal_res.get("id") and not cal_id:
+                            new_meta = dict(target.metadata or {})
+                            new_meta["calendar_event_id"] = cal_res["id"]
+                            self.repo.update(target.id, {"metadata": new_meta})
+                    except Exception as ce:
+                        logger.warning(f"[Tasks] Calendar sync failed on update: {ce}")
+
+                    spoken_time = self._format_spoken_datetime(deadline_to_sync.isoformat()) if deadline_to_sync else ""
+                    time_phrase = f" scheduled for {spoken_time}" if spoken_time else ""
+                    speech = f"I have updated the entry to '{updated_title}'{time_phrase}, sir."
+                    return SpecialistResult(
+                        success=True,
+                        action="update_task",
+                        data={"task_id": target.id, "title": updated_title, "deadline": str(deadline_to_sync)},
+                        speech_summary=speech,
+                        card_payload={
+                            "type": "task_updated",
+                            "id": target.id,
+                            "title": updated_title,
+                            "time": spoken_time,
+                        },
+                    )
+
+                # 3. Check Google Calendar events if not in local repo
+                if not target and query_str:
+                    cal_events = await self._fetch_calendar_events(max_results=20)
+                    matched_event = None
+                    q_clean = query_str.lower()
+                    for ev in cal_events:
+                        ev_summary = str(ev.get("summary", "")).lower()
+                        if q_clean in ev_summary or ev_summary in q_clean:
+                            matched_event = ev
+                            break
+                    if not matched_event:
+                        m_hour = re.search(r"(\d{1,2})", q_clean)
+                        if m_hour:
+                            target_h = int(m_hour.group(1))
+                            for ev in cal_events:
+                                ev_start = str(ev.get("start", "")).lower()
+                                if f"{target_h}:" in ev_start or f"{target_h} " in ev_start:
+                                    matched_event = ev
+                                    break
+
+                    if matched_event:
+                        ev_id = matched_event.get("id")
+                        updated_title = new_title or matched_event.get("summary", "Event")
+                        await self.calendar.update_event(
+                            event_id=ev_id,
+                            summary=updated_title,
+                            start_time_str=new_time if new_time else None,
+                        )
+                        time_display = self._format_spoken_datetime(matched_event.get("start"))
+                        speech = f"I have updated the calendar event to '{updated_title}' ({time_display}), sir."
+                        return SpecialistResult(
+                            success=True,
+                            action="update_task",
+                            data={"event_id": ev_id, "title": updated_title},
+                            speech_summary=speech,
+                            card_payload={"type": "calendar_event_updated", "id": ev_id, "title": updated_title},
+                        )
+
+                return SpecialistResult(
+                    success=False,
+                    action=action,
+                    error=f"Could not find any existing task or event matching '{query_str}' to update.",
+                )
+
+            # ── 7d. Clear All Reminders ───────────────────────────────────────
             elif act in ["clear_reminders", "delete_all_reminders", "clear_all_reminders", "delete_reminders"]:
                 tasks = self.repo.list(include_completed=True, limit=100)
                 reminders = [
@@ -776,7 +1114,7 @@ class TaskSpecialist(BaseSpecialist):
                 is_sandbox = any(e.get("source") == "sandbox" for e in events)
 
                 reminders = [t for t in all_pending if (t.metadata and t.metadata.get("item_type") == "reminder")]
-                pure_tasks = [t for t in all_pending if not (t.metadata and t.metadata.get("item_type") == "reminder")]
+                pure_tasks = [t for t in all_pending if not (t.metadata and t.metadata.get("item_type") in ("reminder", "event"))]
 
                 today_tasks = [
                     t for t in pure_tasks
@@ -865,8 +1203,10 @@ class TaskSpecialist(BaseSpecialist):
                     },
                 )
 
-            # ── 8. List Mobile Notifications ──────────────────────────────────
+            # ── 8. List or Search Mobile Notifications ────────────────────────
             elif act in [
+                "search_mobile_notifications",
+                "search_notifications",
                 "list_mobile_notifications",
                 "get_mobile_notifications",
                 "check_notifications",
@@ -877,63 +1217,150 @@ class TaskSpecialist(BaseSpecialist):
                 limit = int(params.get("limit") or 5)
                 unread_only = bool(params.get("unread_only", False))
                 app_filter = params.get("app") or params.get("app_filter")
+                search_query = str(params.get("query") or params.get("text") or "").strip()
+                sender_query = str(params.get("sender") or params.get("contact") or params.get("from") or "").strip()
+
+                is_search = act in ("search_mobile_notifications", "search_notifications") or bool(search_query) or bool(sender_query)
 
                 raw_notifications = []
                 unread_count = 0
 
-                if self.notif_service is not None:
-                    local_notifs = self.notif_service.get_recent_notifications(
+                service = self.notif_service
+                if service is None:
+                    from backend.sync.notification_service import notification_service
+                    service = notification_service
+
+                content_query = search_query
+                # If query is asking whether user's name is in the notification, do not require the phrase 'my name' in the notification text
+                if any(phrase in search_query.lower() for phrase in ("my name", "is my name", "check if there is my name", "is my name in")):
+                    content_query = re.sub(r"\b(can\s+you\s+)?(check\s+if\s+there\s+is\s+my\s+name|is\s+my\s+name\s+in(\s+the\s+notification)?|my\s+name(\s+in)?)\b", "", search_query, flags=re.IGNORECASE).strip()
+
+                if is_search:
+                    local_notifs = service.search_notifications(
+                        query=content_query if content_query else None,
+                        sender_filter=sender_query,
+                        app_filter=app_filter,
+                        limit=limit,
+                    )
+                    raw_notifications = [n.to_dict() for n in local_notifs]
+                    unread_count = service.get_unread_count()
+                else:
+                    local_notifs = service.get_recent_notifications(
                         limit=limit,
                         unread_only=unread_only,
                         app_filter=app_filter,
                     )
                     raw_notifications = [n.to_dict() for n in local_notifs]
-                    unread_count = self.notif_service.get_unread_count()
-                else:
-                    # 1. First attempt: Query live Gateway REST API across cluster
-                    gateway_url = os.getenv("GATEWAY_URL", "http://127.0.0.1:8000")
-                    try:
-                        import httpx
-                        async with httpx.AsyncClient(timeout=1.5) as client:
-                            resp = await client.get(
-                                f"{gateway_url}/api/notifications",
-                                params={"limit": limit, "unread_only": unread_only, "app_filter": app_filter},
-                            )
-                            if resp.status_code == 200:
-                                data = resp.json()
-                                raw_notifications = data.get("notifications", [])
-                                unread_count = data.get("unread_count", len(raw_notifications))
-                    except Exception as net_err:
-                        logger.debug(f"[Tasks] Direct Gateway query notice: {net_err}; checking local store.")
+                    unread_count = service.get_unread_count()
 
-                    # 2. Fallback: Query local in-memory notification service
-                    if not raw_notifications:
-                        from backend.sync.notification_service import notification_service
-                        local_notifs = notification_service.get_recent_notifications(
-                            limit=limit,
-                            unread_only=unread_only,
-                            app_filter=app_filter,
-                        )
-                        raw_notifications = [n.to_dict() for n in local_notifs]
-                        unread_count = notification_service.get_unread_count()
-
-                # 3. Cross-reference unread emails for complete communication situational awareness
+                # 3. Cross-reference unread emails for complete communication situational awareness (only when listing general notifications)
                 email_brief = ""
                 unread_email_count = 0
-                try:
-                    from backend.agent.specialists.email_specialist import EmailSpecialist
-                    email_spec = EmailSpecialist()
-                    email_res = await email_spec.list_unread_emails(max_results=3)
-                    if email_res.success and email_res.data:
-                        unread_email_count = int(email_res.data.get("count", 0))
-                        email_list = email_res.data.get("emails", [])
-                        if unread_email_count > 0:
-                            senders = ", ".join([str(it.get("sender", "")).split("<")[0].strip() for it in email_list[:2] if it.get("sender")])
-                            email_brief = f" Additionally, you have {unread_email_count} unread emails in your inbox, notably from {senders}."
-                except Exception as em_err:
-                    logger.debug(f"[Tasks] Email cross-reference notice: {em_err}")
+                if not is_search:
+                    try:
+                        from backend.agent.specialists.email_specialist import EmailSpecialist
+                        email_spec = EmailSpecialist()
+                        email_res = await email_spec.list_unread_emails(max_results=3)
+                        if email_res.success and email_res.data:
+                            unread_email_count = int(email_res.data.get("count", 0))
+                            email_list = email_res.data.get("emails", [])
+                            if unread_email_count > 0:
+                                senders = ", ".join([str(it.get("sender", "")).split("<")[0].strip() for it in email_list[:2] if it.get("sender")])
+                                email_brief = f" Additionally, you have {unread_email_count} unread emails in your inbox, notably from {senders}."
+                    except Exception as em_err:
+                        logger.debug(f"[Tasks] Email cross-reference notice: {em_err}")
 
                 # 4. Synthesize British butler speech summary
+                if is_search:
+                    if not raw_notifications:
+                        target = sender_query or search_query or "your query"
+                        speech = (
+                            f"Sir, I checked the notifications forwarded from your mobile companion for '{target}', "
+                            "but found no matching alert. Please note that I only have access to notification banners received while your "
+                            "phone was connected, and do not have access to your full WhatsApp chat history or database."
+                        )
+                        return SpecialistResult(
+                            success=True,
+                            action=action,
+                            speech_summary=speech,
+                            data={
+                                "notifications": [],
+                                "found": False,
+                                "note": "Only pushed notifications from the mobile companion app are stored.",
+                            },
+                            card_payload={
+                                "type": "NOTIFICATION_DIGEST",
+                                "title": "Mobile Notification Search",
+                                "count": 0,
+                                "items": [],
+                                "note": "No matching notification found in local store.",
+                            },
+                        )
+
+                    # Determine if user is asking if their name appears
+                    user_name = "Mihir Patil"
+                    try:
+                        from backend.agent.fast_path import _CACHED_USER_PROFILE
+                        user_name = _CACHED_USER_PROFILE.get("name", "Mihir")
+                    except Exception:
+                        pass
+
+                    first_name = user_name.split()[0].lower()
+                    full_name_lower = user_name.lower()
+                    check_name = any(w in search_query.lower() for w in ("my name", "name", "shortlist", "listed")) or any(w in str(params).lower() for w in ("my name", "name"))
+
+                    if check_name:
+                        name_found = any(
+                            (first_name in n.get("text", "").lower() or full_name_lower in n.get("text", "").lower() or
+                             first_name in n.get("title", "").lower() or full_name_lower in n.get("title", "").lower())
+                            for n in raw_notifications
+                        )
+                        matched_title = raw_notifications[0].get("title") or raw_notifications[0].get("app_name", "the message")
+                        clean_title = matched_title.split(":")[0].strip()
+                        if name_found:
+                            speech = f"Yes, sir. I examined the notification regarding {clean_title}, and your name ({user_name}) is present."
+                        else:
+                            speech = f"I examined the notification regarding {clean_title}, sir, but your name ({user_name}) does not appear in the message text."
+
+                        return SpecialistResult(
+                            success=True,
+                            action=action,
+                            speech_summary=speech,
+                            data={
+                                "notifications": raw_notifications,
+                                "name_found": name_found,
+                                "checked_name": user_name,
+                                "matched_count": len(raw_notifications),
+                            },
+                            card_payload={
+                                "type": "NOTIFICATION_DIGEST",
+                                "title": f"Notification Search: {sender_query or search_query}",
+                                "count": len(raw_notifications),
+                                "items": raw_notifications,
+                            },
+                        )
+
+                    top_n = raw_notifications[0]
+                    speech = (
+                        f"I found a notification from {top_n.get('app_name', 'Mobile')} regarding '{top_n.get('title', '')}', sir: "
+                        f"\"{top_n.get('text', '')[:120]}\"."
+                    )
+                    return SpecialistResult(
+                        success=True,
+                        action=action,
+                        speech_summary=speech,
+                        data={
+                            "notifications": raw_notifications,
+                            "matched_count": len(raw_notifications),
+                        },
+                        card_payload={
+                            "type": "NOTIFICATION_DIGEST",
+                            "title": f"Notification Match: {sender_query or search_query}",
+                            "count": len(raw_notifications),
+                            "items": raw_notifications,
+                        },
+                    )
+
                 if not raw_notifications:
                     if unread_email_count > 0:
                         speech = f"You have no pending mobile notifications at present, sir.{email_brief}"

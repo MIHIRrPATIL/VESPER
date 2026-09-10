@@ -12,9 +12,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.gateway.connection_manager import ConnectionManager
 from backend.gateway.router import MessageRouter
 from backend.gateway.routes.camera import router as camera_router
+from backend.gateway.routes.finance import router as finance_router
 from backend.gateway.routes.health import router as health_router
+from backend.gateway.routes.media import router as media_router
 from backend.gateway.routes.notifications import router as notifications_router
 from backend.gateway.routes.sync import router as sync_router
+from backend.gateway.routes.tasks import router as tasks_router
 from backend.gateway.routes.ws import router as ws_router
 from backend.gateway.task_registry import TaskRegistry
 from backend.shared.config import ENVIRONMENT, LOG_LEVEL
@@ -66,14 +69,44 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from backend.sync.sync_manager import sync_manager
     sync_manager.add_listener(proactive_agent.on_state_change)
 
-    # Synchronize initial cluster master volume to match workstation hardware volume
+    # Register host workstation in SyncManager
     try:
-        from backend.vision.gesture_service import _get_system_volume
-        initial_vol = _get_system_volume()
-        sync_manager.state.master_volume = initial_vol
-        logger.info(f"[GATEWAY] Synchronized initial master volume to hardware level: {initial_vol}%")
-    except Exception as vol_err:
-        logger.debug(f"[GATEWAY] Could not read hardware volume on startup: {vol_err}")
+        from backend.vision.device_probe import DeviceProbe
+        from backend.sync.models import DeviceRegistration
+        # Check battery sensors on host machine
+        batt = None
+        try:
+            import psutil
+            batt = psutil.sensors_battery()
+        except Exception:
+            pass
+
+        host_reg = DeviceRegistration(
+            device_id="vesper-host-workstation",
+            device_type="desktop",
+            device_name=f"VESPER Host ({caps.hostname or 'Desktop'})",
+            hostname=caps.hostname,
+            os_name=caps.os_name,
+            architecture=caps.architecture,
+            is_headless=caps.is_headless,
+            has_camera=caps.has_camera,
+            has_display=caps.has_display,
+            has_microphone=caps.has_microphone,
+            has_speaker=True,
+            cpu_cores=caps.cpu_cores_logical,
+            cpu_usage_pct=caps.cpu_usage_pct,
+            battery_level=round(batt.percent) if batt else None,
+            is_charging=batt.power_plugged if batt else False,
+            ram_total_gb=caps.ram_total_gb,
+            ram_available_gb=caps.ram_available_gb,
+            ip_address=caps.ip_address or "127.0.0.1",
+            registered_at=time.time(),
+            last_heartbeat=time.time(),
+            is_online=True,
+        )
+        await sync_manager.register_device(host_reg)
+    except Exception as host_err:
+        logger.warning(f"[GATEWAY] Could not register host workstation: {host_err}")
 
     logger.info("[GATEWAY] Online and ready for WebSocket / REST connections.")
 
@@ -114,6 +147,9 @@ def create_app() -> FastAPI:
     app.include_router(sync_router)
     app.include_router(camera_router)
     app.include_router(notifications_router)
+    app.include_router(tasks_router)
+    app.include_router(media_router)
+    app.include_router(finance_router)
 
     @app.get("/briefing")
     @app.get("/notifications/briefing")

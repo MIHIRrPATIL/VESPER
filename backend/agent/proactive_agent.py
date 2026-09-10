@@ -147,18 +147,41 @@ class ProactiveAgent:
 
     async def _weather_broadcast(self, event_type: str, payload: dict) -> None:
         """Routes weather sentry alerts to the Gateway broadcast."""
-        speech = payload.get("speech", "")
+        speech = (payload.get("speech") or "").strip()
+        now = time.time()
+
+        # Suppress duplicate weather alerts with identical speech within 2 hours
+        last_speech = getattr(self, "_last_weather_alert_speech", None)
+        last_time = getattr(self, "_last_weather_alert_time", 0.0)
+        if speech and speech == last_speech and (now - last_time) < 7200:
+            logger.info(f"[ProactiveAgent] Dropped duplicate weather alert broadcast: {speech[:60]}...")
+            return
+
         if speech and self._broadcast_callback:
+            self._last_weather_alert_speech = speech
+            self._last_weather_alert_time = now
             try:
-                await self._broadcast_callback(
-                    event_type="PROACTIVE_ALERT",
+                from backend.shared.events import Channel, EventType, ServerEnvelope
+                envelope = ServerEnvelope(
+                    uuid=f"proactive_weather_{int(time.time())}",
+                    channel=Channel.NOTIFY,
+                    type=EventType.NOTIFICATION_DIGEST,
                     payload={
+                        "source_client": "weather_sentry",
+                        "device_name": "Weather Sentinel",
+                        "notification": {
+                            "app_name": "Weather Sentinel",
+                            "title": "Weather Advisory",
+                            "text": speech,
+                            "priority": NotificationPriority.HIGH,
+                        },
                         "alert_type": event_type,
                         "speech": speech,
                         "weather": payload.get("weather") or payload.get("result"),
-                        "source": "weather_sentry",
+                        "proactive": True,
                     },
                 )
+                await self._broadcast_callback(envelope)
             except Exception as e:
                 logger.warning(f"[ProactiveAgent] Weather broadcast failed: {e}")
 
@@ -342,6 +365,13 @@ class ProactiveAgent:
             NotificationPriority.URGENT,
             NotificationPriority.HIGH,
         ):
+            # Enforce group message filter: only proceed if user name is mentioned
+            if notification_evaluator._is_group_notification(notif) and not notification_evaluator._mentions_user(notif.text):
+                logger.info(
+                    f"[ProactiveAgent] Group notification '{notif.title}' does not mention user ('Mihir'); skipping VIP triage."
+                )
+                return
+
             logger.info(
                 f"[ProactiveAgent] Performing VIP LLM triage for {notif.app_name}: "
                 f"'{notif.title}' - '{notif.text[:60]}'"
@@ -375,7 +405,7 @@ class ProactiveAgent:
                 logger.warning(f"[ProactiveAgent] VIP LLM triage failed: {e}")
 
     async def _triage_with_llm(self, notif: MobileNotification) -> Optional[str]:
-        """Uses a structured JSON LLM call to extract actionable tasks while suppressing banter."""
+        """Uses a structured JSON LLM call to extract actionable tasks while suppressing banter and low-priority chatter."""
         try:
             from backend.agent.llm import LLMClient
 
@@ -386,12 +416,14 @@ class ProactiveAgent:
                 f"  App: {notif.app_name}\n"
                 f"  Sender: {notif.title}\n"
                 f"  Message: {notif.text}\n\n"
-                f"Determine whether this message clearly requires a specific task or follow-up action. "
+                f"Determine whether this message clearly contains an IMPORTANT, concrete task or follow-up action required of the user.\n"
                 f"Suppress casual personal banter, greetings, simple confirmations (e.g. 'ok', 'yes my love', 'relax'), "
+                f"social talk, jokes, rhetorical questions, low-priority check-ins, "
                 f"advertisements, promotional offers, expiring credits/points, or automated marketing chatter.\n\n"
                 f"You MUST return a JSON object with this exact schema:\n"
                 f"{{\n"
                 f'  "actionable": true | false,\n'
+                f'  "importance": "high" | "normal" | "low",\n'
                 f'  "task": "Concise task description under 10 words" | "",\n'
                 f'  "reason": "Brief justification"\n'
                 f"}}"
@@ -404,6 +436,8 @@ class ProactiveAgent:
 
             result, _ = await llm.generate_json(messages, temperature=0.1)
             if isinstance(result, dict) and result.get("actionable"):
+                if str(result.get("importance", "")).lower() == "low":
+                    return None
                 task = str(result.get("task", "")).strip()
                 if task and "no_action" not in task.lower():
                     return task
@@ -414,6 +448,7 @@ class ProactiveAgent:
             if notif.priority == NotificationPriority.URGENT:
                 return f"Review {notif.app_name} alert: {notif.title}"
             return None
+
 
     # ── 5. Broadcast Helpers ──────────────────────────────────────────────────
 
@@ -506,8 +541,8 @@ class ProactiveAgent:
             if dev and dev.battery_level is not None:
                 await self._evaluate_single_device(dev)
 
-        # Desk return detection: if desktop node transitions to active
-        if "active_devices" in diff or "device_registered" in diff:
+        # Desk return detection: ONLY on explicit presence return events
+        if diff.get("user_returned_to_desk") or diff.get("presence_state") == "RETURN_WAKE":
             await self._check_desk_return_review()
 
     async def _evaluate_single_device(self, dev: DeviceRegistration) -> None:
@@ -528,28 +563,47 @@ class ProactiveAgent:
             await self._emit_battery_alert(dev, dynamic_threshold, upcoming_events)
             self._battery_reminders[dev.device_id] = now
 
-    async def _check_desk_return_review(self) -> None:
+    async def trigger_desk_return_review(self, force: bool = False) -> None:
+        """Explicit entry point to evaluate staged actions upon camera/sentry desk return."""
+        await self._check_desk_return_review(force=force)
+
+    async def _check_desk_return_review(self, force: bool = False) -> None:
         """Surfaces pending unreviewed staged actions when the user returns to their desk."""
         now = time.time()
         last_time = getattr(self, "_last_desk_return_review_time", 0.0)
         cooldown = getattr(self, "_desk_return_cooldown_sec", 1800.0)
-        if (now - last_time) < cooldown:
+        if not force and (now - last_time) < cooldown:
             return
 
         pending = action_queue.get_unreviewed_actions_for_return()
         if not pending:
             return
 
-        # Mark all pending items so they do not trigger repeatedly on subsequent heartbeats
+        # Mark pending items so they do not re-trigger briefings repeatedly, but remain
+        # active in session context and UI until explicitly resolved.
         for a in pending:
             a.status = "reviewed_at_desk"
 
         self._last_desk_return_review_time = now
         count = len(pending)
-        speech = (
-            f"Welcome back to your desk, sir. You have {count} pending matter{'s' if count != 1 else ''} "
-            f"staged for your review while you were away."
-        )
+        if count == 1:
+            item = pending[0]
+            item_desc = item.verbatim_text or item.speech_prompt or item.action
+            speech = (
+                f"Welcome back to your desk, sir. You have 1 pending matter: '{item_desc}'. "
+                "Shall I proceed?"
+            )
+            action_queue._last_prompted_action_id = item.id
+            action_queue._last_prompt_time = now
+        else:
+            items_preview = ", ".join([f"'{a.verbatim_text or a.action}'" for a in pending[:2]])
+            speech = (
+                f"Welcome back to your desk, sir. You have {count} pending matters staged for your review, "
+                f"including {items_preview}. Shall I walk you through them?"
+            )
+            action_queue._last_prompted_action_id = pending[0].id
+            action_queue._last_prompt_time = now
+
         logger.info(f"[ProactiveAgent] Desk return review triggered: {count} unreviewed actions pending")
 
         await self._broadcast_hud_voice(

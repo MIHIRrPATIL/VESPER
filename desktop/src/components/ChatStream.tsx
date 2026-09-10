@@ -1,6 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
-  ChevronDown,
   CheckSquare,
   Check,
   Network,
@@ -18,7 +17,7 @@ import {
   Mic,
   Layers,
 } from 'lucide-react';
-import { useMotionValue, animate } from 'motion/react';
+import { motion, AnimatePresence, useMotionValue, animate } from 'motion/react';
 import { ConversationMessage, AgentState, ApiTask } from '../types/vesper';
 import { BentoGrid, BentoCard } from './ui/bento-grid';
 import { DynamicGreeting } from './DynamicGreeting';
@@ -34,8 +33,6 @@ interface ChatStreamProps {
   agentState: AgentState;
   intent?: string;
   activeHeadline?: string;
-  isLogExpanded?: boolean;
-  onToggleLog?: () => void;
   onSimulateWakeWord: () => void;
   onSendUserMessage?: (text: string) => void;
 }
@@ -45,24 +42,22 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
   agentState,
   intent: _intent,
   activeHeadline: _activeHeadline = 'What can I help you shape today?',
-  isLogExpanded: controlledLogExpanded,
-  onToggleLog: controlledToggleLog,
   onSimulateWakeWord: _onSimulateWakeWord,
   onSendUserMessage,
 }) => {
-  const [internalLogExpanded, setInternalLogExpanded] = useState(false);
   const [taskTab, setTaskTab] = useState<'today' | 'overdue' | 'all' | 'completed'>('today');
   const [tasks, setTasks] = useState<ApiTask[]>(taskService.getTasks('today'));
   const [taskStats, setTaskStats] = useState(taskService.getStats());
   const [devices, setDevices] = useState(deviceService.getDevices());
   const [calendarEvents, setCalendarEvents] = useState(deviceService.getEvents());
   const [recentActivities, setRecentActivities] = useState<string[]>(deviceService.getRecentActivities());
-  
-  // TTS Speech Synchronization
+
+  // TTS Speech Synchronization & 10-Second Auto-Dismiss Lifecycle
   const speechProgress = useMotionValue(1);
   const [activeSpokenText, setActiveSpokenText] = useState<string>('');
   const [showSpokenSurface, setShowSpokenSurface] = useState<boolean>(false);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSpokenMsgIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const unsubTasks = taskService.subscribe(() => {
@@ -77,18 +72,35 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
     return () => {
       unsubTasks();
       unsubDevices();
+      if (dismissTimerRef.current) {
+        clearTimeout(dismissTimerRef.current);
+        dismissTimerRef.current = null;
+      }
     };
   }, [taskTab]);
 
-  // Synchronize TextReveal with TTS speech
+  // Synchronize TextReveal with TTS speech and auto-dismiss 10s after TTS finishes
   useEffect(() => {
     const latestAgentMsg = [...messages].reverse().find((m) => m.sender === 'agent');
     if (!latestAgentMsg || !latestAgentMsg.text) return;
 
-    setActiveSpokenText(latestAgentMsg.text);
-    setShowSpokenSurface(true);
+    // Detect if this is a newly arrived message
+    if (latestAgentMsg.id !== lastSpokenMsgIdRef.current) {
+      lastSpokenMsgIdRef.current = latestAgentMsg.id;
+      setActiveSpokenText(latestAgentMsg.text);
+      setShowSpokenSurface(true);
+      if (dismissTimerRef.current) {
+        clearTimeout(dismissTimerRef.current);
+        dismissTimerRef.current = null;
+      }
+    }
 
     if (agentState === 'SPEAKING') {
+      if (dismissTimerRef.current) {
+        clearTimeout(dismissTimerRef.current);
+        dismissTimerRef.current = null;
+      }
+      setShowSpokenSurface(true);
       speechProgress.set(0);
 
       const words = latestAgentMsg.text.trim().split(/\s+/).filter(Boolean).length;
@@ -104,8 +116,15 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
       return () => controls.stop();
     } else {
       speechProgress.set(1);
+      // TTS finished (agentState is IDLE) — schedule fade out in 10 seconds
+      if (showSpokenSurface && !dismissTimerRef.current) {
+        dismissTimerRef.current = setTimeout(() => {
+          setShowSpokenSurface(false);
+          dismissTimerRef.current = null;
+        }, 10000);
+      }
     }
-  }, [messages, agentState, speechProgress]);
+  }, [messages, agentState, speechProgress, showSpokenSurface]);
 
   const handleTabChange = (tab: 'today' | 'overdue' | 'all' | 'completed') => {
     setTaskTab(tab);
@@ -115,23 +134,6 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
   const toggleTask = (id: string) => {
     taskService.toggleTask(id);
   };
-
-  const isLogExpanded =
-    controlledLogExpanded !== undefined ? controlledLogExpanded : internalLogExpanded;
-
-  const toggleLog = () => {
-    if (controlledToggleLog) {
-      controlledToggleLog();
-    } else {
-      setInternalLogExpanded(!internalLogExpanded);
-    }
-  };
-
-  useEffect(() => {
-    if (isLogExpanded) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages, isLogExpanded]);
 
   const dispatchCommand = (text: string) => {
     const trimmed = text.trim();
@@ -209,46 +211,61 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
           />
         </div>
 
-        {/* TTS-Synchronized Agent Spoken Dialogue Surface */}
-        {showSpokenSurface && activeSpokenText && (
-          <div className="w-full max-w-6xl mb-12 p-6 md:p-8 rounded-2xl bg-[#141414]/95 border border-white/[0.12] backdrop-blur-2xl shadow-2xl shadow-black/80 relative">
-            <div className="flex items-center justify-between pb-3 mb-4 border-b border-white/[0.08]">
-              <div className="flex items-center gap-2.5">
-                <span className={cn(
-                  "w-2 h-2 rounded-full",
-                  agentState === 'SPEAKING' ? "bg-[#E8E3DA] animate-pulse" : "bg-white/40"
-                )} />
-                <span className="font-mono text-xs uppercase tracking-widest text-[#E8E3DA] font-semibold">
-                  ALFRED {agentState === 'SPEAKING' ? '• SYNTHESIZING VOCAL SPEECH' : '• RESPONSE'}
-                </span>
-              </div>
-              <div className="flex items-center gap-3">
-                {agentState === 'SPEAKING' ? (
-                  <span className="font-mono text-[10px] text-[#8E8A83] uppercase tracking-wider flex items-center gap-1.5">
-                    <Volume2 size={12} className="text-[#E8E3DA] animate-pulse" />
-                    TTS IN SYNC
+        {/* TTS-Synchronized Agent Spoken Dialogue Surface with Fade-In / Auto 10s Fade-Out */}
+        <AnimatePresence mode="wait">
+          {showSpokenSurface && activeSpokenText && (
+            <motion.div
+              key={lastSpokenMsgIdRef.current || 'spoken-surface'}
+              initial={{ opacity: 0, y: 16, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12, scale: 0.98, transition: { duration: 0.5, ease: 'easeInOut' } }}
+              transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+              className="w-full max-w-6xl mb-12 p-6 md:p-8 rounded-2xl bg-[#141414]/95 border border-white/[0.12] backdrop-blur-2xl shadow-2xl shadow-black/80 relative"
+            >
+              <div className="flex items-center justify-between pb-3 mb-4 border-b border-white/[0.08]">
+                <div className="flex items-center gap-2.5">
+                  <span className={cn(
+                    "w-2 h-2 rounded-full",
+                    agentState === 'SPEAKING' ? "bg-[#E8E3DA] animate-pulse" : "bg-white/40"
+                  )} />
+                  <span className="font-mono text-xs uppercase tracking-widest text-[#E8E3DA] font-semibold">
+                    ALFRED {agentState === 'SPEAKING' ? '• SYNTHESIZING VOCAL SPEECH' : '• RESPONSE'}
                   </span>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setShowSpokenSurface(false)}
-                    className="p-1 rounded text-[#8E8A83] hover:text-[#E8E3DA] transition-colors"
-                    title="Dismiss"
-                  >
-                    <X size={14} />
-                  </button>
-                )}
+                </div>
+                <div className="flex items-center gap-3">
+                  {agentState === 'SPEAKING' ? (
+                    <span className="font-mono text-[10px] text-[#8E8A83] uppercase tracking-wider flex items-center gap-1.5">
+                      <Volume2 size={12} className="text-[#E8E3DA] animate-pulse" />
+                      TTS IN SYNC
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (dismissTimerRef.current) {
+                          clearTimeout(dismissTimerRef.current);
+                          dismissTimerRef.current = null;
+                        }
+                        setShowSpokenSurface(false);
+                      }}
+                      className="p-1 rounded text-[#8E8A83] hover:text-[#E8E3DA] transition-colors cursor-pointer"
+                      title="Dismiss"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
 
-            <TextReveal
-              text={activeSpokenText}
-              speechProgress={speechProgress}
-              autoScroll={true}
-              paragraphClassName="!text-xl md:!text-2xl !leading-relaxed font-sans font-medium text-[#E8E3DA]"
-            />
-          </div>
-        )}
+              <TextReveal
+                text={activeSpokenText}
+                speechProgress={speechProgress}
+                autoScroll={true}
+                paragraphClassName="!text-xl md:!text-2xl !leading-relaxed font-sans font-medium text-[#E8E3DA]"
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Bento Grid — Scaled Up & Connected to Real Database */}
         <BentoGrid className="w-full max-w-6xl gap-6">
@@ -604,35 +621,6 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
 
         {/* Bottom Designer Chronometer: Time, Date & Day */}
         <DesignerChronometer />
-
-        {/* Expandable Dialogue Log Modal / Drawer */}
-        {isLogExpanded && (
-          <div className="command-log-drawer">
-            <div className="drawer-header">
-              <span className="drawer-title">SESSION CONVERSATION LOG</span>
-              <button
-                type="button"
-                className="drawer-close-btn"
-                onClick={toggleLog}
-              >
-                <ChevronDown size={15} />
-              </button>
-            </div>
-            <div className="drawer-messages-list">
-              {messages.length === 0 ? (
-                <div className="empty-dialogue">No messages in current session history.</div>
-              ) : (
-                messages.map((msg) => (
-                  <div key={msg.id} className={`dialogue-item ${msg.sender}`}>
-                    <span className="sender-tag">[{msg.sender.toUpperCase()}]</span>
-                    <span className="message-body">{msg.text}</span>
-                  </div>
-                ))
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

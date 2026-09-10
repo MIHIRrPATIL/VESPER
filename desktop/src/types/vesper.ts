@@ -58,6 +58,16 @@ export interface AgentCard {
   data?: Record<string, any>;
 }
 
+export interface SpecialistActionRecord {
+  specialist?: string;
+  action?: string;
+  tool_name?: string;
+  parameters?: Record<string, any>;
+  status?: string;
+  result?: any;
+  latency_ms?: number;
+}
+
 export interface ConversationMessage {
   id: string;
   sender: 'user' | 'agent' | 'system';
@@ -67,6 +77,15 @@ export interface ConversationMessage {
   cards?: AgentCard[];
   intent?: string;
   latencyMs?: number;
+  eventType?: EventType | string;
+  channel?: Channel | string;
+  queryId?: string;
+  queryText?: string;
+  isSingleton?: boolean;
+  gesture?: string;
+  action?: string;
+  specialistActions?: SpecialistActionRecord[];
+  navigateTo?: string;
 }
 
 // ── Notification Panel Types ────────────────────────────────────────────────
@@ -102,11 +121,27 @@ export interface ProactiveAlert {
     phoneNumber?: string;
   };
   dismissed: boolean;
+  toastDismissed?: boolean;
+  domain?: string;
 }
 
 // ── HUD Output Types ────────────────────────────────────────────────────────
 
-export type HudCardType = 'weather' | 'youtube' | 'recipe' | 'transaction' | 'spotify' | 'briefing' | 'tool_call' | 'generic';
+export type HudCardType =
+  | 'weather'
+  | 'youtube'
+  | 'recipe'
+  | 'transaction'
+  | 'spotify'
+  | 'briefing'
+  | 'email'
+  | 'task'
+  | 'calendar'
+  | 'research'
+  | 'github'
+  | 'system_status'
+  | 'tool_call'
+  | 'generic';
 
 export interface HudOutput {
   id: string;

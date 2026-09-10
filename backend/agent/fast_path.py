@@ -175,6 +175,7 @@ class FastPathResult(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
     speech_text: str = ""
     card_payload: Optional[Dict[str, Any]] = None
+    navigate_to: Optional[str] = None
 
 
 class FastPathEngine:
@@ -185,14 +186,14 @@ class FastPathEngine:
         self._rules = [
             # Media: Pause
             (
-                re.compile(r"^\s*(pause|pause music|pause playback|stop music|stop playback)\s*[\.!]?$", re.I),
+                re.compile(r"^\s*(pause|pause music|pause playback|stop music|stop playback|hold the music|halt music)\s*[\.!]?$", re.I),
                 "media",
                 "pause",
                 lambda m: ({}, "Playback paused, sir.", {"type": "media_control", "action": "pause"}),
             ),
             # Media: Resume / Play
             (
-                re.compile(r"^\s*(play|resume|resume music|resume playback|continue music)\s*[\.!]?$", re.I),
+                re.compile(r"^\s*(play|resume|resume music|resume playback|continue music|continue playing(?: the)?(?: music| song| playback)?|keep playing(?: the)?(?: music| song| playback)?|unpause(?: music)?)\s*[\.!]?$", re.I),
                 "media",
                 "resume",
                 lambda m: ({}, "Resuming playback, sir.", {"type": "media_control", "action": "resume"}),
@@ -308,7 +309,7 @@ class FastPathEngine:
                 ),
                 "proactive",
                 "briefing",
-                lambda m: _get_fast_briefing(),
+                lambda m: (*_get_fast_briefing()[:3], "agenda"),
             ),
             # ── Dismissive / No-Op / False Wake ─────────────────────────────
             # Catches utterances after accidental wake word activation where
@@ -463,6 +464,112 @@ class FastPathEngine:
                 "store_memory",
                 lambda m: _fast_store_generic_memory(m.group(1)),
             ),
+            # ── Deterministic Page Navigation (<5ms) ────────────────────────
+            # Workstation / Cockpit Overview
+            (
+                re.compile(
+                    r"^\s*(?:open|go\s+to|show|navigate\s+to|switch\s+to)?\s*(?:the\s+)?(?:workstation(?:\s+page)?|overview(?:\s+page)?|cockpit|dashboard)\s*[\.!]?$",
+                    re.I,
+                ),
+                "navigation",
+                "center",
+                lambda m: (
+                    {"view": "center"},
+                    "Opening the workstation overview, sir.",
+                    {"type": "navigation", "target_view": "center", "title": "WORKSTATION OVERVIEW"},
+                    "center",
+                ),
+            ),
+            # Executive Agenda & Tasks View
+            (
+                re.compile(
+                    r"^\s*(?:(?:what'?s|what\s+is)\s+the\s+agenda(?:\s+page)?|open\s+(?:the\s+)?agenda(?:\s+page)?|go\s+to\s+(?:the\s+)?agenda(?:\s+page)?|show\s+(?:the\s+)?agenda(?:\s+page)?|open\s+(?:the\s+)?tasks?(?:\s+page)?|show\s+(?:the\s+)?tasks?(?:\s+page)?|agenda\s+page|tasks?\s+page)\s*[\.!]?$",
+                    re.I,
+                ),
+                "navigation",
+                "agenda",
+                lambda m: (
+                    {"view": "agenda"},
+                    "Opening the executive agenda and tasks, sir.",
+                    {"type": "navigation", "target_view": "agenda", "title": "EXECUTIVE AGENDA & TASKS"},
+                    "agenda",
+                ),
+            ),
+            # Financials, Ledger & Transactions View
+            (
+                re.compile(
+                    r"^\s*(?:(?:what'?s|what\s+is)\s+the\s+finances?(?:\s+page)?|open\s+(?:the\s+)?finances?(?:\s+page)?|go\s+to\s+(?:the\s+)?finances?(?:\s+page)?|show\s+(?:the\s+)?finances?(?:\s+page)?|open\s+(?:the\s+)?(?:ledger|transactions?)(?:\s+page)?|finances?\s+page|ledger\s+page|transactions?\s+page|finances|ledger|transactions)\s*[\.!]?$",
+                    re.I,
+                ),
+                "navigation",
+                "transactions",
+                lambda m: (
+                    {"view": "transactions"},
+                    "Opening your financial ledger and transactions, sir.",
+                    {"type": "navigation", "target_view": "transactions", "title": "FINANCIAL LEDGER & ACCOUNTS"},
+                    "transactions",
+                ),
+            ),
+            # Swarm Services & Hardware Telemetry
+            (
+                re.compile(
+                    r"^\s*(?:open|go\s+to|show|navigate\s+to)?\s*(?:the\s+)?(?:services?(?:\s+page)?|telemetry(?:\s+page)?|swarm(?:\s+mesh|\s+page|\s+status)?|hardware(?:\s+page)?|cluster(?:\s+nodes)?)\s*[\.!]?$",
+                    re.I,
+                ),
+                "navigation",
+                "services",
+                lambda m: (
+                    {"view": "services"},
+                    "Opening cognitive swarm services and hardware telemetry, sir.",
+                    {"type": "navigation", "target_view": "services", "title": "SWARM SERVICES & HARDWARE"},
+                    "services",
+                ),
+            ),
+            # Specialist Tool Emitter View
+            (
+                re.compile(
+                    r"^\s*(?:open|go\s+to|show|navigate\s+to)?\s*(?:the\s+)?(?:tools?(?:\s+page)?|specialist\s+tools?|tool\s+emitter(?:\s+page)?|emitter\s+deck)\s*[\.!]?$",
+                    re.I,
+                ),
+                "navigation",
+                "tools",
+                lambda m: (
+                    {"view": "tools"},
+                    "Opening specialist tool emitter, sir.",
+                    {"type": "navigation", "target_view": "tools", "title": "SPECIALIST TOOL EMITTER"},
+                    "tools",
+                ),
+            ),
+            # Workstation Event Stream & Audit Logs
+            (
+                re.compile(
+                    r"^\s*(?:open|go\s+to|show|navigate\s+to)?\s*(?:the\s+)?(?:logs?(?:\s+page)?|audit\s+logs?|event\s+stream(?:\s+page)?|workstation\s+(?:event\s+stream|logs))\s*[\.!]?$",
+                    re.I,
+                ),
+                "navigation",
+                "logs",
+                lambda m: (
+                    {"view": "logs"},
+                    "Opening workstation event stream and audit logs, sir.",
+                    {"type": "navigation", "target_view": "logs", "title": "WORKSTATION EVENT STREAM"},
+                    "logs",
+                ),
+            ),
+            # Directives & Voice Agent Console
+            (
+                re.compile(
+                    r"^\s*(?:open|go\s+to|show|navigate\s+to)?\s*(?:the\s+)?(?:directives?(?:\s+page)?|voice\s+agent(?:\s+page)?|voice\s+page|chat\s+page|conversation\s+page)\s*[\.!]?$",
+                    re.I,
+                ),
+                "navigation",
+                "voice",
+                lambda m: (
+                    {"view": "voice"},
+                    "Opening directives and voice agent console, sir.",
+                    {"type": "navigation", "target_view": "voice", "title": "DIRECTIVES CONSOLE"},
+                    "voice",
+                ),
+            ),
         ]
 
     def evaluate(self, query: str) -> FastPathResult:
@@ -471,7 +578,9 @@ class FastPathEngine:
         for pattern, intent, action, handler in self._rules:
             match = pattern.match(cleaned)
             if match:
-                params, speech_text, card_payload = handler(match)
+                res = handler(match)
+                params, speech_text, card_payload = res[0], res[1], res[2]
+                navigate_to = res[3] if len(res) > 3 else None
                 return FastPathResult(
                     matched=True,
                     intent=intent,
@@ -479,6 +588,7 @@ class FastPathEngine:
                     params=params,
                     speech_text=speech_text,
                     card_payload=card_payload,
+                    navigate_to=navigate_to,
                 )
 
         return FastPathResult(matched=False)

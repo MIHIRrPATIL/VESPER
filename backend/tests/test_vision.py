@@ -9,6 +9,7 @@ Verifies:
 
 from __future__ import annotations
 
+import math
 import time
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
@@ -641,5 +642,103 @@ async def test_vision_specialist_multi_monitor_natural_language_routing():
         res_both = await specialist.execute("inspect_screen", {"query": "Can you check both screens?"})
         assert res_both.success is True
         assert mock_capture.call_args[1]["monitor_index"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_detect_shaka_gesture():
+    """Verifies that Shaka / Hang Loose gesture is accurately classified from landmark geometry."""
+    class MockPt:
+        def __init__(self, x: float, y: float, z: float = 0.0):
+            self.x = x
+            self.y = y
+            self.z = z
+
+    # 1. Construct valid Shaka landmarks
+    # Wrist at (0.5, 0.8)
+    lms = [MockPt(0.5, 0.8) for _ in range(21)]
+    lms[0] = MockPt(0.5, 0.8)  # Wrist
+
+    # Thumb extended outward/upward:
+    lms[1] = MockPt(0.48, 0.76)
+    lms[2] = MockPt(0.45, 0.72)  # Thumb MCP
+    lms[3] = MockPt(0.40, 0.66)
+    lms[4] = MockPt(0.32, 0.60)  # Thumb Tip (dist to wrist = 0.27, well extended)
+
+    # Index curled/folded:
+    lms[5] = MockPt(0.50, 0.60)  # Index MCP
+    lms[6] = MockPt(0.50, 0.54)  # Index PIP
+    lms[7] = MockPt(0.50, 0.58)
+    lms[8] = MockPt(0.50, 0.62)  # Index Tip (curled into palm near MCP)
+
+    # Middle curled/folded:
+    lms[9] = MockPt(0.52, 0.60)
+    lms[10] = MockPt(0.52, 0.54)
+    lms[11] = MockPt(0.52, 0.58)
+    lms[12] = MockPt(0.52, 0.62)
+
+    # Ring curled/folded:
+    lms[13] = MockPt(0.54, 0.60)
+    lms[14] = MockPt(0.54, 0.54)
+    lms[15] = MockPt(0.54, 0.58)
+    lms[16] = MockPt(0.54, 0.62)
+
+    # Pinky extended outward/upward:
+    lms[17] = MockPt(0.56, 0.62)  # Pinky MCP
+    lms[18] = MockPt(0.58, 0.56)  # Pinky PIP
+    lms[19] = MockPt(0.60, 0.50)
+    lms[20] = MockPt(0.64, 0.44)  # Pinky Tip (dist to wrist = 0.38, well extended)
+
+    g, conf = GestureWorker._detect_shaka(lms)
+    assert g == "SHAKA"
+    assert conf >= 0.90
+
+    # 2. If Index is also extended (Rock On / ILoveYou pose), Shaka must NOT fire
+    lms_rock = list(lms)
+    lms_rock[8] = MockPt(0.50, 0.44)  # Index extended straight out
+    g_rock, _ = GestureWorker._detect_shaka(lms_rock)
+    assert g_rock == "NONE"
+
+
+@pytest.mark.asyncio
+async def test_gesture_worker_pinch_volume_dial_smooth_rotation():
+    """Verifies that pinch rotation operates cleanly as VOLUME_DIAL without air tap interference."""
+    class MockPt:
+        def __init__(self, x: float, y: float, z: float = 0.0):
+            self.x = x
+            self.y = y
+            self.z = z
+
+    worker = GestureWorker(fps=10.0)
+
+    def make_pinch_landmarks(angle_deg: float = 90.0):
+        lms = [MockPt(0.5, 0.5) for _ in range(21)]
+        lms[0] = MockPt(0.5, 0.8)       # Wrist
+        rad = (angle_deg - 90.0) * math.pi / 180.0
+        lms[5] = MockPt(0.5 + 0.2 * math.cos(rad), 0.8 + 0.2 * math.sin(rad))  # Index MCP
+        lms[4] = MockPt(0.5, 0.5)       # Thumb tip
+        lms[8] = MockPt(0.52, 0.5)      # Index tip (pinch_dist = 0.02)
+        return lms
+
+    class MockResult:
+        def __init__(self, landmarks):
+            self.hand_landmarks = [landmarks]
+            self.gestures = []
+
+    mock_rec = MagicMock()
+    with patch.object(worker, "_init_recognizer", return_value=mock_rec):
+        with patch.object(worker, "_frame_to_rgb", return_value=b"dummy"):
+            with patch("mediapipe.Image"):
+                # Initial pinch at 60°
+                mock_rec.recognize.return_value = MockResult(make_pinch_landmarks(60.0))
+                for _ in range(2):
+                    worker._evaluate_gesture_heuristic(b"frame")
+
+                # Deliberately turn wrist to 100° (delta = 40° >= 10°)
+                mock_rec.recognize.return_value = MockResult(make_pinch_landmarks(100.0))
+                g_dial, conf = worker._evaluate_gesture_heuristic(b"frame3")
+                assert g_dial.startswith("VOLUME_DIAL:")
+                assert conf >= 0.85
+
 
 

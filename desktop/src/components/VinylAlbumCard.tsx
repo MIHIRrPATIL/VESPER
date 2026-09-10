@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { motion } from "motion/react";
-import { Play, Pause, SkipBack, SkipForward, Disc3, Music2 } from "lucide-react";
+import { Play, Pause, SkipBack, SkipForward, Disc, Disc3, Music2 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { mediaService } from "../services/media-service";
 import { NowPlayingTrack } from "../types/vesper";
@@ -18,6 +18,7 @@ export function VinylAlbumCard({ className }: VinylAlbumCardProps) {
   const [imgError, setImgError] = useState(false);
 
   useEffect(() => {
+    mediaService.fetchNowPlaying();
     const unsub = mediaService.subscribe(() => {
       setTrack(mediaService.getTrack());
     });
@@ -166,6 +167,12 @@ export function VinylAlbumCard({ className }: VinylAlbumCardProps) {
           <span className="font-sans text-xs text-[#8E8A83] truncate max-w-full font-medium mt-0.5">
             {track.artist || "Spotify / Audio Sink"}
           </span>
+          {track.album && (
+            <span className="font-sans text-[11px] text-[#8E8A83]/70 truncate max-w-full mt-0.5 flex items-center justify-center gap-1">
+              <Disc size={10} className="text-[#8E8A83]/70 shrink-0" />
+              <span className="truncate">{track.album}</span>
+            </span>
+          )}
         </div>
 
         {/* Centered Monochromatic Playback Controls */}

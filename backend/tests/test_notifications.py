@@ -361,3 +361,120 @@ def test_websocket_call_event_broadcast(client: TestClient):
         assert call_env["payload"]["state"] == "OFFHOOK"
 
 
+def test_notification_search_service():
+    """Verifies that NotificationService searches notifications by sender, query, and app."""
+    svc = NotificationService()
+    svc.ingest_notification(
+        payload={
+            "package_name": "com.whatsapp",
+            "title": "DJSCE 2027 Placement Announcements: ~ Tia Shah",
+            "text": "UBS shortlist: Raiyyan Patel, Nandini Nema, Vinay Vora.",
+        },
+        source_device_id="phone_1",
+    )
+    svc.ingest_notification(
+        payload={
+            "package_name": "com.slack",
+            "title": "Engineering",
+            "text": "Deployment scheduled for tonight.",
+        },
+        source_device_id="phone_1",
+    )
+
+    # Search by sender
+    matches = svc.search_notifications(sender_filter="Tia Shah")
+    assert len(matches) == 1
+    assert "Tia Shah" in matches[0].title
+
+    # Search by app
+    wa_matches = svc.search_notifications(app_filter="whatsapp")
+    assert len(wa_matches) == 1
+
+    # Search by keyword
+    shortlist_matches = svc.search_notifications(query="shortlist")
+    assert len(shortlist_matches) == 1
+
+    # Search non-existent
+    empty = svc.search_notifications(query="nonexistent string 12345")
+    assert len(empty) == 0
+
+
+@pytest.mark.asyncio
+async def test_task_specialist_notification_name_check():
+    """Verifies that TaskSpecialist search_mobile_notifications truthfully checks user name."""
+    from backend.agent.specialists.task_specialist import TaskSpecialist
+    svc = NotificationService()
+    svc.ingest_notification(
+        payload={
+            "package_name": "com.whatsapp",
+            "title": "DJSCE 2027 Announcements: ~ Tia Shah",
+            "text": "UBS shortlist: Raiyyan Siraj Patel, Nandini Nema, Vinay Vora.",
+        },
+        source_device_id="phone_1",
+    )
+
+    spec = TaskSpecialist(notif_service=svc)
+    # Query checking if user's name (Mihir) is in the shortlist
+    res = await spec.execute(
+        "search_mobile_notifications",
+        {"query": "is my name in the notification", "sender": "Tia Shah", "app": "whatsapp"},
+    )
+    assert res.success is True
+    assert res.data["name_found"] is False
+    assert "does not appear" in res.speech_summary or "not mentioned" in res.speech_summary
+
+    # When user's name is in the shortlist
+    svc.ingest_notification(
+        payload={
+            "package_name": "com.whatsapp",
+            "title": "DJSCE 2027 Announcements: ~ Tia Shah",
+            "text": "UBS shortlist: Raiyyan Patel, Mihir Patil, Nandini Nema.",
+        },
+        source_device_id="phone_1",
+    )
+    res_found = await spec.execute(
+        "search_mobile_notifications",
+        {"query": "is my name in the notification", "sender": "Tia Shah", "app": "whatsapp"},
+    )
+    assert res_found.success is True
+    assert res_found.data["name_found"] is True
+    assert "is present" in res_found.speech_summary
+
+    # When no matching notification exists in store (honest boundary fallback)
+    res_empty = await spec.execute(
+        "search_mobile_notifications",
+        {"query": "Unknown Project", "sender": "Unknown Sender"},
+    )
+    assert res_empty.success is True
+    assert res_empty.data["found"] is False
+    assert "Sir, I checked the notifications forwarded from your mobile companion" in res_empty.speech_summary
+    assert "do not have access to your full WhatsApp chat history or database" in res_empty.speech_summary
+
+
+@pytest.mark.asyncio
+async def test_planner_routes_notification_query_to_search():
+    """Verifies that queries about notifications/WhatsApp messages route to tasks search, not vision OCR."""
+    from backend.agent.planner import SwarmPlanner
+    from backend.agent.registry import SpecialistRegistry
+    from backend.agent.specialists.task_specialist import TaskSpecialist
+    from backend.agent.specialists.vision_specialist import VisionSpecialist
+
+    reg = SpecialistRegistry()
+    reg.register(TaskSpecialist())
+    reg.register(VisionSpecialist())
+
+    planner = SwarmPlanner()
+    plan, _ = await planner.create_plan(
+        "Can you check if there is my name in the notification that Tia Shah sent on WhatsApp?",
+        registry=reg,
+    )
+    assert plan is not None
+    assert len(plan.steps) == 1
+    step = plan.steps[0]
+    assert step["agent"] == "tasks"
+    assert step["action"] == "search_mobile_notifications"
+    assert step["params"].get("app") == "whatsapp"
+    assert "Tia Shah" in step["params"].get("sender", "")
+
+
+

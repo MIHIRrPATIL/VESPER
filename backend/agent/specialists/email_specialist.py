@@ -107,6 +107,27 @@ DEFAULT_MOCK_INBOX = [
         "unread": False,
         "labels": ["INBOX", "FINANCE"],
     },
+    {
+        "id": "msg_004",
+        "thread_id": "thread_saraswat_alert",
+        "sender": "alert@saraswatbank.co.in",
+        "sender_name": "Saraswat Bank Alert",
+        "subject": "Saraswat Bank Alert - Debit Transaction",
+        "snippet": "Saraswat Bank Dear Customer, Below is a summary of Debit Transaction: Date, Time : 10-09-2026 10:33:49 Debit Account No: XX3483 Amount: INR 2200.00 Particulars: - ACH Debit:TP ACH PRUDENT:33638",
+        "body": (
+            "Saraswat Bank\n\n"
+            "Dear Customer,\n"
+            "Below is a summary of Debit Transaction:\n"
+            "Date, Time : 10-09-2026 10:33:49\n"
+            "Debit Account No: XX3483\n"
+            "Amount: INR 2200.00\n"
+            "Particulars: - ACH Debit:TP ACH PRUDENT:33638\n\n"
+            "For queries, contact support@saraswatbank.com"
+        ),
+        "date": "Today, 10:33 AM",
+        "unread": False,
+        "labels": ["INBOX", "FINANCE", "BANK"],
+    },
 ]
 
 DEFAULT_MOCK_THREADS: Dict[str, List[Dict[str, Any]]] = {
@@ -426,27 +447,27 @@ class EmailSpecialist(BaseSpecialist):
     ) -> SpecialistResult:
         """Dispatches email tool actions."""
         try:
-            if action == "list_unread_emails":
+            if action in ("list_unread_emails", "list_unread", "get_unread", "unread_emails", "inbox", "get_inbox", "check_inbox", "list_emails", "check_emails"):
                 max_results = int(params.get("max_results", 5))
                 return await self.list_unread_emails(max_results)
-            elif action == "search_emails":
-                query = str(params.get("query", "")).strip()
+            elif action in ("search_emails", "search_inbox", "search_mail", "search_messages", "search", "query_emails", "find_emails", "find_email"):
+                query = str(params.get("query", "") or params.get("search", "") or params.get("q", "")).strip()
                 max_results = int(params.get("max_results", 5))
                 return await self.search_emails(query, max_results)
-            elif action == "read_email":
-                raw_eid = params.get("email_id", "")
+            elif action in ("read_email", "get_email", "open_email", "view_email", "email_details"):
+                raw_eid = params.get("email_id") or params.get("id") or ""
                 return await self.read_email(raw_eid)
             elif action in ("read_thread", "get_thread", "email_thread"):
                 thread_id = str(params.get("thread_id", "")).strip()
                 email_id = str(params.get("email_id", "")).strip()
                 query = str(params.get("query", "")).strip()
                 return await self.read_thread(thread_id=thread_id, email_id=email_id, query=query)
-            elif action == "draft_email":
+            elif action in ("draft_email", "create_draft", "draft"):
                 to = str(params.get("to", "")).strip()
                 subject = str(params.get("subject", "")).strip()
                 body = str(params.get("body", "")).strip()
                 return await self.draft_email(to, subject, body)
-            elif action == "send_email":
+            elif action in ("send_email", "send_mail", "send", "dispatch_email"):
                 to = str(params.get("to", "")).strip()
                 subject = str(params.get("subject", "")).strip()
                 body = str(params.get("body", "")).strip()
@@ -525,6 +546,93 @@ class EmailSpecialist(BaseSpecialist):
         )
 
     @staticmethod
+    def build_smart_gmail_queries(raw_query: str) -> List[str]:
+        """Generates tiered, high-recall Gmail queries from conversational text and Indian entities."""
+        from backend.agent.normalizer import extract_bank_and_intent, get_bank_info, normalize_entities
+
+        normalized = normalize_entities(raw_query).strip()
+        bank_key, intents = extract_bank_and_intent(raw_query)
+        candidates: List[str] = []
+
+        # 1. Bank-specific search
+        if bank_key:
+            bank_info = get_bank_info(bank_key)
+            bank_name = bank_info["canonical_name"] if bank_info else bank_key
+            # Tier 1: Bank + financial intent terms
+            if intents:
+                terms = []
+                if "atm" in intents:
+                    terms.extend(["ATM", "withdrawal", "withdrawn"])
+                if "debit" in intents:
+                    terms.extend(["debit", "debited", "ACH", "deducted"])
+                if "credit" in intents:
+                    terms.extend(["credit", "credited", "deposit"])
+                if "transaction" in intents:
+                    terms.extend(["transaction", "alert", "INR", "Rs", "A/C"])
+                seen = set()
+                terms_dedup = [t for t in terms if not (t.lower() in seen or seen.add(t.lower()))]
+                if terms_dedup:
+                    candidates.append(f"{bank_key} ({' OR '.join(terms_dedup)})")
+            else:
+                candidates.append(f"{bank_key} (transaction OR alert OR debit OR credit OR ATM OR INR OR Rs)")
+
+            # Tier 2: Domain or sender clauses
+            if bank_info and bank_info.get("email_domains"):
+                domain_clauses = [f"from:{dom}" for dom in bank_info["email_domains"]]
+                candidates.append(" OR ".join(domain_clauses))
+
+            # Tier 3: Pure bank key
+            candidates.append(bank_key)
+            candidates.append(f'"{bank_name}"')
+
+        # 2. General transaction search (without a specific bank)
+        elif intents:
+            terms = []
+            if "atm" in intents:
+                terms.append("ATM")
+            if "withdrawal" in intents:
+                terms.extend(['"cash withdrawal"', "withdrawal"])
+            if "debit" in intents:
+                terms.extend(["debit", "debited"])
+            if "credit" in intents:
+                terms.extend(["credit", "credited"])
+            if "transaction" in intents:
+                terms.extend(["transaction", "alert"])
+            terms_clause = " OR ".join(terms) if terms else "transaction OR alert"
+            candidates.append(f"({terms_clause}) (bank OR account OR A/C OR INR OR Rs)")
+            candidates.append(terms_clause)
+
+        # 3. Clean conversational fluff for general query
+        clean = re.sub(
+            r"^(?:can\s+you\s+|please\s+)?(?:look\s+for|search\s+for|find|check|read|get)\s+(?:any\s+)?(?:recent\s+)?(?:emails?|messages?|transactions?)\s+(?:from|about|regarding|with)?\s*",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        ).strip()
+        clean = re.sub(r"['\"`]", "", clean).strip()
+
+        if clean:
+            if clean.lower().startswith("from:"):
+                candidates.append(clean)
+                candidates.append(clean[5:].strip())
+            else:
+                candidates.append(clean)
+
+        # De-duplicate while preserving order
+        unique_candidates: List[str] = []
+        seen_q = set()
+        for c in candidates:
+            c_strip = c.strip()
+            if c_strip and c_strip.lower() not in seen_q:
+                seen_q.add(c_strip.lower())
+                unique_candidates.append(c_strip)
+
+        if not unique_candidates:
+            unique_candidates.append(raw_query.strip())
+
+        return unique_candidates
+
+    @staticmethod
     def _sanitize_search_query(q: str) -> str:
         """Strips quotes and normalizes whitespace in email search queries."""
         cleaned = re.sub(r"['\"`]", "", q).strip()
@@ -536,37 +644,26 @@ class EmailSpecialist(BaseSpecialist):
         return cleaned
 
     async def search_emails(self, query: str, max_results: int = 5) -> SpecialistResult:
-        """Searches emails matching query string."""
+        """Searches emails matching query string with smart multi-tier fallback and financial parsing."""
         if not query:
             return await self.list_unread_emails(max_results)
 
         service = self._get_gmail_service()
         if service:
             try:
-                # 1. Try initial raw query
-                res = service.users().messages().list(
-                    userId="me", q=query, maxResults=max_results
-                ).execute()
-                msgs = res.get("messages", [])
-
-                # 2. If 0 results, retry with sanitized query (removes quotes and honorifics like 'Sir')
-                clean_q = self._sanitize_search_query(query)
-                if not msgs and clean_q and clean_q != query:
-                    logger.info(f"[EmailSpecialist] Gmail raw search '{query}' returned 0, retrying with sanitized: '{clean_q}'")
+                candidates = self.build_smart_gmail_queries(query)
+                msgs = []
+                used_query = query
+                for cand in candidates:
+                    logger.info(f"[EmailSpecialist] Attempting Gmail search with candidate: '{cand}'")
                     res = service.users().messages().list(
-                        userId="me", q=clean_q, maxResults=max_results
+                        userId="me", q=cand, maxResults=max_results
                     ).execute()
                     msgs = res.get("messages", [])
-
-                # 3. If still 0 results and query was 'from:Name', retry broad keyword search 'Name'
-                if not msgs and clean_q.lower().startswith("from:"):
-                    name_kw = clean_q[5:].strip()
-                    if name_kw:
-                        logger.info(f"[EmailSpecialist] Retrying Gmail search with keyword '{name_kw}'")
-                        res = service.users().messages().list(
-                            userId="me", q=name_kw, maxResults=max_results
-                        ).execute()
-                        msgs = res.get("messages", [])
+                    if msgs:
+                        used_query = cand
+                        logger.info(f"[EmailSpecialist] Gmail candidate '{cand}' returned {len(msgs)} messages.")
+                        break
 
                 items = []
                 for m in msgs:
@@ -575,44 +672,79 @@ class EmailSpecialist(BaseSpecialist):
                         metadataHeaders=["From", "Subject", "Date"]
                     ).execute()
                     headers = {h["name"]: h["value"] for h in detail.get("payload", {}).get("headers", [])}
-                    items.append({
+                    subj = headers.get("Subject", "(No Subject)")
+                    snip = detail.get("snippet", "")
+                    combined_text = f"{subj} {snip}"
+
+                    # Detect financial metadata if present
+                    amt_match = re.search(r"(?:INR|Rs\.?|₹)\s*([\d,]+(?:\.\d{2})?)", combined_text, re.IGNORECASE)
+                    acct_match = re.search(r"(?:A/C|Account|No:?)\s*(?:No\.?\s*)?([X\d]{4,})", combined_text, re.IGNORECASE) or re.search(r"\b(XX\d{4})\b", combined_text, re.IGNORECASE)
+                    is_debit = bool(re.search(r"\b(debit|debited|spent|withdrawal|withdrawn|ATM|ACH|deducted)\b", combined_text, re.IGNORECASE))
+                    is_credit = bool(re.search(r"\b(credit|credited|received|deposit|deposited)\b", combined_text, re.IGNORECASE))
+
+                    item_data: Dict[str, Any] = {
                         "id": m["id"],
                         "sender": headers.get("From", "Unknown"),
-                        "subject": headers.get("Subject", "(No Subject)"),
-                        "snippet": detail.get("snippet", ""),
+                        "subject": subj,
+                        "snippet": snip,
                         "date": headers.get("Date", ""),
-                    })
+                    }
+                    if amt_match:
+                        item_data["amount"] = f"₹{amt_match.group(1)}"
+                        item_data["is_transaction"] = True
+                        item_data["transaction_type"] = "Debit" if is_debit else ("Credit" if is_credit else "Transaction")
+                    if acct_match:
+                        item_data["account_number"] = acct_match.group(1)
+
+                    items.append(item_data)
 
                 self._last_search_results = items
                 count = len(items)
                 if count > 0:
-                    first = items[0]
-                    first_snd = first.get("sender_name") or first.get("sender", "Unknown").split("<")[0].strip()
-                    snippet_text = (first.get("snippet") or "")[:140]
-                    subj_text = first.get("subject") or "No Subject"
-                    speech = (
-                        f"Found {count} email{'s' if count != 1 else ''} matching '{query}', sir. "
-                        f"The most recent is from {first_snd} regarding '{subj_text}': \"{snippet_text}...\""
-                    )
+                    txn_items = [it for it in items if it.get("amount") or it.get("transaction_type")]
+                    if txn_items:
+                        first_txn = txn_items[0]
+                        amt_str = first_txn.get("amount", "")
+                        ttype = first_txn.get("transaction_type", "Transaction")
+                        sndr_clean = first_txn.get("sender", "").split("<")[0].strip().replace('"', '')
+                        speech = (
+                            f"Found {count} email{'s' if count != 1 else ''} matching your inquiry, sir. "
+                            f"The latest is a {ttype.lower()} of {amt_str} from {sndr_clean}."
+                        )
+                        if len(txn_items) > 1:
+                            speech += f" There are {len(txn_items) - 1} other transaction alert(s) in the list."
+                    else:
+                        first = items[0]
+                        first_snd = first.get("sender_name") or first.get("sender", "Unknown").split("<")[0].strip()
+                        snippet_text = (first.get("snippet") or "")[:140]
+                        subj_text = first.get("subject") or "No Subject"
+                        speech = (
+                            f"Found {count} email{'s' if count != 1 else ''} matching '{query}', sir. "
+                            f"The most recent is from {first_snd} regarding '{subj_text}': \"{snippet_text}...\""
+                        )
                 else:
                     speech = f"I could not locate any emails matching '{query}', sir."
 
                 return SpecialistResult(
                     success=True,
                     action="search_emails",
-                    data={"query": query, "count": count, "emails": items},
+                    data={"query": query, "used_query": used_query, "count": count, "emails": items},
                     speech_summary=speech,
                     card_payload={"type": "email_list_card", "emails": items, "title": f"Search: {query}"},
                 )
             except Exception as live_err:
                 logger.warning(f"[EmailSpecialist] Gmail search failed ({live_err}), filtering sandbox.")
 
-        # Sandbox search
-        clean_q = re.sub(r"\bfrom:\s*", "", query, flags=re.IGNORECASE).strip().lower()
+        # Sandbox search with entity normalization
+        from backend.agent.normalizer import extract_bank_and_intent, normalize_entities
+        normalized_q = normalize_entities(query).lower()
+        bank_key, intents = extract_bank_and_intent(query)
+
+        clean_q = re.sub(r"\bfrom:\s*", "", normalized_q, flags=re.IGNORECASE).strip()
         clean_q = re.sub(r"\bto:\s*", "", clean_q, flags=re.IGNORECASE).strip()
         clean_q = re.sub(r"\bsubject:\s*", "", clean_q, flags=re.IGNORECASE).strip()
         if not clean_q:
-            clean_q = query.lower()
+            clean_q = normalized_q
 
         def _match_score(m: Dict[str, Any]) -> int:
             subj = str(m.get("subject", "")).lower()
@@ -621,6 +753,10 @@ class EmailSpecialist(BaseSpecialist):
             sname = str(m.get("sender_name", "")).lower()
             lbls = " ".join(str(lbl).lower() for lbl in m.get("labels", []))
             searchable = f"{sname} {sndr} {subj} {snip} {lbls}"
+
+            # Bank key bonus
+            if bank_key and bank_key in searchable:
+                return 95
 
             if clean_q in searchable:
                 return 100

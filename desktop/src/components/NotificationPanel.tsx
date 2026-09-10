@@ -78,6 +78,7 @@ export const NotificationPanel: React.FC = () => {
 
   const handleOpen = useCallback(() => {
     notificationStore.markAllRead();
+    notificationStore.dismissAllToasts();
   }, []);
 
   return (

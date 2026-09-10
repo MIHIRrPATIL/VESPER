@@ -21,7 +21,7 @@ Key Architectural Guarantees:
    - THUMB_UP: Volume Step Up (+10%) / Confirm
    - THUMB_DOWN: Volume Step Down (-10%) / Dismiss
    - POINTING_UP: Toggle Focus Mode
-   - AIR_TAP: Air Tap / Select Widget
+   - SHAKA / HANG_LOOSE: Shaka / Hang Loose (Thumb + Pinky extended) -> Toggle Notifications & Advisories Drawer / Select
    - VOLUME_DIAL:XX: Pinch + Rotate wrist to set volume (0-100%)
 """
 
@@ -304,15 +304,17 @@ DEFAULT_GESTURE_COOLDOWNS: Dict[str, float] = {
     "CLOSED_FIST": 0.9,
     "OPEN_PALM": 0.9,
     "PEACE_SIGN": 1.2,
-    "THREE_FINGERS": 0.9,
-    "PLAY_PAUSE": 0.9,
-    "MEDIA_PLAY_PAUSE": 0.9,
+    "THREE_FINGERS": 1.8,
+    "PLAY_PAUSE": 1.8,
+    "MEDIA_PLAY_PAUSE": 1.8,
     "POINTING_UP": 1.2,
     "NEXT_TRACK": 0.9,
     "PREV_TRACK": 0.9,
     "GUN_RIGHT": 0.9,
     "GUN_LEFT": 0.9,
-    "AIR_TAP": 0.6,
+    "SHAKA": 0.8,
+    "HANG_LOOSE": 0.8,
+    "AIR_TAP": 0.8,
     "GESTURE_TOGGLE": 2.0,
     "ROCK_ON": 2.0,
 }
@@ -355,6 +357,9 @@ class GestureWorker:
         # Landmark tracking state
         self._wrist_history: Deque[Tuple[float, float, float]] = collections.deque(maxlen=8)
         self._pinch_streak = 0
+        self._pinch_start_deg: float = 0.0
+        self._pinch_start_time: float = 0.0
+        self._air_tap_fired: bool = False
         self._saved_volume = _get_system_volume()
         self._last_volume_dial_value = -1  # Throttle repeated VOLUME_DIAL dispatches
 
@@ -634,6 +639,8 @@ class GestureWorker:
                     # Discrete static poses (including Finger Gun track skips) require 2 consecutive frames.
                     if is_volume_dial or detected_gesture.startswith("GESTURE_TOGGLE"):
                         required_streak = 1
+                    elif detected_gesture in ("THREE_FINGERS", "PLAY_PAUSE", "MEDIA_PLAY_PAUSE"):
+                        required_streak = 4
                     else:
                         required_streak = 2
 
@@ -957,36 +964,119 @@ class GestureWorker:
             d_tw_2d = dist_2d(tip, wrist)
             d_pw_2d = dist_2d(pip, wrist)
 
-            d_tm_3d = dist_3d(tip, mcp)
-            d_pm_3d = dist_3d(pip, mcp)
-            d_tw_3d = dist_3d(tip, wrist)
-            d_pw_3d = dist_3d(pip, wrist)
+            # Require clear extension: tip significantly further from mcp and wrist than pip is
+            return (d_tm_2d > d_pm_2d * 1.30) and (d_tw_2d > d_pw_2d * 1.15)
 
-            ext_2d = (d_tm_2d > d_pm_2d * 1.20) and (d_tw_2d > d_pw_2d * 1.08)
-            ext_3d = (d_tm_3d > d_pm_3d * 1.20) and (d_tw_3d > d_pw_3d * 1.08)
-            return ext_2d or ext_3d
+        def is_curled(tip: Any, pip: Any, mcp: Any) -> bool:
+            d_tm_2d = dist_2d(tip, mcp)
+            d_pm_2d = dist_2d(pip, mcp)
+            d_tw_2d = dist_2d(tip, wrist)
+            d_pw_2d = dist_2d(pip, wrist)
+            # Tip must be tucked closer to palm/wrist than pip is
+            return (d_tw_2d <= d_pw_2d * 1.05) or (d_tm_2d <= d_pm_2d * 1.10)
 
         index_ext = is_ext(index_tip, index_pip, index_mcp)
         middle_ext = is_ext(middle_tip, middle_pip, middle_mcp)
         ring_ext = is_ext(ring_tip, ring_pip, ring_mcp)
         pinky_ext = is_ext(pinky_tip, pinky_pip, pinky_mcp)
 
+        ring_curled = is_curled(ring_tip, ring_pip, ring_mcp)
+        pinky_curled = is_curled(pinky_tip, pinky_pip, pinky_mcp)
+
+        # Thumb extension: tip significantly further from index_mcp than IP joint
         thumb_ext = (
-            dist_2d(thumb_tip, index_mcp) > dist_2d(thumb_ip, index_mcp) * 1.10
-            or dist_3d(thumb_tip, pinky_mcp) > dist_3d(thumb_ip, pinky_mcp) * 1.12
+            dist_2d(thumb_tip, index_mcp) > dist_2d(thumb_ip, index_mcp) * 1.25
+            or dist_3d(thumb_tip, pinky_mcp) > dist_3d(thumb_ip, pinky_mcp) * 1.25
         )
 
-        # Pattern 1: Classic Three Fingers (Index + Middle + Ring extended, Pinky folded)
-        if index_ext and middle_ext and ring_ext and not pinky_ext:
+        # Pattern 1: Classic Three Fingers (Index + Middle + Ring extended; Pinky firmly curled; Thumb NOT extended)
+        if index_ext and middle_ext and ring_ext and pinky_curled and not pinky_ext and not thumb_ext:
             return "THREE_FINGERS", 0.90
 
-        # Pattern 2: European Three Fingers (Thumb + Index + Middle extended, Ring and Pinky folded)
-        if thumb_ext and index_ext and middle_ext and not ring_ext and not pinky_ext:
+        # Pattern 2: Strict European Three Fingers (Thumb + Index + Middle extended; Ring & Pinky firmly curled into palm)
+        if thumb_ext and index_ext and middle_ext and ring_curled and pinky_curled and not ring_ext and not pinky_ext:
             return "THREE_FINGERS", 0.90
 
-        # Pattern 3: Boy Scout / "W" Three Fingers (Middle + Ring + Pinky extended, Index folded)
-        if middle_ext and ring_ext and pinky_ext and not index_ext:
-            return "THREE_FINGERS", 0.90
+        return "NONE", 0.0
+
+    @staticmethod
+    def _detect_shaka(hand_lms: Any) -> Tuple[str, float]:
+        """Classifies an intentional Shaka / Hang Loose gesture.
+
+        Anatomy of Shaka / Hang Loose:
+        - Thumb: Fully extended outward/upward away from palm and wrist.
+        - Pinky: Fully extended away from palm and wrist.
+        - Index, Middle, Ring: Tightly folded/curled into palm.
+
+        Returns:
+            ("SHAKA", confidence) if detected, else ("NONE", 0.0)
+        """
+        if not hand_lms or len(hand_lms) < 21:
+            return "NONE", 0.0
+
+        def get_pt(p: Any) -> Tuple[float, float]:
+            if hasattr(p, "x"):
+                return float(p.x), float(p.y)
+            elif isinstance(p, dict):
+                return float(p.get("x", 0.0)), float(p.get("y", 0.0))
+            return float(p[0]), float(p[1])
+
+        def dist_2d(p1: Any, p2: Any) -> float:
+            x1, y1 = get_pt(p1)
+            x2, y2 = get_pt(p2)
+            return math.hypot(x1 - x2, y1 - y2)
+
+        wrist = hand_lms[0]
+        thumb_mcp = hand_lms[2]
+        thumb_tip = hand_lms[4]
+
+        index_mcp = hand_lms[5]
+        index_pip = hand_lms[6]
+        index_tip = hand_lms[8]
+
+        middle_mcp = hand_lms[9]
+        middle_pip = hand_lms[10]
+        middle_tip = hand_lms[12]
+
+        ring_mcp = hand_lms[13]
+        ring_pip = hand_lms[14]
+        ring_tip = hand_lms[16]
+
+        pinky_mcp = hand_lms[17]
+        pinky_pip = hand_lms[18]
+        pinky_tip = hand_lms[20]
+
+        # 1. Pinky extended away from wrist and pinky MCP
+        pinky_ext = (
+            dist_2d(pinky_tip, wrist) > dist_2d(pinky_pip, wrist) * 1.15
+            and dist_2d(pinky_tip, pinky_mcp) > 0.06
+        )
+
+        # 2. Thumb extended away from wrist and index MCP
+        thumb_ext = (
+            dist_2d(thumb_tip, wrist) > dist_2d(thumb_mcp, wrist) * 1.12
+            and dist_2d(thumb_tip, index_mcp) > 0.08
+        )
+
+        # 3. Middle 3 fingers folded into palm
+        index_folded = (
+            dist_2d(index_tip, wrist) <= dist_2d(index_pip, wrist) * 1.15
+            or dist_2d(index_tip, index_mcp) <= 0.12
+        )
+        middle_folded = (
+            dist_2d(middle_tip, wrist) <= dist_2d(middle_pip, wrist) * 1.15
+            or dist_2d(middle_tip, middle_mcp) <= 0.12
+        )
+        ring_folded = (
+            dist_2d(ring_tip, wrist) <= dist_2d(ring_pip, wrist) * 1.15
+            or dist_2d(ring_tip, ring_mcp) <= 0.12
+        )
+
+        # 4. Index must NOT be extended (distinguishes from Rock On / ILoveYou)
+        index_not_ext = dist_2d(index_tip, wrist) <= dist_2d(index_pip, wrist) * 1.12
+
+        if thumb_ext and pinky_ext and index_folded and middle_folded and ring_folded and index_not_ext:
+            return "SHAKA", 0.94
 
         return "NONE", 0.0
 
@@ -996,9 +1086,10 @@ class GestureWorker:
         Priority order:
         1. Deliberate lock hold: Rock On (ILoveYou) held for 1.0s -> GESTURE_TOGGLE:PAUSED
         2. Pinch + Rotate -> VOLUME_DIAL:XX (ReflectOS-style, inverted to match natural turn)
-        3. Finger Gun Pointing -> GUN_RIGHT / NEXT_TRACK or GUN_LEFT / PREV_TRACK
-        4. Air Tap (quick pinch) -> AIR_TAP
-        5. Static poses (fist, thumb up/down, peace, pointing, open palm) - immediate when hand is steady
+        3. Shaka / Hang Loose (Thumb + Pinky Extended) -> SHAKA (Toggle Notifications / Advisories)
+        4. Finger Gun Pointing -> GUN_RIGHT / NEXT_TRACK or GUN_LEFT / PREV_TRACK
+        5. Three Fingers Extended -> THREE_FINGERS (Media Play / Pause)
+        6. Static poses (fist, thumb up/down, peace, pointing, open palm) - immediate when hand is steady
         """
         recognizer = self._init_recognizer()
         if not recognizer:
@@ -1080,17 +1171,23 @@ class GestureWorker:
                     + (thumb_tip.z - index_tip.z) ** 2
                 )
 
-                # ── 2a. Pinch + Rotate → VOLUME_DIAL (ReflectOS-style) ────
-                if pinch_dist < 0.050:
+                # ── 2a. Pinch Analysis: Dedicated Intentional VOLUME_DIAL ────
+                if pinch_dist < 0.052:
+                    vec_x = index_mcp.x - wrist.x
+                    vec_y = index_mcp.y - wrist.y
+                    rad = math.atan2(vec_y, vec_x)
+                    deg = (rad * 180.0 / math.pi) + 90.0  # Normalize: up=0°, right=90°
+
+                    if self._pinch_streak == 0:
+                        self._pinch_start_deg = deg
+                        self._pinch_start_time = now
+
                     self._pinch_streak += 1
+                    delta_deg = abs(deg - self._pinch_start_deg)
 
-                    if self._pinch_streak >= 3:
-                        vec_x = index_mcp.x - wrist.x
-                        vec_y = index_mcp.y - wrist.y
-                        rad = math.atan2(vec_y, vec_x)
-                        deg = (rad * 180.0 / math.pi) + 90.0  # Normalize: up=0°, right=90°
-
-                        # Valid dial range: 10° to 170° (ignore extremes)
+                    # Intentional Rotary Volume Knob (ReflectOS-style)
+                    # Requires deliberate rotational movement (>= 10.0°)
+                    if self._pinch_streak >= 3 and delta_deg >= 10.0:
                         if 10.0 <= deg <= 170.0:
                             if deg <= 30.0:
                                 raw_pct = 0
@@ -1098,36 +1195,28 @@ class GestureWorker:
                                 raw_pct = 100
                             else:
                                 raw_pct = int(((deg - 30.0) / 120.0) * 100.0)
-                            # Invert motion per user request
+                            # Invert motion to match natural dial turn
                             percentage = max(0, min(100, 100 - raw_pct))
 
                             self._toggle_gesture_start = 0.0
                             self._toggle_gesture_fired = False
-                            return f"VOLUME_DIAL:{percentage}", 0.85
-
-                        # If angle is out of dial range but still pinching → AIR_TAP
-                        if self._pinch_streak >= 4:
-                            self._toggle_gesture_start = 0.0
-                            return "AIR_TAP", 0.85
+                            return f"VOLUME_DIAL:{percentage}", 0.88
                 else:
                     self._pinch_streak = 0
 
-                # ── 2b. Finger Gun Pointing → NEXT/PREV TRACK (GUN_RIGHT / GUN_LEFT) ──
+                # ── 2b. Shaka / Hang Loose (Thumb + Pinky Extended) → SHAKA ──
+                shaka_gesture, shaka_conf = self._detect_shaka(hand_lms)
+                if shaka_gesture != "NONE":
+                    self._wrist_history.clear()
+                    self._toggle_gesture_start = 0.0
+                    return shaka_gesture, shaka_conf
+
+                # ── 2c. Finger Gun Pointing → NEXT/PREV TRACK (GUN_RIGHT / GUN_LEFT) ──
                 gun_gesture, gun_conf = self._detect_finger_gun(hand_lms)
                 if gun_gesture != "NONE":
                     self._wrist_history.clear()
                     self._toggle_gesture_start = 0.0
                     return gun_gesture, gun_conf
-
-                # ── 2c. Three Fingers Extended → Media Play/Pause ──
-                three_gesture, three_conf = self._detect_three_fingers(hand_lms)
-                if three_gesture != "NONE":
-                    self._wrist_history.clear()
-                    self._toggle_gesture_start = 0.0
-                    return three_gesture, three_conf
-
-            else:
-                self._pinch_streak = 0
 
             # ── 3. Static Poses from MediaPipe Tasks ──────────────────────
             if result.gestures and len(result.gestures) > 0:
@@ -1150,6 +1239,14 @@ class GestureWorker:
                         return "POINTING_UP", score
                     elif category == "ILoveYou":
                         return "ROCK_ON", score
+
+            # ── 4. Intentional Three Fingers Extended Fallback (Media Play/Pause) ──
+            if hand_lms:
+                three_gesture, three_conf = self._detect_three_fingers(hand_lms)
+                if three_gesture != "NONE":
+                    self._wrist_history.clear()
+                    self._toggle_gesture_start = 0.0
+                    return three_gesture, three_conf
 
         except Exception as e:
             logger.debug(f"[GestureWorker] MediaPipe evaluation error: {e}")
@@ -1263,6 +1360,9 @@ class GestureWorker:
                     {"focus_mode": new_focus},
                     source_device_id="gesture_worker",
                 )
+
+            elif gesture in ("SHAKA", "HANG_LOOSE", "AIR_TAP", "PINCH_TAP", "SELECT"):
+                logger.info(f"[GestureWorker] Dispatched touchless drawer/select action via {gesture}")
 
             elif gesture in ("ROCK_ON", "GESTURE_LOCK") or gesture.startswith("GESTURE_TOGGLE"):
                 # Explicit state assignment prevents toggle flapping

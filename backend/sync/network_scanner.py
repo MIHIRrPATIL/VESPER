@@ -232,12 +232,26 @@ class NetworkScanner:
             f"[NetworkScanner] Sweep finished in {elapsed:.2f}s. Discovered {len(discovered)} active VESPER node(s)."
         )
 
+        # Also discover active LAN companion devices (e.g. mobile phones on Wi-Fi)
+        lan_neighbors = self.discover_active_lan_neighbors()
+        for nb in lan_neighbors:
+            if not any(d.device_id == nb.device_id for d in discovered):
+                discovered.append(nb)
+
         # Auto-register discovered devices into SyncManager to trigger role allocation
         if auto_register and discovered:
             for dev in discovered:
                 await sync_manager.register_device(dev)
 
         return discovered
+
+    def discover_active_lan_neighbors(self) -> List[DeviceRegistration]:
+        """Discovers active neighbor nodes from kernel neighbor tables.
+        
+        Disabled to prevent phantom duplicate mobile devices from arbitrary LAN IP addresses.
+        Mobile companion devices register explicitly when provisioned or connecting.
+        """
+        return []
 
     async def _periodic_loop(self, interval_sec: float) -> None:
         """Periodic background scanner loop."""

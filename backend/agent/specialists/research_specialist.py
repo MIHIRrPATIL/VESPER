@@ -183,10 +183,10 @@ class ResearchSpecialist(BaseSpecialist):
             sources.append({
                 "title": title,
                 "url": url,
-                "snippet": snippet[:350],
+                "snippet": snippet[:600],
             })
             if snippet:
-                snippets.append(f"[{title}]: {snippet[:250]}")
+                snippets.append(f"[{title}]: {snippet[:450]}")
 
         top_url = sources[0]["url"] if sources else ""
 

@@ -54,7 +54,7 @@ VESPER supports an expanded, touchless gesture vocabulary designed for immediate
 | **`THREE_FINGERS`** | **Media Play / Pause** | `Channel.SYSTEM` : `MEDIA_CONTROL` (`action="play_pause"`) | Pure media playback toggle (Spotify/MPRIS) without modifying master volume or system mute |
 | **`POINTING_UP`** | **Toggle Focus Mode** | `Channel.SYSTEM` : `FOCUS_MODE_STATE` (`toggle=True`) | Toggles high-productivity Focus Mode across the cluster |
 | **`ROCK_ON` (`ILoveYou`)** | **Lock / Unlock Gesture Tracking** | `Channel.GESTURE` : `GESTURE_TOGGLE` (`:PAUSED` / `:RESUMED`) | Deliberate hold for 1.0s locks or unlocks gesture tracking with a 2.0s anti-flapping buffer |
-| **`AIR_TAP`** | **Select / Activate Widget** | `Channel.GESTURE` : `AIR_TAP` | Quick pinch tap in the air for desk UI interaction |
+| **`SHAKA` / `HANG_LOOSE`** | **Toggle Advisories Drawer / Select** | `Channel.GESTURE` : `SHAKA` | Thumb & pinky extended, middle 3 curled. Toggles notifications/advisories drawer without conflicting with volume dial (also supports legacy `AIR_TAP`) |
 
 ---
 
@@ -146,7 +146,7 @@ Hand tracking is susceptible to jitter and flicker when moving hands across the 
 2. **Candidate Streak Requirement**:
    A detected pose must persist for at least $N = 2$ consecutive frames before being considered valid. Single-frame blips and transient hand transitions are discarded.
 3. **Release Requirement & Hysteresis Lock (`_gesture_awaiting_release`)**:
-   Non-volume gestures (`CLOSED_FIST`, `PEACE_SIGN`, `POINTING_UP`, `ROCK_ON`, `AIR_TAP`) cannot be triggered repeatedly without releasing the hand back to `NONE`. Once emitted, the gesture is placed in `_gesture_awaiting_release`, preventing repetitive firing while the user holds their hand steady.
+   Non-volume gestures (`CLOSED_FIST`, `PEACE_SIGN`, `POINTING_UP`, `ROCK_ON`, `SHAKA`, `AIR_TAP`) cannot be triggered repeatedly without releasing the hand back to `NONE`. Once emitted, the gesture is placed in `_gesture_awaiting_release`, preventing repetitive firing while the user holds their hand steady.
 4. **Volume Repeat Exception**:
    Volume adjustment gestures (`THUMB_UP`, `THUMB_DOWN`, `VOLUME_DIAL`) bypass the release requirement to enable continuous, smooth volume ramping across frames with a shortened 0.35s throttle.
 5. **Continuous Volume Dial Tracking**:

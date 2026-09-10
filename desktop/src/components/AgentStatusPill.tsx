@@ -22,22 +22,19 @@ export const AgentStatusPill: React.FC<AgentStatusPillProps> = ({
         return {
           label: 'Listening',
           colorClass: 'text-amber-300',
-          borderClass: 'border-amber-500/25',
-          glowClass: 'shadow-[0_0_24px_rgba(245,158,11,0.18)]',
+          borderClass: 'border-amber-500/30',
         };
       case 'THINKING':
         return {
           label: 'Thinking',
           colorClass: 'text-cyan-300',
-          borderClass: 'border-cyan-500/25',
-          glowClass: 'shadow-[0_0_24px_rgba(6,182,212,0.18)]',
+          borderClass: 'border-cyan-500/30',
         };
       case 'SPEAKING':
         return {
           label: 'Speaking',
           colorClass: 'text-[#E8E3DA]',
-          borderClass: 'border-white/15',
-          glowClass: 'shadow-[0_0_24px_rgba(232,227,218,0.14)]',
+          borderClass: 'border-white/20',
         };
       case 'IDLE':
       default:
@@ -45,7 +42,6 @@ export const AgentStatusPill: React.FC<AgentStatusPillProps> = ({
           label: 'Standby',
           colorClass: 'text-[#8E8A83]',
           borderClass: 'border-white/[0.08]',
-          glowClass: '',
         };
     }
   };
@@ -63,9 +59,8 @@ export const AgentStatusPill: React.FC<AgentStatusPillProps> = ({
             exit={{ y: 22, opacity: 0, scale: 0.92 }}
             transition={{ type: 'spring', stiffness: 320, damping: 26 }}
             className={cn(
-              'px-4 py-2 rounded-full bg-[#141414]/95 backdrop-blur-xl border flex items-center pointer-events-auto select-none',
-              cfg.borderClass,
-              cfg.glowClass
+              'px-4 py-2 rounded-full bg-[#141414]/95 backdrop-blur-xl border flex items-center pointer-events-auto select-none shadow-md shadow-black/50',
+              cfg.borderClass
             )}
           >
             {/* Status Label Only */}

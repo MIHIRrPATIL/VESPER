@@ -110,7 +110,8 @@ class ActionQueueManager:
         now = time.time()
         active = [
             a for a in self._queue.values()
-            if a.status in ("staged", "pending_return") and a.expires_at > now
+            if (a.status in ("staged", "pending_return") and a.expires_at > now)
+            or a.status == "reviewed_at_desk"
         ]
 
         # Cross-process fallback: If running outside Gateway process and local queue is empty, query Gateway REST endpoint
@@ -126,7 +127,8 @@ class ActionQueueManager:
                         active = [
                             StagedAction(**item)
                             for item in data
-                            if item.get("status") in ("staged", "pending_return") and item.get("expires_at", 0) > now
+                            if (item.get("status") in ("staged", "pending_return") and item.get("expires_at", 0) > now)
+                            or item.get("status") == "reviewed_at_desk"
                         ]
             except Exception:
                 pass
@@ -143,7 +145,7 @@ class ActionQueueManager:
         """Returns the most recently prompted action if within the active focus window."""
         if self._last_prompted_action_id and (time.time() - self._last_prompt_time) <= max_age_sec:
             action = self._queue.get(self._last_prompted_action_id)
-            if action and action.status in ("staged", "pending_return"):
+            if action and action.status in ("staged", "pending_return", "reviewed_at_desk"):
                 return action
 
         # Cross-process fallback: Query Gateway REST endpoint only if running outside Gateway process

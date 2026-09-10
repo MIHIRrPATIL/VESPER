@@ -37,6 +37,15 @@ class DebtDirection(str, Enum):
     OWED = "owed"  # Someone owes me
 
 
+class FrequencyType(str, Enum):
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    BIWEEKLY = "biweekly"
+    MONTHLY = "monthly"
+    QUARTERLY = "quarterly"
+    YEARLY = "yearly"
+
+
 # ── Base Extensible Model ────────────────────────────────────────────────
 
 class BaseDataModel(BaseModel):
@@ -73,7 +82,17 @@ class AccountCreate(BaseDataModel):
     type: AccountType = AccountType.BANK
     balance: float = 0.0
     currency: str = "INR"
+    is_default: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AccountUpdate(BaseDataModel):
+    name: Optional[str] = None
+    type: Optional[AccountType] = None
+    balance: Optional[float] = None
+    currency: Optional[str] = None
+    is_default: Optional[bool] = None
+    metadata: Optional[dict[str, Any]] = None
 
 
 class AccountModel(BaseDataModel):
@@ -83,6 +102,7 @@ class AccountModel(BaseDataModel):
     type: str = "bank"
     balance: float = 0.0
     currency: str = "INR"
+    is_default: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
     updated_at: Optional[dt.datetime] = None
 
@@ -97,6 +117,17 @@ class TransactionCreate(BaseDataModel):
     to_account_id: Optional[str] = None
     date: Optional[dt.date] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TransactionUpdate(BaseDataModel):
+    type: Optional[TransactionType] = None
+    amount: Optional[float] = None
+    category: Optional[str] = None
+    description: Optional[str] = None
+    account_id: Optional[str] = None
+    to_account_id: Optional[str] = None
+    date: Optional[dt.date] = None
+    metadata: Optional[dict[str, Any]] = None
 
 
 class TransactionModel(BaseDataModel):
@@ -122,6 +153,15 @@ class DebtCreate(BaseDataModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class DebtUpdate(BaseDataModel):
+    person: Optional[str] = None
+    amount: Optional[float] = None
+    direction: Optional[DebtDirection] = None
+    description: Optional[str] = None
+    settled: Optional[bool] = None
+    metadata: Optional[dict[str, Any]] = None
+
+
 class DebtModel(BaseDataModel):
     id: str
     user_id: str
@@ -133,6 +173,68 @@ class DebtModel(BaseDataModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: Optional[dt.datetime] = None
     settled_at: Optional[dt.datetime] = None
+
+
+# ── Recurring & Automated Transactions ───────────────────────────────────
+
+class RecurringTransactionCreate(BaseDataModel):
+    name: str
+    amount: float
+    type: TransactionType = TransactionType.EXPENSE
+    user_id: str = "default_user"
+    category: Optional[str] = None
+    account_id: Optional[str] = None
+    to_account_id: Optional[str] = None
+    frequency: FrequencyType = FrequencyType.MONTHLY
+    day_of_month: Optional[int] = None
+    day_of_week: Optional[int] = None
+    start_date: Optional[dt.date] = None
+    end_date: Optional[dt.date] = None
+    next_due_date: Optional[dt.date] = None
+    active: bool = True
+    auto_execute: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RecurringTransactionUpdate(BaseDataModel):
+    name: Optional[str] = None
+    amount: Optional[float] = None
+    type: Optional[TransactionType] = None
+    category: Optional[str] = None
+    account_id: Optional[str] = None
+    to_account_id: Optional[str] = None
+    frequency: Optional[FrequencyType] = None
+    day_of_month: Optional[int] = None
+    day_of_week: Optional[int] = None
+    start_date: Optional[dt.date] = None
+    end_date: Optional[dt.date] = None
+    next_due_date: Optional[dt.date] = None
+    active: Optional[bool] = None
+    auto_execute: Optional[bool] = None
+    metadata: Optional[dict[str, Any]] = None
+
+
+class RecurringTransactionModel(BaseDataModel):
+    id: str
+    user_id: str
+    name: str
+    amount: float
+    type: str
+    category: Optional[str] = None
+    account_id: Optional[str] = None
+    to_account_id: Optional[str] = None
+    frequency: str = "monthly"
+    day_of_month: Optional[int] = None
+    day_of_week: Optional[int] = None
+    start_date: Optional[dt.date] = None
+    end_date: Optional[dt.date] = None
+    next_due_date: Optional[dt.date] = None
+    last_executed_at: Optional[dt.datetime] = None
+    active: bool = True
+    auto_execute: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[dt.datetime] = None
+    updated_at: Optional[dt.datetime] = None
 
 
 # ── Shodh-Memory Models ──────────────────────────────────────────────────

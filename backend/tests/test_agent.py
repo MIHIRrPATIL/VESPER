@@ -420,6 +420,12 @@ class MockTaskRepository(TaskRepository):
                 return True
         return False
 
+    def get(self, task_id: str) -> Optional[TaskModel]:
+        for t in self._tasks:
+            if t.id == task_id:
+                return t
+        return None
+
     def delete(self, task_id: str) -> bool:
         self._tasks = [t for t in self._tasks if t.id != task_id]
         return True
@@ -1040,6 +1046,42 @@ async def test_media_specialist_playlist_scoring_prioritizes_user_library(monkey
         assert res.success is True
         assert res.data["uri"] == "spotify:playlist:user_everyday_id"
         assert res.data["playlist"].lower() == "everyday"
+
+
+@pytest.mark.asyncio
+async def test_weather_forecast_prefilter_and_location():
+    """Verifies that future weather inquiries with locations route to get_weather_forecast with proper location and days."""
+    planner = SwarmPlanner()
+    plan, _ = await planner.create_plan(
+        "How's the weather going to be tomorrow in Mumbai?",
+        registry={"weather": True},
+    )
+    assert plan.provider_used == "prefilter"
+    assert len(plan.steps) == 1
+    step = plan.steps[0]
+    assert step["agent"] == "weather"
+    assert step["action"] == "get_weather_forecast"
+    assert step["params"]["location"] == "Mumbai"
+    assert step["params"]["days"] == 2
+
+
+def test_evaluator_chain_of_thought_stripping():
+    """Verifies that internal chain-of-thought scratchpads and reasoning leaks are stripped from speech and markdown."""
+    leaked_cot = (
+        "The user is asking about the weather in Mumbai for tomorrow. "
+        "Let me check the current temporal context: - Current date & time: Friday, September 11, 2026, 12:56 AM IST (Friday) "
+        "So 'tomorrow' would be Saturday, September 12, 2026. However, looking at the specialist execution outcomes, "
+        "I have information about the current location (Palghar) which is overcast. "
+        "According to the instructions, I must base every factual claim strictly on the Specialist Execution Outcomes."
+    )
+    eval_result = OutputEvaluator.evaluate(leaked_cot)
+    assert "The user is asking" not in eval_result.speech_text
+    assert "According to the instructions" not in eval_result.speech_text
+    assert "The user is asking" not in eval_result.markdown_body
+    assert "According to the instructions" not in eval_result.markdown_body
+    assert eval_result.speech_text == "Action completed, sir."
+    assert eval_result.markdown_body == "Action completed, sir."
+
 
 
 

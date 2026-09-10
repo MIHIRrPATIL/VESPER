@@ -294,18 +294,38 @@ class MessageRouter:
                             response_text = data.get("speech_text", response_text)
                             markdown_body = data.get("markdown_body", response_text)
                             hud_cards = data.get("hud_cards", [])
+                            specialist_actions = data.get("specialist_actions", [])
                             fast_path = data.get("fast_path", False)
                             intent = data.get("plan_type", "CONVERSE")
                             latency_ms = data.get("latency_ms", 0.0)
+                            navigate_to = data.get("navigate_to")
                         else:
                             logger.error(f"[VOICE] Agent returned HTTP {agent_res.status_code}: {agent_res.text}")
                             response_text = "I apologize, sir, but an error occurred within the cognitive swarm."
                             markdown_body = f"**Cognitive Swarm Error**: HTTP {agent_res.status_code}\n\n```\n{agent_res.text[:400]}\n```"
+                            navigate_to = None
                 except Exception as agent_err:
                     err_desc = str(agent_err) or type(agent_err).__name__
                     logger.warning(f"[VOICE] Agent service call failed or unavailable ({err_desc}). Using fallback.")
                     response_text = "I apologize, sir, but the cognitive agent swarm is currently unreachable."
                     markdown_body = f"**Swarm Unreachable**: {err_desc}"
+                    navigate_to = None
+
+                # Fallback deterministic view resolution if agent did not provide one
+                if not navigate_to and command_text:
+                    cmd_lower = command_text.lower()
+                    if any(w in cmd_lower for w in ["agenda", "task", "todo", "calendar", "schedule"]):
+                        navigate_to = "agenda"
+                    elif any(w in cmd_lower for w in ["finance", "ledger", "transaction", "bank", "account"]):
+                        navigate_to = "transactions"
+                    elif any(w in cmd_lower for w in ["workstation", "overview", "cockpit"]):
+                        navigate_to = "center"
+                    elif any(w in cmd_lower for w in ["service", "telemetry", "hardware", "swarm"]):
+                        navigate_to = "services"
+                    elif any(w in cmd_lower for w in ["tool", "emitter"]):
+                        navigate_to = "tools"
+                    elif any(w in cmd_lower for w in ["log", "event stream", "audit"]):
+                        navigate_to = "logs"
 
                 # 3. Agent Response Delivery -> Broadcast to all display interfaces (HUD, mobile)
                 response_envelope = ServerEnvelope(
@@ -317,8 +337,10 @@ class MessageRouter:
                         "response": response_text,
                         "markdown_body": markdown_body,
                         "hud_cards": hud_cards,
+                        "specialist_actions": specialist_actions,
                         "fast_path": fast_path,
                         "intent": intent,
+                        "navigate_to": navigate_to,
                         "status": "processed",
                         "latency_ms": latency_ms,
                     },
@@ -681,13 +703,13 @@ class MessageRouter:
             )
             await self.manager.broadcast(broadcast_envelope)
 
-        elif gesture in ("AIR_TAP", "PINCH_TAP", "SELECT"):
-            # Air tap / pinch click event
+        elif gesture in ("SHAKA", "HANG_LOOSE", "AIR_TAP", "PINCH_TAP", "SELECT"):
+            # Touchless Shaka (Hang Loose) drawer toggle / select event
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.GESTURE,
                 type=EventType.GESTURE_EVENT,
-                payload={"gesture": "AIR_TAP", "action": "select"},
+                payload={"gesture": "SHAKA", "action": "select"},
             )
             await self.manager.broadcast(broadcast_envelope)
 

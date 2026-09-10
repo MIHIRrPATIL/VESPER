@@ -12,6 +12,8 @@ import json
 import logging
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import time
 from typing import Any, Dict, List, Optional
 import httpx
@@ -338,6 +340,7 @@ class MediaSpecialist(BaseSpecialist):
                 track_uri = top_track.get("uri")
                 track_name = top_track.get("name", "Unknown Track")
                 artists = ", ".join([a.get("name", "") for a in top_track.get("artists", [])])
+                album_name = top_track.get("album", {}).get("name", "")
                 album_art = top_track.get("album", {}).get("images", [{}])[0].get("url", "")
                 spotify_url = top_track.get("external_urls", {}).get("spotify", "")
 
@@ -367,7 +370,8 @@ class MediaSpecialist(BaseSpecialist):
                     )
                     await client.put(play_url, headers=headers, json=play_payload)
 
-                logger.info(f"[Media:Spotify] [OK] Live playback started for '{track_name}' by {artists} on {target_name}")
+                album_desc = f" from '{album_name}'" if album_name else ""
+                logger.info(f"[Media:Spotify] [OK] Live playback started for '{track_name}' by {artists}{album_desc} on {target_name}")
 
                 return SpecialistResult(
                     success=True,
@@ -375,17 +379,19 @@ class MediaSpecialist(BaseSpecialist):
                     data={
                         "title": track_name,
                         "artist": artists,
+                        "album": album_name,
                         "uri": track_uri,
                         "album_art": album_art,
                         "url": spotify_url,
                         "device": target_name,
                         "status": "playing",
                     },
-                    speech_summary=f"Playing '{track_name}' by {artists} on {target_name}, sir.",
+                    speech_summary=f"Playing '{track_name}' by {artists}{album_desc} on {target_name}, sir.",
                     card_payload={
                         "type": "spotify_now_playing",
                         "title": track_name,
                         "artist": artists,
+                        "album": album_name,
                         "album_art": album_art,
                         "url": spotify_url,
                         "device": target_name,
@@ -566,12 +572,34 @@ class MediaSpecialist(BaseSpecialist):
                     else f"Starting playlist '{p_name}'{dev_mention} on Spotify, sir."
                 )
 
+                p_images = p.get("images", []) if isinstance(p, dict) else []
+                pl_art = p_images[0].get("url", "") if p_images else ""
+
                 return SpecialistResult(
                     success=True,
                     action="play_playlist",
-                    data={"playlist": p_name, "uri": playlist_uri, "owner": owner_display, "device": target_name},
+                    data={
+                        "playlist": p_name,
+                        "uri": playlist_uri,
+                        "owner": owner_display,
+                        "device": target_name,
+                        "album_art": pl_art,
+                        "cover_url": pl_art,
+                        "art_url": pl_art,
+                    },
                     speech_summary=speech,
-                    card_payload={"type": "spotify_playlist", "name": p_name, "uri": playlist_uri, "owner": owner_display, "device": target_name},
+                    card_payload={
+                        "type": "spotify_playlist",
+                        "title": f"Playlist: {p_name}",
+                        "name": p_name,
+                        "playlist": p_name,
+                        "uri": playlist_uri,
+                        "owner": owner_display,
+                        "device": target_name,
+                        "album_art": pl_art,
+                        "cover_url": pl_art,
+                        "art_url": pl_art,
+                    },
                 )
 
         except Exception as e:
@@ -691,13 +719,34 @@ class MediaSpecialist(BaseSpecialist):
                                 await client.put("https://api.spotify.com/v1/me/player", headers=headers, json={"device_ids": [target_id], "play": True})
                                 await client.put(play_url, headers=headers, json={"context_uri": artist_uri})
 
+                        artist_images = top_artist.get("images", []) if isinstance(top_artist, dict) else []
+                        artist_art = artist_images[0].get("url", "") if artist_images else ""
+
                         dev_mention = f" on {target_name}" if target_name else ""
                         return SpecialistResult(
                             success=True,
                             action="play_radio",
-                            data={"artist": artist_name, "uri": artist_uri, "type": "artist_radio", "device": target_name},
+                            data={
+                                "artist": artist_name,
+                                "uri": artist_uri,
+                                "type": "artist_radio",
+                                "device": target_name,
+                                "album_art": artist_art,
+                                "cover_url": artist_art,
+                                "art_url": artist_art,
+                            },
                             speech_summary=f"Playing {artist_name} Radio{dev_mention} on Spotify, sir.",
-                            card_payload={"type": "spotify_radio", "station": f"{artist_name} Radio", "uri": artist_uri, "device": target_name},
+                            card_payload={
+                                "type": "spotify_radio",
+                                "title": f"{artist_name} Radio",
+                                "station": f"{artist_name} Radio",
+                                "artist": artist_name,
+                                "uri": artist_uri,
+                                "device": target_name,
+                                "album_art": artist_art,
+                                "cover_url": artist_art,
+                                "art_url": artist_art,
+                            },
                         )
 
                 # 2. If not artist, search for radio or curated playlist (e.g. "Lofi Radio", "Rock Radio")
@@ -715,13 +764,33 @@ class MediaSpecialist(BaseSpecialist):
                             await client.put("https://api.spotify.com/v1/me/player", headers=headers, json={"device_ids": [target_id], "play": True})
                             await client.put(play_url, headers=headers, json={"context_uri": p_uri})
 
+                    pl_images = top_pl.get("images", []) if isinstance(top_pl, dict) else []
+                    pl_art = pl_images[0].get("url", "") if pl_images else ""
+
                     dev_mention = f" on {target_name}" if target_name else ""
                     return SpecialistResult(
                         success=True,
                         action="play_radio",
-                        data={"playlist": p_name, "uri": p_uri, "type": "playlist_radio", "device": target_name},
+                        data={
+                            "playlist": p_name,
+                            "uri": p_uri,
+                            "type": "playlist_radio",
+                            "device": target_name,
+                            "album_art": pl_art,
+                            "cover_url": pl_art,
+                            "art_url": pl_art,
+                        },
                         speech_summary=f"Playing '{p_name}'{dev_mention} on Spotify, sir.",
-                        card_payload={"type": "spotify_radio", "station": p_name, "uri": p_uri, "device": target_name},
+                        card_payload={
+                            "type": "spotify_radio",
+                            "title": f"Radio: {p_name}",
+                            "station": p_name,
+                            "uri": p_uri,
+                            "device": target_name,
+                            "album_art": pl_art,
+                            "cover_url": pl_art,
+                            "art_url": pl_art,
+                        },
                     )
 
                 return SpecialistResult(
@@ -927,6 +996,8 @@ class MediaSpecialist(BaseSpecialist):
 
                 album_phrase = f" from the album or film '{album_name}'" if album_name else ""
                 speech = f"Spotify is currently {status_str} '{track}' by {artists}{album_phrase} on {dev_name}, sir."
+                album_art = album.get("images", [{}])[0].get("url", "") if album.get("images") else ""
+
                 return SpecialistResult(
                     success=True,
                     action="get_playback_status",
@@ -937,12 +1008,24 @@ class MediaSpecialist(BaseSpecialist):
                         "artist": artists,
                         "album": album_name,
                         "movie": album_name,
+                        "album_art": album_art,
+                        "cover_url": album_art,
+                        "art_url": album_art,
                         "release_date": release_date,
                         "device": dev_name,
                         "is_playing": is_playing,
                     },
                     speech_summary=speech,
-                    card_payload={"type": "spotify_now_playing", "title": track, "artist": artists, "album": album_name, "device": dev_name},
+                    card_payload={
+                        "type": "spotify_now_playing",
+                        "title": track,
+                        "artist": artists,
+                        "album": album_name,
+                        "album_art": album_art,
+                        "cover_url": album_art,
+                        "art_url": album_art,
+                        "device": dev_name,
+                    },
                 )
         except Exception as e:
             logger.exception(f"[Media:Spotify] Playback status error: {e}")
@@ -1013,9 +1096,36 @@ class MediaSpecialist(BaseSpecialist):
 
     async def control_playback(self, command: str) -> SpecialistResult:
         """Executes live playback controls: pause, play, next, previous."""
-        token = await self._get_user_token()
         cmd = command.lower().strip()
 
+        # 1. Local MPRIS execution via playerctl (zero latency, offline fallback)
+        playerctl = shutil.which("playerctl")
+        if playerctl:
+            try:
+                mpris_cmd_map = {
+                    "pause": "pause",
+                    "stop": "pause",
+                    "play": "play",
+                    "resume": "play",
+                    "next": "next",
+                    "skip": "next",
+                    "previous": "previous",
+                    "prev": "previous",
+                }
+                mpris_act = mpris_cmd_map.get(cmd)
+                if mpris_act:
+                    subprocess.run(
+                        [playerctl, "-p", "spotify,%any", mpris_act],
+                        check=False,
+                        timeout=1.5,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+            except Exception as e:
+                logger.debug(f"[Media:Playerctl] Local control error ({cmd}): {e}")
+
+        # 2. Spotify Web API sync
+        token = await self._get_user_token()
         if token:
             headers = {"Authorization": f"Bearer {token}"}
             try:

@@ -24,11 +24,13 @@ ActionType = Literal["reminder", "task", "event"]
 # --------------------------------------------------------------------------
 
 _EVENT_TRIGGERS = [
-    r"\bschedule\s+(a |an )?(meeting|call|event|appointment)\b",
+    r"\b(add|create|new|schedule|book|set\s*up)\s+(a\s+|an\s+)?(event|meeting|call|appointment|session|calendar\s+entry|slot)\b",
     r"\bbook\s+(a |an )?(meeting|slot|appointment)\b",
     r"\bput\s+.*\s+on\s+(my\s+)?calendar\b",
     r"\bset up a (meeting|call)\b",
     r"\bmeeting with\b",
+    r"\bevent\s+(at|on|for)\b",
+    r"\bcalendar\s+event\b",
 ]
 
 _REMINDER_TRIGGERS = [
@@ -47,7 +49,7 @@ _TASK_TRIGGERS = [
 ]
 
 _HAS_CLOCK_TIME = re.compile(
-    r"\b\d{1,2}[:.]\d{2}\s*(am|pm)?\b|\b\d{1,2}\s*(am|pm)\b",
+    r"\b\d{1,2}[:.]\d{2}\s*(am|pm)?\b|\b\d{1,2}\s*(am|pm)\b|\b\d{1,2}\s*o'?clock\b",
     re.IGNORECASE,
 )
 
@@ -83,7 +85,8 @@ _LEADING_FILLER = re.compile(
     r"please\s+|"
     r"remind me(\s+to)?\s+|"
     r"set a reminder(\s+to)?\s+|"
-    r"add (a\s+)?task(\s+to)?\s+|"
+    r"(?:add|create|schedule|set up)\s+(?:an?\s+)?(?:event|meeting|call|session|appointment|calendar\s+entry)\s*(?:(?:at|by|on|for)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:o'?clock)?\s*(?:am|pm)?\s*(?:today|tomorrow|tonight)?\s*(?:that|to|for|:|-)?\s*|\s*(?:that|to|for|:|-)\s*)?|"
+    r"add (a\s+|an\s+)?(task|event|meeting)(\s+to)?\s+|"
     r"i need to\s+|"
     r"can you\s+|"
     r"could you\s+|"
@@ -95,21 +98,23 @@ _LEADING_FILLER = re.compile(
 )
 
 _TRAILING_DATE = r"(today|tomorrow|tonight|this (?:morning|afternoon|evening)|(?:on|by)\s+\w+day)"
-_TRAILING_TIME = r"(?:at|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?"
+_TRAILING_TIME = r"(?:at|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:o'?clock)?\s*(?:am|pm)?"
 _TRAILING_TIME_DATE = re.compile(
     rf"\s*(?:(?:{_TRAILING_DATE})\s*(?:{_TRAILING_TIME})?|(?:{_TRAILING_TIME})\s*(?:{_TRAILING_DATE})?)\s*$",
     re.IGNORECASE,
 )
 
 _TIME_PATTERNS = [
-    # "tomorrow at 3pm", "today at 5.45", "Friday at 10am"
-    r"\b((?:today|tomorrow|tonight|this (?:morning|afternoon|evening)|(?:on|by)\s+\w+day)\s+(?:at|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?)\b",
-    # "at 5.45 today", "at 3pm tomorrow", "by 5pm on Friday"
-    r"\b((?:at|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\s*(?:today|tomorrow|tonight|this (?:morning|afternoon|evening)|(?:on\s+)?\w+day)?)\b",
+    # "tomorrow at 3pm", "today at 5.45", "Friday at 10am", "today at 9 o'clock"
+    r"\b((?:today|tomorrow|tonight|this (?:morning|afternoon|evening)|(?:on|by)\s+\w+day)\s+(?:at|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:o'?clock)?\s*(?:am|pm)?)\b",
+    # "at 5.45 today", "at 3pm tomorrow", "at 9 o'clock today", "by 5pm on Friday"
+    r"\b((?:at|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:o'?clock)?\s*(?:am|pm)?\s*(?:today|tomorrow|tonight|this (?:morning|afternoon|evening)|(?:on\s+)?\w+day)?)\b",
+    # "9 o'clock today", "9 oclock", "9 o'clock"
+    r"\b(\d{1,2}(?:[:.]\d{2})?\s*o'?clock\s*(?:am|pm)?\s*(?:today|tomorrow|tonight)?)\b",
     # "in 15 minutes", "in 2 hours"
     r"\b(in\s+\d+\s+(?:minutes?|mins?|hours?|hrs?|days?))\b",
-    # "at 5.45", "at 3pm", "by 10:30am"
-    r"\b((?:at|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?)\b",
+    # "at 5.45", "at 3pm", "by 10:30am", "at 9 o'clock"
+    r"\b((?:at|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:o'?clock)?\s*(?:am|pm)?)\b",
     # "5.45 today", "3pm tomorrow", "5:45 pm"
     r"\b(\d{1,2}[:.]\d{2}\s*(?:am|pm)?\s*(?:today|tomorrow)?)\b",
     r"\b(\d{1,2}\s*(?:am|pm)\s*(?:today|tomorrow)?)\b",

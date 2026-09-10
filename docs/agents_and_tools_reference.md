@@ -69,6 +69,16 @@ Fetches upcoming events from the user's primary Google Calendar via Google Calen
   - `days_ahead` (`integer`, optional): Window of days to inspect (default `7`).
 - **Returns**: `data.events` (list of Google Calendar event objects).
 
+#### `search_mobile_notifications`
+Searches forwarded mobile companion notifications by text content, sender, contact, or app package.
+- **Parameters**:
+  - `query` (`string`, optional): Search keywords or phrases within notification title, body text, or subtext.
+  - `sender_filter` (`string`, optional): Filter notifications by sender or sender group name (e.g., WhatsApp contact).
+  - `app_filter` (`string`, optional): Filter by application name or package (e.g., `whatsapp`, `slack`, `spotify`).
+  - `limit` (`integer`, optional): Maximum notifications to return (default `10`).
+- **Returns**: `data.notifications` (list of matching notification records), `data.name_found` (boolean, if user queried whether their name was mentioned), `speech_summary` with natural British butler response, `card_payload` (type `NOTIFICATION_DIGEST`).
+- **Privacy & System Boundary**: Searches local buffered notifications forwarded from the mobile companion app while connected. Transparently reports when queries are not in the local buffer rather than hallucinating or inappropriately attempting screen OCR on unrelated desktops.
+
 ---
 
 ## 2. `MediaSpecialist` (Music, Playback & YouTube Search)

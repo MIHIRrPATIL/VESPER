@@ -68,14 +68,17 @@ PLANNING RULES:
      * Webcam/Screen OCR then web search: step 2 params: {{"query": "$step_1.extracted_text"}}
    - "direct": ONLY for conversational greetings ("hello") or when answer is resolved completely from ACTIVE SESSION CONTEXT.
 
-2. Perception:
-   - Screen/Display: Use 'vision:inspect_screen' or 'vision:ocr_screen' for computer monitor, IDE, windows, or desktop errors.
+2. Perception vs Mobile Notifications:
+   - Screen/Display: Use 'vision:inspect_screen' or 'vision:ocr_screen' ONLY for computer monitor, IDE, windows, or desktop errors.
    - Physical/Camera: Use 'vision:inspect_webcam' or 'vision:ocr_webcam' for handheld objects, documents, or physical surroundings.
+   - Mobile Notifications & Chat Messages: ALWAYS use 'tasks:search_mobile_notifications' or 'tasks:list_mobile_notifications' for WhatsApp, Slack, Telegram, SMS, or phone alerts. NEVER use 'vision:ocr_screen' or 'vision:inspect_screen' for mobile notifications or chat messages unless the user explicitly refers to their computer monitor or screen!
 
 3. Tasks vs Reminders vs Events:
    - General todo without alarm: 'tasks:add_task' or 'tasks:list_tasks'.
    - Time-anchored alarm clock: 'tasks:set_reminder' or 'tasks:list_reminders'.
    - Calendar meeting/agenda: 'tasks:schedule_event', 'tasks:list_calendar_events', 'tasks:get_daily_agenda'.
+   - Renaming / Updating / Rescheduling: 'tasks:update_task' with params: {{"query": "<existing title or time>", "new_title": "<new title>", "new_time": "<optional new time>"}}.
+   - Deleting / Removing: 'tasks:delete_task' with params: {{"title": "<title or time to remove>"}}.
 
 4. Web Search:
    - Plan 'research:web_search' for real-world facts, trivia, movie origins, directors, weather, or explicit search queries.
@@ -96,10 +99,21 @@ PLANNING RULES:
    - Relative terms ('today', 'yesterday', 'tomorrow', 'tonight', 'next week', 'this morning') must be resolved relative to this reference point.
    - For daily agenda or today's tasks ('what are my tasks today', 'today's agenda', 'what do I have scheduled today'): route to 'tasks:get_daily_agenda' with params: {{"date": "today", "query": "<user query>"}}.
 
+8. Personal Finances & Accounts:
+   - When the user asks about financial standing ("how am I doing financially", "how are my finances"), net worth, multi-account holdings (Union Bank, SBI, Saraswat, Cash), or debts: ALWAYS route to 'finance:get_financial_summary' or 'finance:get_balance'.
+   - When the user asks to view recent transactions, expenses, or spends: route to 'finance:list_transactions'.
+   - When the user asks to check bank emails or transaction alerts in their mailbox: route to 'email:search_emails' with the bank or transaction query.
+   - NEVER route general financial inquiries to mobile SMS notifications! Mobile notifications ('tasks:search_mobile_notifications') are strictly for phone alerts (WhatsApp, Slack, Telegram, SMS) when explicitly mentioned by the user.
+
 FEW-SHOT EXAMPLES:
+- Financial standing: {{"plan_type": "parallel", "steps": [{{"agent": "finance", "action": "get_financial_summary", "params": {{}}}}]}}
+- Bank balance: {{"plan_type": "parallel", "steps": [{{"agent": "finance", "action": "get_balance", "params": {{"account_name": "Saraswat"}}}}]}}
+- Bank email transaction: {{"plan_type": "parallel", "steps": [{{"agent": "email", "action": "search_emails", "params": {{"query": "Saraswat Bank transaction"}}}}]}}
 - Reminder: {{"plan_type": "parallel", "steps": [{{"agent": "tasks", "action": "set_reminder", "params": {{"reminder": "Pick up my mom", "time": "5:45 PM today"}}}}]}}
 - Task: {{"plan_type": "parallel", "steps": [{{"agent": "tasks", "action": "add_task", "params": {{"title": "Deploy backend"}}}}]}}
 - Event: {{"plan_type": "parallel", "steps": [{{"agent": "tasks", "action": "schedule_event", "params": {{"summary": "Meeting with Rohit", "start_time": "tomorrow at 3pm"}}}}]}}
+- Rename event: {{"plan_type": "parallel", "steps": [{{"agent": "tasks", "action": "update_task", "params": {{"query": "9 o'clock event", "new_title": "AWS Workshop"}}}}]}}
+- Remove event: {{"plan_type": "parallel", "steps": [{{"agent": "tasks", "action": "delete_task", "params": {{"title": "8 o'clock event"}}}}]}}
 - Handheld: {{"plan_type": "sequential", "steps": [{{"agent": "vision", "action": "ocr_webcam", "params": {{"focus_hint": "title/label"}}}}, {{"agent": "research", "action": "web_search", "params": {{"query": "$step_1.extracted_text"}}}}]}}
 - Multi-intent: {{"plan_type": "parallel", "steps": [{{"agent": "media", "action": "play_music", "params": {{"query": "lofi"}}}}, {{"agent": "tasks", "action": "add_task", "params": {{"title": "Review PR"}}}}]}}
 - Screen error: {{"plan_type": "parallel", "steps": [{{"agent": "vision", "action": "inspect_screen", "params": {{"query": "error"}}}}]}}
@@ -547,19 +561,57 @@ class SwarmPlanner:
                     direct_response="Which email or conversation are you referring to, sir?",
                 )
 
-        # 2. Financial Balance / Net Worth checks:
+        # 2. Financial Overview, Balance & Transactions:
+        is_financial_summary_query = bool(
+            re.search(
+                r"\b(how am i doing financially|how are (my|our) finances|financial (standing|status|health|summary|overview|position)|check (my )?finances|overall financial|how is my money|what is my net worth|what('s| is) my net worth)\b",
+                q_lower,
+            )
+        )
+        if is_financial_summary_query:
+            logger.info("[Planner.PreFilter] Matched financial overview query -> finance:get_financial_summary")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "finance", "action": "get_financial_summary", "params": {}}],
+            )
+
         is_balance_query = bool(
             re.search(
-                r"\b(what('s| is) my (bank )?balance|check (my )?(bank )?balance|my account balance|how much money do i have|what is my net worth|check balance|show (my )?balance)\b",
+                r"\b(what('s| is) my (bank )?balance|check (my )?(bank )?balance|my account balance|how much money do i have|check balance|show (my )?balance)\b",
                 q_lower,
             )
         )
         if is_balance_query:
-            logger.info("[Planner.PreFilter] Matched balance query -> finance:get_balance")
+            from backend.agent.normalizer import extract_bank_and_intent, resolve_bank_alias
+            detected_bank, _ = extract_bank_and_intent(q_lower)
+            acc_name = resolve_bank_alias(detected_bank) if detected_bank else None
+            params = {"account_name": acc_name} if acc_name else {}
+            logger.info(f"[Planner.PreFilter] Matched balance query -> finance:get_balance {params}")
             return SwarmPlan(
                 plan_type="parallel",
                 provider_used="prefilter",
-                steps=[{"agent": "finance", "action": "get_balance", "params": {}}],
+                steps=[{"agent": "finance", "action": "get_balance", "params": params}],
+            )
+
+        is_txn_list_query = bool(
+            re.search(
+                r"\b(show|list|get|check|view)\s+(my\s+)?(recent\s+)?(transactions?|expenses?|spends?|spendings?|payments?)\b",
+                q_lower,
+            )
+            or re.search(r"\b(recent\s+transactions?|recent\s+expenses?)\b", q_lower)
+            and not any(w in q_lower for w in ["email", "emails", "inbox", "mail", "gmail", "task", "tasks"])
+        )
+        if is_txn_list_query:
+            from backend.agent.normalizer import extract_bank_and_intent, resolve_bank_alias
+            detected_bank, _ = extract_bank_and_intent(q_lower)
+            acc_name = resolve_bank_alias(detected_bank) if detected_bank else None
+            params = {"account_name": acc_name} if acc_name else {}
+            logger.info(f"[Planner.PreFilter] Matched transactions list query -> finance:list_transactions {params}")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{"agent": "finance", "action": "list_transactions", "params": params}],
             )
 
         # 3. Explicit Screen perception: Screen/desktop look/inspect/ocr
@@ -574,15 +626,23 @@ class SwarmPlanner:
                 steps=[{"agent": "vision", "action": act, "params": {"query": query}}],
             )
 
-        # 4. Explicit Direct Camera/Webcam perception: strictly requires camera/webcam keyword
+        # 4. Physical / Handheld / Webcam perception:
+        is_handheld = any(w in q_lower for w in ["holding", "in my hand", "in my hands", "showing you", "in front of me", "am i holding"])
+        is_doc = any(w in q_lower for w in ["receipt", "bill", "invoice", "document", "paper", "ticket", "business card", "label", "note", "letter", "prescription", "barcode"])
         has_camera_target = any(w in q_lower for w in ["camera", "webcam"])
-        if has_camera_target and has_perception_verb:
-            act = "ocr_webcam" if ("ocr" in q_lower or "read" in q_lower) else "inspect_webcam"
-            logger.info(f"[Planner.PreFilter] Matched explicit webcam query -> vision:{act}")
+        has_perception = any(w in q_lower for w in ["look", "see", "read", "ocr", "check", "inspect", "details of", "tell me about", "what does", "what is", "describe", "scan", "extract"])
+
+        if (has_camera_target and has_perception) or (is_handheld and has_perception) or (is_doc and any(w in q_lower for w in ["read", "ocr", "details of", "inspect", "check", "scan", "what is", "tell me about"])):
+            is_ocr = is_doc or any(w in q_lower for w in ["ocr", "read", "text", "say", "written", "words", "details of", "bill", "invoice", "number", "amount", "total"])
+            act = "ocr_webcam" if is_ocr else "inspect_webcam"
+            params: Dict[str, Any] = {"query": query}
+            if is_doc:
+                params["focus_hint"] = "Extract merchant/vendor, date, line items, prices, taxes, total amount, and payment details verbatim."
+            logger.info(f"[Planner.PreFilter] Matched handheld/document vision query -> vision:{act} ({params})")
             return SwarmPlan(
                 plan_type="parallel",
                 provider_used="prefilter",
-                steps=[{"agent": "vision", "action": act, "params": {"query": query}}],
+                steps=[{"agent": "vision", "action": act, "params": params}],
             )
 
         # 5. Inbox / Unread Emails check:
@@ -600,6 +660,108 @@ class SwarmPlanner:
                 plan_type="parallel",
                 provider_used="prefilter",
                 steps=[{"agent": "email", "action": "list_unread_emails", "params": {}}],
+            )
+
+        # 5b. Search / Check Mobile Notifications (WhatsApp, Slack, Telegram, phone alerts)
+        has_notif_word = (
+            any(w in q_lower for w in [
+                "notification", "notifications", "whatsapp alert", "phone alert", "mobile alert",
+                "notification that", "notification from", "sent on whatsapp", "check whatsapp",
+                "search whatsapp", "whatsapp message", "slack message", "telegram message",
+                "check messages", "check my messages", "search notifications", "check notifications",
+            ])
+            or (any(app in q_lower for app in ["whatsapp", "slack", "telegram"]) and any(w in q_lower for w in ["check", "search", "find", "get", "read", "see", "any", "name"]))
+        )
+        if has_notif_word and not any(w in q_lower for w in ["screen", "monitor", "display"]):
+            app_filter = None
+            for app in ["whatsapp", "slack", "telegram", "gmail", "discord", "signal"]:
+                if app in q_lower:
+                    app_filter = app
+                    break
+
+            sender = None
+            sender_match = re.search(r"(?:from|by|sent by)\s+([a-zA-Z\s]+?)(?:\s+on|\s+in|\s+about|\s+regarding|\?|$)", query, re.IGNORECASE)
+            if not sender_match:
+                sender_match = re.search(r"notification that\s+([a-zA-Z\s]+?)\s+sent", query, re.IGNORECASE)
+            if sender_match:
+                sender = sender_match.group(1).strip()
+
+            logger.info(f"[Planner.PreFilter] Matched notification search query -> tasks:search_mobile_notifications (sender={sender}, app={app_filter})")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{
+                    "agent": "tasks",
+                    "action": "search_mobile_notifications",
+                    "params": {
+                        "query": query,
+                        "sender": sender or "",
+                        "app": app_filter,
+                    },
+                }],
+            )
+
+        # 5c. Task / Event Renaming, Updating, or Deleting:
+        # Check compound queries first: e.g. "Remove the 8 o'clock event and rename the 9 o'clock event to AWS Workshop"
+        m_compound_del_rename = re.search(
+            r"\b(?:remove|delete|cancel)\s+(?:the\s+)?(?P<del_target>.+?)\s+and\s+(?:rename|change)\s+(?:the\s+)?(?P<ren_target>.+?)\s+(?:to|as)\s+[\"']?(?P<new_title>[^\"'\n\.]+)",
+            query,
+            re.IGNORECASE,
+        )
+        if m_compound_del_rename:
+            del_t = m_compound_del_rename.group("del_target").strip()
+            ren_t = m_compound_del_rename.group("ren_target").strip()
+            new_t = m_compound_del_rename.group("new_title").strip()
+            logger.info(f"[Planner.PreFilter] Matched compound remove & rename query -> tasks:delete_task ({del_t}) + tasks:update_task ({ren_t} -> {new_t})")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[
+                    {"agent": "tasks", "action": "delete_task", "params": {"title": del_t}},
+                    {"agent": "tasks", "action": "update_task", "params": {"query": ren_t, "new_title": new_t}},
+                ],
+            )
+
+        # Single rename query: e.g. "Rename the 9 o'clock event to AWS Workshop", "Rename task X to Y"
+        m_rename = re.search(
+            r"\b(?:rename|change(?:\s+the\s+name\s+of)?|retitled?)\s+(?:the\s+)?(?P<target>.+?)\s+(?:to|as)\s+[\"']?(?P<new_title>[^\"'\n\.]+)",
+            query,
+            re.IGNORECASE,
+        )
+        if m_rename and not any(w in q_lower for w in ["file", "folder", "directory", "code", "variable", "branch"]):
+            ren_t = m_rename.group("target").strip()
+            new_t = m_rename.group("new_title").strip()
+            logger.info(f"[Planner.PreFilter] Matched rename query -> tasks:update_task ({ren_t} -> {new_t})")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{
+                    "agent": "tasks",
+                    "action": "update_task",
+                    "params": {
+                        "query": ren_t,
+                        "new_title": new_t,
+                    },
+                }],
+            )
+
+        # Single delete query: e.g. "Remove the 8 o'clock event", "delete the 8 o'clock event", "delete task buy milk"
+        m_delete = re.search(
+            r"\b(?:remove|delete|cancel)\s+(?:the\s+)?(?P<target>[^,\.]*?(?:event|meeting|task|reminder|\d{1,2}\s*o'?clock|\d{1,2}(?::\d{2})?\s*(?:am|pm)))(?:\s+from\s+(?:my\s+)?(?:calendar|schedule|agenda|tasks|reminders|list))?$",
+            query,
+            re.IGNORECASE,
+        )
+        if m_delete and not any(w in q_lower for w in ["file", "folder", "directory", "screen", "window", "device"]):
+            del_t = m_delete.group("target").strip()
+            logger.info(f"[Planner.PreFilter] Matched delete task/event query -> tasks:delete_task ({del_t})")
+            return SwarmPlan(
+                plan_type="parallel",
+                provider_used="prefilter",
+                steps=[{
+                    "agent": "tasks",
+                    "action": "delete_task",
+                    "params": {"title": del_t},
+                }],
             )
 
         # 6. Network Device Discovery & Subnet Scan:
@@ -747,6 +909,34 @@ class SwarmPlanner:
 
         if intent == SemanticIntent.HANDHELD_OBJECT_RESEARCH:
             logger.info(f"[Planner.PreFilter] Semantic match: HANDHELD_OBJECT_RESEARCH (conf={conf:.2f}, proto='{proto}')")
+            is_document_read = any(
+                w in q_lower for w in [
+                    "receipt", "bill", "invoice", "document", "letter", "note", "paper",
+                    "what does it say", "what does this say", "read it", "read this",
+                    "read what", "transcribe", "text on", "details of"
+                ]
+            ) and not any(
+                w in q_lower for w in [
+                    "author", "rating", "review", "price", "buy", "online", "who wrote",
+                    "other books", "worth", "reviews", "google"
+                ]
+            )
+            if is_document_read:
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[
+                        {
+                            "agent": "vision",
+                            "action": "ocr_webcam",
+                            "params": {
+                                "query": query,
+                                "focus_hint": "Extract merchant/vendor, date, line items, prices, taxes, total amount, and payment details verbatim.",
+                            },
+                        }
+                    ],
+                )
+
             # Preserve user secondary questions or specific attributes (e.g. "and tell the best book", "sugar content", "calories")
             secondary_hint = ""
             for conj in [" and ", " also ", " plus ", " then ", ", "]:
@@ -924,43 +1114,30 @@ class SwarmPlanner:
             )
 
         # ── WEATHER PREFILTER ─────────────────────────────────────────────────
-        # Current weather / conditions
-        is_current_weather = any(p in q_lower for p in [
-            "what's the weather", "what is the weather", "how's the weather",
-            "current weather", "weather right now", "weather today",
-            "is it hot", "is it cold", "temperature outside", "weather outside",
-            "weather in", "how's it outside",
-        ])
-        if is_current_weather:
-            location = None
-            loc_match = re.search(r"weather (?:in|at|for|around)\s+([\w\s,]+?)(?:\s+(?:right now|today|now|currently))?$", q_lower)
-            if loc_match:
-                location = loc_match.group(1).strip().title()
-            logger.info(f"[Planner.PreFilter] Weather inquiry detected -> weather:get_current_weather (location={location})")
-            if not registry or registry.get("weather"):
-                return SwarmPlan(
-                    plan_type="parallel",
-                    provider_used="prefilter",
-                    steps=[{"agent": "weather", "action": "get_current_weather", "params": {"location": location} if location else {}}],
-                )
-            elif registry.get("research"):
-                return SwarmPlan(
-                    plan_type="parallel",
-                    provider_used="prefilter",
-                    steps=[{"agent": "research", "action": "web_search", "params": {"query": f"weather in {location}" if location else "current weather"}}],
-                )
+        def _extract_weather_location(query_text: str) -> Optional[str]:
+            q_clean = query_text.rstrip("?.! ")
+            m = re.search(
+                r"\b(?:in|at|for|around)\s+([a-zA-Z\s,]+?)(?:\s+(?:tomorrow\s+(?:morning|afternoon|evening|night)|tomorrow|today|tonight|yesterday|this weekend|next week|right now|currently|now|this evening|this morning|this afternoon))?$",
+                q_clean,
+                re.IGNORECASE,
+            )
+            if m:
+                cand = m.group(1).strip(", ")
+                if cand.lower() not in (
+                    "the morning", "the afternoon", "the evening", "the night",
+                    "the week", "the weekend", "a few days", "the next few days", "me", "us"
+                ):
+                    return cand.title()
+            return None
 
-        # Rain / umbrella check
+        # Rain / storm / umbrella check
         is_rain_check = any(p in q_lower for p in [
-            "will it rain", "going to rain", "is it raining", "rain today",
+            "will it rain", "going to rain", "is it raining", "rain today", "rain tomorrow",
             "need an umbrella", "carry an umbrella", "umbrella", "bring a raincoat",
             "chance of rain", "precipitation", "will it storm", "thunderstorm today",
         ])
         if is_rain_check:
-            location = None
-            loc_match = re.search(r"(?:rain|storm|umbrella) (?:in|at|for|around)\s+([\w\s,]+?)(?:\s+(?:today|tonight|now))?$", q_lower)
-            if loc_match:
-                location = loc_match.group(1).strip().title()
+            location = _extract_weather_location(query)
             logger.info(f"[Planner.PreFilter] Rain check detected -> weather:check_rain (location={location})")
             if not registry or registry.get("weather"):
                 return SwarmPlan(
@@ -975,32 +1152,62 @@ class SwarmPlanner:
                     steps=[{"agent": "research", "action": "web_search", "params": {"query": f"rain forecast {location}" if location else "will it rain today"}}],
                 )
 
-        # Weather forecast
-        is_forecast = any(p in q_lower for p in [
-            "weather forecast", "forecast for", "weather this week", "weather next",
-            "tomorrow's weather", "what will the weather be", "weather for the next",
-        ])
+        # Weather forecast (future weather: tomorrow, next week, weekend, forecast, going to be, will it be)
+        is_forecast = (
+            any(p in q_lower for p in [
+                "weather forecast", "forecast for", "weather this week", "weather next",
+                "tomorrow's weather", "what will the weather be", "weather for the next",
+                "tomorrow", "day after tomorrow", "this weekend", "next week", "forecast",
+                "going to be", "will the weather be", "will it be", "upcoming weather",
+            ])
+            and any(w in q_lower for w in ["weather", "temperature", "forecast", "climate", "conditions", "hot", "cold", "sunny", "rainy", "warm"])
+        )
         if is_forecast:
-            location = None
+            location = _extract_weather_location(query)
             days = 3
             days_match = re.search(r"(\d+)\s*days?", q_lower)
             if days_match:
                 days = int(days_match.group(1))
-            loc_match = re.search(r"forecast (?:for|in|at)\s+([\w\s,]+?)(?:\s+(?:this|next|for))?$", q_lower)
-            if loc_match:
-                location = loc_match.group(1).strip().title()
+            elif "tomorrow" in q_lower:
+                days = 2
+            elif "weekend" in q_lower or "week" in q_lower:
+                days = 5
+
             logger.info(f"[Planner.PreFilter] Forecast detected -> weather:get_weather_forecast (location={location}, days={days})")
             if not registry or registry.get("weather"):
                 return SwarmPlan(
                     plan_type="parallel",
                     provider_used="prefilter",
-                    steps=[{"agent": "weather", "action": "get_weather_forecast", "params": {"location": location, "days": days}}],
+                    steps=[{"agent": "weather", "action": "get_weather_forecast", "params": {"location": location, "days": days} if location else {"days": days}}],
                 )
             elif registry.get("research"):
                 return SwarmPlan(
                     plan_type="parallel",
                     provider_used="prefilter",
                     steps=[{"agent": "research", "action": "web_search", "params": {"query": f"{days} day weather forecast for {location}" if location else "weather forecast"}}],
+                )
+
+        # Current weather / conditions
+        is_current_weather = any(p in q_lower for p in [
+            "what's the weather", "what is the weather", "how's the weather",
+            "current weather", "weather right now", "weather today",
+            "is it hot", "is it cold", "temperature outside", "weather outside",
+            "weather in", "how's it outside", "temperature in", "temperature at",
+        ])
+        if is_current_weather:
+            location = _extract_weather_location(query)
+            logger.info(f"[Planner.PreFilter] Weather inquiry detected -> weather:get_current_weather (location={location})")
+            if not registry or registry.get("weather"):
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{"agent": "weather", "action": "get_current_weather", "params": {"location": location} if location else {}}],
+                )
+            elif registry.get("research"):
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{"agent": "research", "action": "web_search", "params": {"query": f"weather in {location}" if location else "current weather"}}],
                 )
 
         # ── CONVERSATION PREFILTER ────────────────────────────────────────────
@@ -1057,11 +1264,19 @@ class SwarmPlanner:
 
         domain_keywords = {
             "media": ["play", "song", "music", "track", "spotify", "artist", "album", "volume", "pause", "resume", "listen", "soundtrack", "lofi", "playlist", "playlists"],
-            "tasks": ["task", "todo", "reminder", "remind", "calendar", "event", "meeting", "agenda", "schedule", "appointment"],
+            "tasks": [
+                "task", "todo", "reminder", "remind", "calendar", "event", "meeting", "agenda", "schedule", "appointment",
+                "notification", "notifications", "whatsapp", "slack", "telegram", "sms", "alert", "alerts",
+            ],
             "email": ["email", "mail", "inbox", "thread", "message", "sender", "unread", "draft", "rohit", "arpit", "hemanshu"],
             "vision": ["see", "look", "watch", "camera", "webcam", "screen", "display", "monitor", "holding", "read", "ocr", "terminal", "window"],
             "github": ["repo", "repository", "git", "github", "commit", "branch", "pr", "pull request", "issue", "clone", "code"],
-            "finance": ["balance", "bank", "money", "rupees", "inr", "expense", "spent", "split", "debt", "owe", "transaction"],
+            "finance": [
+                "balance", "bank", "money", "rupees", "inr", "expense", "expenses", "spent", "spending", "split", "debt", "debts",
+                "owe", "owes", "transaction", "transactions", "financial", "financially", "finances", "wealth", "funds", "ledger",
+                "atm", "cash", "saraswat", "sarasworth", "sbi", "union bank", "hdfc", "icici", "savings", "salary", "net worth",
+                "account", "accounts",
+            ],
             "memory": ["remember", "forget", "recall", "memorize", "preference", "profile", "what do you know about me"],
             "system": ["volume", "battery", "cpu", "ram", "specs", "brightness", "bluetooth", "wifi", "host", "system", "cluster", "vitals", "hardware", "report"],
             "crawl": ["crawl", "scrape", "documentation", "scrape page", "docs for"],
@@ -1258,7 +1473,18 @@ class SwarmPlanner:
                         step["params"] = {
                             "title": action_info.title,
                             "priority": params.get("priority", "normal"),
+                            "time": time_anchor if time_anchor != "today" else None,
                         }
+                elif act_name in (
+                    "update_task", "rename_task", "reschedule_task", "edit_task",
+                    "update_event", "rename_event", "reschedule_event", "modify_task",
+                ):
+                    step["action"] = "update_task"
+                elif act_name in (
+                    "delete_task", "remove_task", "delete_reminder", "remove_reminder",
+                    "delete_event", "remove_event", "cancel_event", "delete",
+                ):
+                    step["action"] = "delete_task"
 
         # ── Post-LLM Personal Correspondence vs Web Search Disambiguation ──
         q_lower = query.lower()

@@ -376,6 +376,45 @@ class NotificationService:
                 break
         return results
 
+    def search_notifications(
+        self,
+        query: Optional[str] = None,
+        sender_filter: Optional[str] = None,
+        app_filter: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[MobileNotification]:
+        """Searches recent notifications by text content, sender/contact name, or app."""
+        results: List[MobileNotification] = []
+        q_clean = (query or "").lower().strip()
+        sender_clean = (sender_filter or "").lower().strip()
+        app_clean = (app_filter or "").lower().strip()
+
+        for n in self._notifications:
+            # 1. App filter check
+            if app_clean:
+                if app_clean not in n.app_name.lower() and app_clean not in n.package_name.lower():
+                    continue
+
+            # 2. Sender filter check (searches title and text)
+            if sender_clean:
+                title_lower = (n.title or "").lower()
+                text_lower = (n.text or "").lower()
+                if sender_clean not in title_lower and sender_clean not in text_lower:
+                    continue
+
+            # 3. Content query check
+            if q_clean:
+                combined_text = f"{n.title} {n.text} {n.subtext or ''}".lower()
+                if q_clean not in combined_text:
+                    q_words = [w for w in q_clean.split() if len(w) > 3]
+                    if not q_words or not any(w in combined_text for w in q_words):
+                        continue
+
+            results.append(n)
+            if len(results) >= limit:
+                break
+        return results
+
     def get_grouped_notifications(self) -> Dict[str, List[Dict[str, Any]]]:
         """Returns active notifications grouped by application like the OS notification panel."""
         grouped: Dict[str, List[Dict[str, Any]]] = {}

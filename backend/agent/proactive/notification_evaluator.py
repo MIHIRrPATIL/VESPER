@@ -31,6 +31,9 @@ BANK_SENDER_PATTERNS = [
     r"hdfc", r"icici", r"sbi", r"axis", r"kotak", r"paytm", r"cred", r"gpay"
 ]
 
+USER_NAME = "Mihir"
+USER_ALIASES = [r"\bmihir\b", r"@mihir\b", r"\bpatil\b"]
+
 
 class EvaluationResult(BaseModel):
     """Result returned by NotificationEvaluator indicating whether notification was triaged."""
@@ -87,6 +90,16 @@ class NotificationEvaluator:
             logger.info(f"[NotificationEvaluator] Extracted ambient OTP: '{otp_code}' from {notif.title}")
             return EvaluationResult(handled=True, reason="ambient_otp")
 
+        # 5b. Group message triage rule:
+        # If notification is from a group chat, only extract tasks if it specifically mentions the user ("Mihir").
+        # If it's a 1-on-1 direct message, user mention is not required.
+        if self._is_group_notification(notif) and not self._mentions_user(notif.text):
+            logger.info(
+                f"[NotificationEvaluator] Group notification '{notif.title}' did not mention user ('{USER_NAME}'); "
+                f"suppressing task extraction."
+            )
+            return EvaluationResult(handled=True, reason="group_message_not_addressed_to_user")
+
         # 6. VIP Task & Action Item Extraction (Only for MEDIUM, HIGH, URGENT)
         if notif.priority in (NotificationPriority.URGENT, NotificationPriority.HIGH, NotificationPriority.MEDIUM):
             task_action = await self._try_extract_vip_task(notif)
@@ -95,6 +108,35 @@ class NotificationEvaluator:
                 return EvaluationResult(handled=True, staged_action=staged)
 
         return EvaluationResult(handled=False)
+
+    def _is_group_notification(self, notif: MobileNotification) -> bool:
+        """Determines if an incoming notification originated from a group conversation."""
+        if getattr(notif, "is_group_conversation", False):
+            return True
+
+        title = notif.title.strip()
+        # Pattern 1: WhatsApp / messaging group format: "GroupName (N messages): Sender" or "GroupName (N): Sender"
+        if re.search(r"\([^)]*messages?\)\s*:\s*", title, re.IGNORECASE):
+            return True
+        if re.search(r"\(\d+\)\s*:\s*", title):
+            return True
+
+        # Pattern 2: Group name separated by colon, e.g. "IPD GANG WITH JAY: Hitanshu Gala"
+        if ":" in title:
+            prefix = title.split(":", 1)[0].strip()
+            group_words = ["group", "gang", "team", "project", "batch", "club", "squad", "family", "class", "dept", "announcements"]
+            if any(w in prefix.lower() for w in group_words):
+                return True
+            if len(prefix.split()) >= 2:
+                return True
+
+        return False
+
+    def _mentions_user(self, text: str) -> bool:
+        """Checks if the message explicitly mentions or addresses the user."""
+        t = text.lower()
+        return any(re.search(alias, t, re.IGNORECASE) for alias in USER_ALIASES)
+
 
     def _is_casual_banter(self, text: str) -> bool:
         """Fast deterministic check for common non-actionable chat messages."""
@@ -331,14 +373,16 @@ class NotificationEvaluator:
                 f"Message received:\n"
                 f"  From: {notif.title}\n"
                 f"  Text: {notif.text}\n\n"
-                f"Determine if this message contains a concrete, actionable request, assignment, or deadline directly intended for the user from a real contact or team.\n"
+                f"Determine if this message contains an IMPORTANT, concrete, actionable request, assignment, or deadline directly intended for the user from a real contact or team.\n"
                 f"CRITICAL FILTERING RULES (respond with actionable: false):\n"
+                f"- The message must be genuinely IMPORTANT. Casual check-ins, minor chatter, jokes, rhetorical questions, or low-priority social comments are NEVER actionable tasks, even if directed at the user.\n"
                 f"- Advertisements, brand promotions, discounts, coupon codes, and store sales are NEVER tasks.\n"
                 f"- Expiring points/credits notifications (e.g. PharmEasy, Zomato, Swiggy, Uber) are NEVER tasks.\n"
                 f"- Transaction confirmations, delivery updates, and automated receipts are NOT tasks.\n"
                 f"- Casual banter, greetings, emotional updates, or generic comments are NOT actionable.\n\n"
                 f"Respond in valid JSON format with keys:\n"
                 f"  \"actionable\": true or false,\n"
+                f"  \"importance\": \"high\" | \"normal\" | \"low\",\n"
                 f"  \"task\": \"concise actionable title (under 8 words) if actionable, else empty string\",\n"
                 f"  \"reason\": \"brief explanation\"\n"
             )
@@ -352,9 +396,13 @@ class NotificationEvaluator:
             if not isinstance(data, dict) or not data.get("actionable"):
                 return None
 
+            if str(data.get("importance", "")).lower() == "low":
+                return None
+
             task_title = (data.get("task") or "").strip()
             if not task_title or len(task_title) < 3:
                 return None
+
 
             action_id = f"act_task_{int(time.time())}"
             verbatim_text = f"Task: {task_title}"

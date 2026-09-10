@@ -68,6 +68,7 @@ Incoming mobile notifications are triaged through a multi-stage filtering pipeli
 - **Persistent Keepalive Filtering**: Media playback status updates (e.g. Spotify `Spotify is trying to play...`) are identified and suppressed from creating interruptive alerts.
 - **In-Place Mutation**: Dynamic notifications (e.g. file download progress bars) update existing records in-place rather than flooding the HUD digest.
 - **Priority Scoring**: Heuristically scores notifications into `URGENT`, `HIGH`, `NORMAL`, or `LOW` based on keywords and app category.
+- **Notification Search & Privacy Boundary (`search_notifications`)**: Allows querying buffered notifications by sender, contact, or content text. Integrates transparent boundary feedback: if a query is not found in buffered notifications, the assistant honestly explains that it only retains alerts forwarded while connected and does not have direct access to private on-device messaging databases (e.g., WhatsApp, Signal).
 
 ### 2.4 Zero-Configuration Dynamic UDP Beacon Discovery
 To eliminate hardcoded IP addresses when moving between Wi-Fi networks:
@@ -94,7 +95,8 @@ The vision pipeline in `backend/vision/gesture_service.py` provides optical inte
 +-------------------+------------------------------------------------------+
 | Gesture           | Action / System Response                             |
 +-------------------+------------------------------------------------------+
-| AIR_TAP           | Trigger / Select active item                         |
+| SHAKA             | Toggle Notifications & Advisories Drawer / Select    |
+| AIR_TAP (Legacy)  | Trigger / Select active item                         |
 | CLOSED_FIST       | Instant Barge-In Interrupt: halts TTS & agent steps  |
 | OPEN_PALM         | Play / Pause media playback                          |
 | PINCH             | Volume Knob continuous adjustment (0% to 100%)       |
@@ -113,6 +115,14 @@ Whenever the user performs `CLOSED_FIST`:
 3. The running TTS process (`mpv` / `ffplay`) is immediately killed (`SIGTERM`).
 4. Active agent planner execution tasks are cancelled.
 5. Audio volume is restored, and state transitions to `AGENT_IDLE`.
+
+### 3.2 Display Sentry, Atomic DPMS & Shell Recovery (`backend/vision/display_sentry.py`)
+Provides autonomous power management and session security:
+- **Presence Tracking**: Combines camera face detection (BlazeFace CPU, 0.35 confidence) with optical interaction sentries.
+- **Auto-Sleep & Lock**: Upon 120s of unpresence, locks the session (`hyprlock`) and cuts display power.
+- **Atomic DPMS Dispatch**: Issues a single atomic `hyprctl dispatch dpms off` (or `on`) rather than rapid per-output loops. This avoids triggering DisplayPort transceiver link disconnection (`drm: Connector disconnected`) and Wayland DMA-BUF format table resets, preventing Electron and Chromium apps (Antigravity IDE, Spotify) from crashing with `SIGTRAP` (Signal 5) in `libcef.so`.
+- **DRM Settling & Multi-Output Layer Shell Health**: Upon wake, allows a 1.2-second settling delay for DRM modesetting before validating that Quickshell layer surfaces (`caelestia-drawers`, `caelestia-border-exclusion`) are intact across *all* active monitors (`eDP-1`, `DP-3`). If surfaces on any monitor were invalidated, the sentry cleanly terminates stale Quickshell processes (`caelestia shell -k`, socket cleanup) and relaunches the shell.
+- **Touchless & Voice Wake**: Wakes display immediately upon any verified hand gesture (`PEACE_SIGN`, `OPEN_PALM`, `THUMB_UP`) or voice wake-word detection.
 
 ---
 

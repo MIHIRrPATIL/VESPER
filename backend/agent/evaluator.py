@@ -50,6 +50,19 @@ class OutputEvaluator:
         re.compile(r"(i hope this helps|let me know if you need anything else)[.!]*$", re.I),
     ]
 
+    # Chain-of-thought and internal reasoning leakage patterns
+    COT_PATTERNS = [
+        re.compile(r"<think>[\s\S]*?</think>", re.I),
+        re.compile(
+            r"(?:^|\n)\s*(?:Thought|Thinking|Internal Reasoning|Chain of thought|Analysis|Scratchpad):\s*[\s\S]*?(?=(?:\n\n|\Z))",
+            re.I,
+        ),
+        re.compile(
+            r"^(?:the user is asking|the user wants|the user inquired|let me check|looking at the specialist|according to the instructions|in order to answer|i need to check|based on the instructions|in this query|here is the thought process)[\s\S]*?(?=(?:Good (?:morning|afternoon|evening)|Certainly|Sir,|It appears|Currently|Here is|According to our|I do not have|\Z))",
+            re.I,
+        ),
+    ]
+
     # Regex patterns for stripping from speech
     URL_PATTERN = re.compile(r"https?://(?:www\.)?([^\s/]+)(?:/[^\s]*)?", re.I)
     CODE_BLOCK_PATTERN = re.compile(r"```[\s\S]*?```")
@@ -66,11 +79,24 @@ class OutputEvaluator:
     EXCESS_WHITESPACE = re.compile(r"\s{2,}")
 
     @classmethod
+    def strip_chain_of_thought(cls, text: Optional[str]) -> str:
+        """Removes reasoning scratchpads, <think> tags, and internal analysis preambles."""
+        if not text:
+            return ""
+        cleaned = text.strip()
+        for pat in cls.COT_PATTERNS:
+            cleaned = pat.sub("", cleaned).strip()
+        return cleaned
+
+    @classmethod
     def sanitize_speech_text(cls, text: Optional[str]) -> str:
         """Strips URLs, tables, code, reasoning disclaimers, and markdown syntax to produce smooth, human-like speech."""
         if not text:
             return ""
         cleaned = text.strip()
+
+        # Remove chain-of-thought / scratchpad leaks
+        cleaned = cls.strip_chain_of_thought(cleaned)
 
         # Remove code blocks and inline code
         cleaned = cls.CODE_BLOCK_PATTERN.sub("", cleaned)
@@ -143,6 +169,9 @@ class OutputEvaluator:
         # Sanitize speech text for TTS
         speech_text = cls.sanitize_speech_text(raw_text_str)
 
+        # Sanitize markdown body to remove internal chain-of-thought leaks
+        markdown_body = cls.strip_chain_of_thought(raw_text_str)
+
         # Fallback if speech text was completely stripped
         if not speech_text:
             if specialist_results:
@@ -151,10 +180,13 @@ class OutputEvaluator:
             else:
                 speech_text = "Action completed, sir."
 
+        if not markdown_body:
+            markdown_body = speech_text
+
         return EvaluatorResult(
             speech_text=speech_text,
             hud_cards=hud_cards,
-            markdown_body=raw_text_str,
+            markdown_body=markdown_body,
             has_errors=has_errors,
             diagnostics=diagnostics,
         )

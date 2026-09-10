@@ -393,8 +393,12 @@ class ServiceSupervisor:
         """Polls a /health endpoint until it responds HTTP 200."""
         t0 = time.time()
         health_url = f"{url.rstrip('/')}/health"
+        proc = self.processes.get(name)
         async with httpx.AsyncClient(timeout=1.5) as client:
             while time.time() - t0 < timeout_seconds:
+                if proc and proc.poll() is not None:
+                    # Process died prematurely (e.g. port collision or crash)
+                    return False
                 try:
                     res = await client.get(health_url)
                     if res.status_code == 200:
@@ -413,6 +417,14 @@ class ServiceSupervisor:
         python_bin = sys.executable
 
         console.print("[bold cyan]=== STARTING VESPER CORE MICROSERVICES ===[/bold cyan]")
+
+        # Ensure ports 8000, 8001, 8002 are clean of stale processes before booting
+        for port in (8000, 8001, 8002):
+            try:
+                subprocess.run(["fuser", "-k", f"{port}/tcp"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+        time.sleep(0.2)
 
         # 1. Start Gateway Service (Port 8000)
         console.print("  • Starting Gateway Service (Port 8000)...", end=" ")
@@ -545,6 +557,7 @@ class TerminalDesktopHUD:
         self._voice_duck_state: Optional[Dict[str, Any]] = None
         self._voice_watchdog_task: Optional[asyncio.Task] = None
         self._is_playing_ack: bool = False
+        self._recent_rendered_alerts: Dict[str, float] = {}
 
     async def connect(self, quiet: bool = False) -> bool:
         """Establishes WebSocket connection and completes CLIENT_HELLO handshake."""
@@ -1045,6 +1058,16 @@ class TerminalDesktopHUD:
                         self._call_duck_state = None
                         console.print(f"\n[bold green][CALL CONCLUDED] Restored background audio to original volume ({title}).[/bold green]")
 
+            # Suppress duplicate proactive advisories / notifications within 10 minutes
+            alert_dedup_key = f"{app_name}:{title}:{body_text.strip()}"
+            now_ts = time.time()
+            if is_proactive:
+                if alert_dedup_key in self._recent_rendered_alerts and (now_ts - self._recent_rendered_alerts[alert_dedup_key]) < 600.0:
+                    return
+                self._recent_rendered_alerts[alert_dedup_key] = now_ts
+                # Evict expired keys
+                self._recent_rendered_alerts = {k: v for k, v in self._recent_rendered_alerts.items() if now_ts - v < 600.0}
+
             console.print()
             border = "yellow" if is_proactive else ("red" if is_call and (call_phase or "").upper() in ("INCOMING", "RINGING") else "cyan")
             header = f"[bold yellow][PROACTIVE ADVISORY] {app_name}: {title}[/bold yellow]" if is_proactive else f"[bold {border}][NOTIFICATION] {app_name}: {title}[/bold {border}]"
@@ -1362,7 +1385,8 @@ class TerminalDesktopHUD:
             else:
                 console.print(f"\n[bold green][GESTURE DETECTED][/bold green] {gesture} (conf={conf:.2f})")
             # If display is sleeping, immediately wake display on any valid gesture
-            if self._display_sleeping:
+            disp_active = is_display_on()
+            if self._display_sleeping or not disp_active:
                 self._display_sleeping = False
                 console.print(f"\n[bold green][GESTURE WAKE][/bold green] Display powered ON via '{gesture}'")
                 asyncio.create_task(asyncio.to_thread(turn_display_on, True))

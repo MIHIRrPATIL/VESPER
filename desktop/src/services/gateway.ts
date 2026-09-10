@@ -209,6 +209,13 @@ class GatewayClient {
     });
   }
 
+  public sendCameraToggle(active?: boolean): boolean {
+    return this.send('GESTURE', 'GESTURE_EVENT', {
+      gesture: active !== undefined ? (active ? 'GESTURE_RESUME' : 'GESTURE_PAUSE') : 'GESTURE_TOGGLE',
+      action: 'toggle_camera_sentry',
+    });
+  }
+
   private handleInboundEnvelope(envelope: VesperEnvelope): void {
     // Keepalive ping responder
     if (envelope.channel === 'CONTROL' && envelope.type === 'PING') {

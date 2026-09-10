@@ -6,6 +6,7 @@ and submit state diffs without maintaining a continuous WebSocket connection.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 from backend.sync.models import DeviceRegistration, SynchronizedState
 from backend.sync.sync_manager import sync_manager
 
+logger = logging.getLogger("vesper.gateway.routes.sync")
 router = APIRouter(prefix="/sync", tags=["sync"])
 
 
@@ -42,8 +44,102 @@ async def update_state(req: StateUpdateRequest) -> Dict[str, Any]:
 
 @router.get("/devices", response_model=List[DeviceRegistration])
 async def list_active_devices() -> List[DeviceRegistration]:
-    """Returns list of currently active online devices."""
-    return sync_manager.get_active_devices()
+    """Returns list of currently active online devices with battery telemetry and deduplication."""
+    # Evict any noisy unverified ARP neighbor entries or stale test mobile devices
+    for k in list(sync_manager.state.active_devices.keys()):
+        if k.startswith("mobile_192_168_") or (k.startswith("mobile_") and k != "mobile_companion_provisioned"):
+            del sync_manager.state.active_devices[k]
+
+    active = sync_manager.get_active_devices()
+
+    # Query real battery status on host machine
+    batt = None
+    try:
+        import psutil
+        batt = psutil.sensors_battery()
+    except Exception:
+        pass
+
+    # Update host device with latest real battery and CPU metrics
+    host_found = False
+    for d in active:
+        if d.device_id == "vesper-host-workstation":
+            host_found = True
+            if batt:
+                d.battery_level = round(batt.percent)
+                d.is_charging = batt.power_plugged
+
+    # If host workstation is not registered yet, instantiate it
+    if not host_found:
+        try:
+            from backend.vision.device_probe import DeviceProbe
+            caps = DeviceProbe.get_capabilities()
+            host_dev = DeviceRegistration(
+                device_id="vesper-host-workstation",
+                device_type="desktop",
+                device_name=f"VESPER Host ({caps.hostname or 'Desktop'})",
+                hostname=caps.hostname,
+                os_name=caps.os_name,
+                architecture=caps.architecture,
+                is_headless=caps.is_headless,
+                has_camera=caps.has_camera,
+                has_display=caps.has_display,
+                has_microphone=caps.has_microphone,
+                has_speaker=True,
+                cpu_cores=caps.cpu_cores_logical,
+                cpu_usage_pct=caps.cpu_usage_pct,
+                battery_level=round(batt.percent) if batt else None,
+                is_charging=batt.power_plugged if batt else False,
+                ram_total_gb=caps.ram_total_gb,
+                ram_available_gb=caps.ram_available_gb,
+                ip_address=getattr(caps, "ip_address", "127.0.0.1"),
+                registered_at=time.time(),
+                last_heartbeat=time.time(),
+                is_online=True,
+            )
+            await sync_manager.register_device(host_dev)
+            active.insert(0, host_dev)
+        except Exception as e:
+            logger.warning(f"[SYNC] Failed to create host device: {e}")
+
+    # Provisioned phone companion in standby mode until mobile app is launched
+    has_provisioned = any(d.device_id == "mobile_companion_provisioned" for d in active)
+    if not has_provisioned:
+        provisioned_phone = DeviceRegistration(
+            device_id="mobile_companion_provisioned",
+            device_type="mobile",
+            device_name="Mobile Companion (Phone)",
+            hostname="android-provisioned",
+            os_name="Android",
+            architecture="arm64",
+            is_headless=False,
+            has_camera=True,
+            has_display=True,
+            has_microphone=True,
+            battery_level=100,
+            is_charging=False,
+            network_type="Provisioned (Standby)",
+            ip_address="Provisioned",
+            registered_at=time.time(),
+            last_heartbeat=time.time(),
+            is_online=True,
+        )
+        active.append(provisioned_phone)
+
+    # Strictly deduplicate devices by device_id and device_name
+    seen_ids = set()
+    seen_names = set()
+    deduped: List[DeviceRegistration] = []
+    for d in active:
+        if d.device_id.startswith("mobile_192_168_"):
+            continue
+        if d.device_id in seen_ids or d.device_name in seen_names:
+            continue
+        seen_ids.add(d.device_id)
+        seen_names.add(d.device_name)
+        deduped.append(d)
+
+    return deduped
 
 
 @router.post("/devices/register", response_model=Dict[str, Any])
@@ -68,6 +164,13 @@ async def get_gateway_profile() -> DeviceRegistration:
     """Returns the host workstation gateway hardware and capability profile."""
     from backend.vision.device_probe import DeviceProbe
     caps = DeviceProbe.get_capabilities()
+    batt = None
+    try:
+        import psutil
+        batt = psutil.sensors_battery()
+    except Exception:
+        pass
+
     return DeviceRegistration(
         device_id="vesper-host-workstation",
         device_type="desktop",
@@ -82,6 +185,8 @@ async def get_gateway_profile() -> DeviceRegistration:
         has_speaker=True,
         cpu_cores=caps.cpu_cores_logical,
         cpu_usage_pct=caps.cpu_usage_pct,
+        battery_level=round(batt.percent) if batt else None,
+        is_charging=batt.power_plugged if batt else False,
         ram_total_gb=caps.ram_total_gb,
         ram_available_gb=caps.ram_available_gb,
         registered_at=time.time(),
@@ -133,9 +238,39 @@ async def get_active_proactive_actions(domain: Optional[str] = None) -> List[Dic
 
 @router.post("/proactive/actions/{action_id}/resolve", response_model=Dict[str, Any])
 async def resolve_proactive_action(action_id: str, new_status: str, confirmed_by: str = "voice") -> Dict[str, Any]:
-    """Resolves a staged proactive action across the cluster."""
+    """Resolves a staged proactive action across the cluster, executing it upon confirmation."""
     from backend.agent.proactive.action_queue import action_queue
+    from backend.agent.proactive.audit_logger import audit_logger
+
     res = action_queue.resolve_action(action_id, resolution=new_status, confirmed_by=confirmed_by)
     if res:
-        return {"success": True, "action": res.model_dump()}
+        exec_result: Optional[Dict[str, Any]] = None
+        if new_status.lower() in ("confirmed", "confirm"):
+            try:
+                from backend.agent.registry import registry
+                spec_res = await registry.execute_action(
+                    agent_name=res.domain,
+                    action=res.action,
+                    params=res.params,
+                )
+                exec_result = {
+                    "success": spec_res.success,
+                    "action": spec_res.action,
+                    "data": spec_res.data,
+                    "speech": spec_res.speech_summary,
+                    "error": spec_res.error,
+                }
+                logger.info(f"[SyncRouter] Executed confirmed staged action '{action_id}' ({res.domain}:{res.action}): {exec_result}")
+            except Exception as e:
+                logger.error(f"[SyncRouter] Error executing confirmed staged action '{action_id}': {e}", exc_info=True)
+                exec_result = {"success": False, "error": str(e)}
+
+            audit_logger.log_action(res, confirmed_by=confirmed_by)
+
+        return {
+            "success": True,
+            "action": res.model_dump(),
+            "execution": exec_result,
+        }
     return {"success": False, "error": f"Action '{action_id}' not found"}
+

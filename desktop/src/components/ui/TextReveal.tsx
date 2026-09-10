@@ -33,9 +33,9 @@ export const TextReveal = ({
   speechProgress,
   autoScroll = true,
   highlightColor = "#FFFFFF",
-  lightWatermarkColor = "#666666",
+  lightWatermarkColor = "#8E8A83",
   darkWatermarkColor = "#8E8A83",
-  lightTextColor = "#111111",
+  lightTextColor = "#E8E3DA",
   darkTextColor = "#E8E3DA",
 }: TextRevealProps) => {
   const targetRef = useRef<HTMLDivElement>(null);
@@ -43,7 +43,12 @@ export const TextReveal = ({
 
   useEffect(() => {
     const checkDark = () => {
-      setIsDark(document.documentElement.classList.contains("dark"));
+      const darkActive =
+        document.documentElement.classList.contains("dark") ||
+        document.body.classList.contains("dark") ||
+        !!targetRef.current?.closest(".dark") ||
+        document.querySelector(".dark") !== null;
+      setIsDark(darkActive);
     };
     checkDark();
 

@@ -19,6 +19,8 @@ from backend.data.models import (
     AccountType,
     DebtCreate,
     DebtDirection,
+    FrequencyType,
+    RecurringTransactionCreate,
     TransactionCreate,
     TransactionType,
 )
@@ -52,6 +54,30 @@ class FinanceSpecialist(BaseSpecialist):
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [
+            {
+                "name": "get_financial_summary",
+                "description": "Comprehensive financial briefing: total net worth across all accounts (Union Bank, SBI, Saraswat, Cash), active peer debts/receivables, and recent activity.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_name": {"type": "string", "description": "Optional specific account name to focus on."},
+                    },
+                },
+            },
+            {
+                "name": "list_transactions",
+                "description": "Retrieves recent ledger transactions filtered by account (e.g. Saraswat, Union Bank, SBI, Cash), category, or keyword search.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_name": {"type": "string", "description": "Optional account name (e.g. 'Saraswat', 'Union Bank', 'SBI', 'Cash')."},
+                        "search": {"type": "string", "description": "Optional search query or merchant."},
+                        "category": {"type": "string", "description": "Optional category filter."},
+                        "type": {"type": "string", "enum": ["expense", "income"], "description": "Optional transaction type."},
+                        "limit": {"type": "integer", "description": "Maximum number of transactions to return (default: 5)."},
+                    },
+                },
+            },
             {
                 "name": "get_balance",
                 "description": "Retrieves total net worth and account balance breakdown in ₹ (INR).",
@@ -131,6 +157,30 @@ class FinanceSpecialist(BaseSpecialist):
                     "required": ["action"],
                 },
             },
+            {
+                "name": "manage_recurring_transaction",
+                "description": "Sets up, pauses, resumes, or lists automated periodic transactions (subscriptions, SIPs, rent).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["create", "list", "delete"],
+                            "description": "Action to perform on recurring transaction rules.",
+                        },
+                        "name": {"type": "string", "description": "Name of the rule (e.g. Netflix, Rent, SIP)."},
+                        "amount": {"type": "number", "description": "Amount in ₹."},
+                        "frequency": {
+                            "type": "string",
+                            "enum": ["daily", "weekly", "biweekly", "monthly", "quarterly", "yearly"],
+                            "description": "Frequency of occurrence.",
+                        },
+                        "account_name": {"type": "string", "description": "Account to charge (default: Union Bank)."},
+                        "category": {"type": "string", "description": "Category (e.g. Subscription, Investment, Rent)."},
+                    },
+                    "required": ["action"],
+                },
+            },
         ]
 
     # ── Contacts & Name Resolution in Supabase ───────────────────────────────
@@ -193,20 +243,9 @@ class FinanceSpecialist(BaseSpecialist):
     # ── Accounts & Balances ──────────────────────────────────────────────────
 
     def _get_or_create_primary_account(self, user_id: str = "default_user") -> AccountModel:
-        """Returns the primary bank account, creating one if empty."""
-        accounts = self.repo.get_accounts(user_id=user_id)
-        if accounts:
-            return accounts[0]
-
-        return self.repo.create_account(
-            AccountCreate(
-                name="Primary Account",
-                user_id=user_id,
-                type=AccountType.BANK,
-                balance=15000.0,
-                currency="INR",
-            )
-        )
+        """Returns the primary default account (Union Bank), provisioning defaults if needed."""
+        self.repo.ensure_default_accounts(user_id=user_id)
+        return self.repo.get_default_account(user_id=user_id)
 
     async def get_balance_summary(self, account_name: Optional[str] = None) -> SpecialistResult:
         """Calculates balance summary and net worth in ₹."""
@@ -218,12 +257,13 @@ class FinanceSpecialist(BaseSpecialist):
         total_net_worth = sum(a.balance for a in accounts)
 
         if account_name:
-            acc = next((a for a in accounts if account_name.lower() in a.name.lower()), None)
+            acc = self.repo.get_account_by_name(account_name)
             if not acc:
                 return SpecialistResult(
                     success=False,
                     action="get_balance",
                     error=f"Account '{account_name}' not found.",
+                    speech_summary=f"I could not locate an account matching '{account_name}', sir.",
                 )
             speech = f"Your {acc.name} has an active balance of ₹{acc.balance:,.2f}, sir."
             return SpecialistResult(
@@ -254,6 +294,155 @@ class FinanceSpecialist(BaseSpecialist):
             },
         )
 
+    async def get_financial_summary(self, account_name: Optional[str] = None) -> SpecialistResult:
+        """Comprehensive executive financial briefing: net worth, multi-account breakdown, debts, and recent transactions."""
+        self.repo.ensure_default_accounts()
+        overview = self.repo.get_financial_overview()
+
+        accounts = overview.get("accounts", [])
+        total_net_worth = overview.get("total_net_worth", 0.0)
+        debts = overview.get("debts", {})
+        total_owed_to_user = debts.get("total_owed_to_user", 0.0)
+        total_user_owes = debts.get("total_user_owes", 0.0)
+        recent_txns = self.repo.get_recent_transactions(limit=4)
+
+        if account_name:
+            target = self.repo.get_account_by_name(account_name)
+            if not target:
+                return SpecialistResult(
+                    success=False,
+                    action="get_financial_summary",
+                    error=f"Account '{account_name}' not found.",
+                    speech_summary=f"I could not locate an account matching '{account_name}', sir.",
+                )
+            speech = f"Your {target.name} account holds an active balance of ₹{target.balance:,.2f}, sir."
+            return SpecialistResult(
+                success=True,
+                action="get_financial_summary",
+                data={
+                    "account": target.name,
+                    "balance": target.balance,
+                    "currency": "INR",
+                    "total_net_worth": total_net_worth,
+                    "accounts": accounts,
+                },
+                speech_summary=speech,
+                card_payload={
+                    "type": "finance_summary_card",
+                    "title": f"Financial Summary: {target.name}",
+                    "total_net_worth": total_net_worth,
+                    "focused_account": target.model_dump(),
+                    "accounts": accounts,
+                    "debts": debts,
+                    "recent_transactions": [t.model_dump() for t in recent_txns],
+                },
+            )
+
+        # Multi-account breakdown across Union Bank, SBI, Saraswat, Cash
+        acc_breakdown = ", ".join([f"{a['name']}: ₹{a['balance']:,.2f}" for a in accounts])
+        speech = f"Sir, your overall financial position stands at a net worth of ₹{total_net_worth:,.2f} across your accounts: {acc_breakdown}."
+        if total_owed_to_user > 0 or total_user_owes > 0:
+            speech += f" In peer debts, friends currently owe you ₹{total_owed_to_user:,.2f}, while your outstanding payables stand at ₹{total_user_owes:,.2f}."
+
+        if recent_txns:
+            r0 = recent_txns[0]
+            t_type_str = r0.type.value if hasattr(r0.type, "value") else str(r0.type)
+            speech += f" Your most recent recorded movement was a {t_type_str} of ₹{r0.amount:,.2f} under {r0.category}."
+
+        return SpecialistResult(
+            success=True,
+            action="get_financial_summary",
+            data={
+                "total_net_worth": total_net_worth,
+                "currency": "INR",
+                "accounts": accounts,
+                "debts": debts,
+                "monthly_burn": overview.get("monthly_burn", 0.0),
+                "monthly_income": overview.get("monthly_income", 0.0),
+                "recent_transactions": [t.model_dump() for t in recent_txns],
+            },
+            speech_summary=speech,
+            card_payload={
+                "type": "finance_summary_card",
+                "title": "Executive Financial Portfolio",
+                "total_net_worth": total_net_worth,
+                "currency": "INR",
+                "accounts": accounts,
+                "debts": debts,
+                "recent_transactions": [t.model_dump() for t in recent_txns],
+            },
+        )
+
+    async def list_transactions(
+        self,
+        account_name: Optional[str] = None,
+        search: Optional[str] = None,
+        category: Optional[str] = None,
+        txn_type: Optional[str] = None,
+        limit: int = 5,
+    ) -> SpecialistResult:
+        """Retrieves and lists recorded transactions with optional account and keyword filtering."""
+        account_id = None
+        acc_label = "all accounts"
+        if account_name:
+            acc = self.repo.get_account_by_name(account_name)
+            if not acc:
+                return SpecialistResult(
+                    success=False,
+                    action="list_transactions",
+                    error=f"Account '{account_name}' not found.",
+                    speech_summary=f"I could not locate an account matching '{account_name}', sir.",
+                )
+            account_id = acc.id
+            acc_label = acc.name
+
+        t_type = None
+        if txn_type:
+            t_type = TransactionType.INCOME if "inc" in txn_type.lower() else TransactionType.EXPENSE
+
+        txns = self.repo.get_transactions(
+            account_id=account_id,
+            category=category,
+            type=t_type.value if hasattr(t_type, "value") else (str(t_type) if t_type else None),
+            search=search,
+            limit=limit,
+        )
+
+        count = len(txns)
+        if count == 0:
+            crit = []
+            if account_name:
+                crit.append(f"for {acc_label}")
+            if search:
+                crit.append(f"matching '{search}'")
+            crit_str = f" {' '.join(crit)}" if crit else ""
+            speech = f"I found no recorded transactions{crit_str}, sir."
+        else:
+            first = txns[0]
+            f_type_str = first.type.value if hasattr(first.type, "value") else str(first.type)
+            speech = (
+                f"Found {count} transaction{'s' if count != 1 else ''} for {acc_label}, sir. "
+                f"The most recent is {first.description} for ₹{first.amount:,.2f} ({f_type_str})."
+            )
+
+        return SpecialistResult(
+            success=True,
+            action="list_transactions",
+            data={
+                "count": count,
+                "account": acc_label,
+                "transactions": [t.model_dump() for t in txns],
+                "currency": "INR",
+            },
+            speech_summary=speech,
+            card_payload={
+                "type": "finance_transaction_list_card",
+                "title": f"Transactions: {acc_label}",
+                "currency": "INR",
+                "transactions": [t.model_dump() for t in txns],
+            },
+        )
+
     # ── Transactions ─────────────────────────────────────────────────────────
 
     async def log_transaction(
@@ -264,8 +453,13 @@ class FinanceSpecialist(BaseSpecialist):
         description: Optional[str] = None,
         account_name: Optional[str] = None,
     ) -> SpecialistResult:
-        """Logs an income/expense in ₹ and updates account balance."""
-        primary_acc = self._get_or_create_primary_account()
+        """Logs an income/expense in ₹ and updates account balance. Defaults to Union Bank."""
+        target_acc = None
+        if account_name:
+            target_acc = self.repo.get_account_by_name(account_name)
+        if not target_acc:
+            target_acc = self._get_or_create_primary_account()
+
         t_type = TransactionType.INCOME if "inc" in txn_type.lower() else TransactionType.EXPENSE
         cat = category or ("Salary" if t_type == TransactionType.INCOME else "General Expense")
         desc = description or f"{t_type.value.capitalize()} of ₹{amount:,.2f}"
@@ -276,16 +470,16 @@ class FinanceSpecialist(BaseSpecialist):
                 type=t_type,
                 category=cat,
                 description=desc,
-                account_id=primary_acc.id,
+                account_id=target_acc.id,
             )
         )
 
-        updated_acc = self.repo.get_account(primary_acc.id)
-        new_balance = updated_acc.balance if updated_acc else primary_acc.balance
+        updated_acc = self.repo.get_account(target_acc.id)
+        new_balance = updated_acc.balance if updated_acc else target_acc.balance
 
         speech = (
-            f"Recorded {t_type.value} of ₹{abs(amount):,.2f} under {cat}. "
-            f"Your current balance is ₹{new_balance:,.2f}, sir."
+            f"Recorded {t_type.value} of ₹{abs(amount):,.2f} under {cat} from {target_acc.name}. "
+            f"Your current {target_acc.name} balance is ₹{new_balance:,.2f}, sir."
         )
 
         return SpecialistResult(
@@ -703,6 +897,55 @@ class FinanceSpecialist(BaseSpecialist):
 
         return SpecialistResult(success=False, action="manage_financial_goal", error=f"Unknown goal action '{action}'.")
 
+    # ── Recurring Transactions ───────────────────────────────────────────────
+
+    async def manage_recurring(
+        self,
+        action: str,
+        name: str = "Recurring Payment",
+        amount: float = 0.0,
+        frequency: str = "monthly",
+        account_name: Optional[str] = None,
+        category: Optional[str] = None,
+    ) -> SpecialistResult:
+        act = action.lower().strip()
+        if act in ["create", "add", "new", "set"]:
+            target_acc = self.repo.get_account_by_name(account_name) if account_name else self.repo.get_default_account()
+            rec = self.repo.create_recurring_transaction(
+                RecurringTransactionCreate(
+                    name=name,
+                    amount=amount,
+                    frequency=FrequencyType(frequency.lower()),
+                    account_id=target_acc.id if target_acc else None,
+                    category=category or "Subscription",
+                )
+            )
+            speech = f"Set up recurring {rec.frequency} transaction '{rec.name}' of ₹{rec.amount:,.2f} from {target_acc.name if target_acc else 'Union Bank'}, sir."
+            return SpecialistResult(
+                success=True,
+                action="manage_recurring_transaction",
+                data=rec.model_dump(),
+                speech_summary=speech,
+            )
+        elif act in ["list", "show", "view"]:
+            recs = self.repo.get_recurring_transactions()
+            if not recs:
+                return SpecialistResult(
+                    success=True,
+                    action="manage_recurring_transaction",
+                    data={"rules": []},
+                    speech_summary="You have no active recurring transactions or subscriptions scheduled, sir.",
+                )
+            lines = [f"{r.name} (₹{r.amount:,.0f} {r.frequency})" for r in recs if r.active]
+            speech = f"You have {len(lines)} active recurring schedules: {', '.join(lines)}, sir."
+            return SpecialistResult(
+                success=True,
+                action="manage_recurring_transaction",
+                data={"rules": [r.model_dump() for r in recs]},
+                speech_summary=speech,
+            )
+        return SpecialistResult(success=False, action="manage_recurring_transaction", error=f"Unknown recurring action '{action}'.")
+
     # ── Execution Router ─────────────────────────────────────────────────────
 
     async def execute(
@@ -710,10 +953,32 @@ class FinanceSpecialist(BaseSpecialist):
     ) -> SpecialistResult:
         act = action.lower().strip()
 
+        # 0. Comprehensive Financial Summary / Health / Standing
+        if act in [
+            "get_financial_summary",
+            "financial_summary",
+            "financial_standing",
+            "how_am_i_doing",
+            "financial_health",
+            "finances",
+            "financial_overview",
+        ]:
+            acc_name = params.get("account_name")
+            return await self.get_financial_summary(acc_name)
+
         # 1. Balance Queries
-        if act in ["get_balance", "balance", "net_worth", "account_balance"]:
+        elif act in ["get_balance", "balance", "net_worth", "account_balance"]:
             acc_name = params.get("account_name")
             return await self.get_balance_summary(acc_name)
+
+        # 1b. List / Query Transactions
+        elif act in ["list_transactions", "get_transactions", "transactions", "recent_transactions"]:
+            acc_name = params.get("account_name")
+            search = params.get("search") or params.get("query")
+            cat = params.get("category")
+            t_type = params.get("type")
+            lim = int(params.get("limit") or 5)
+            return await self.list_transactions(account_name=acc_name, search=search, category=cat, txn_type=t_type, limit=lim)
 
         # 2. Transaction Logging
         elif act in ["log_transaction", "add_transaction", "record_expense", "record_income", "spend"]:
@@ -756,5 +1021,15 @@ class FinanceSpecialist(BaseSpecialist):
             curr = float(params.get("current_amount") or 0.0)
             dead = params.get("deadline")
             return await self.manage_goals(g_act, name=name, target_amount=target, current_amount=curr, deadline=dead)
+
+        # 6. Recurring Transactions
+        elif act in ["manage_recurring_transaction", "recurring", "subscription", "recurring_transaction", "sip"]:
+            r_act = params.get("action", "list" if act in ["recurring", "recurring_transaction"] else "create")
+            name = params.get("name", "Recurring Payment")
+            amt = float(params.get("amount") or 0.0)
+            freq = params.get("frequency", "monthly")
+            acc = params.get("account_name")
+            cat = params.get("category")
+            return await self.manage_recurring(r_act, name=name, amount=amt, frequency=freq, account_name=acc, category=cat)
 
         return SpecialistResult(success=False, action=action, error=f"Unknown action '{action}' on finance specialist.")

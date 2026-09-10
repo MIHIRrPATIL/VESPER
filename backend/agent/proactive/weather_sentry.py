@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging
+from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, Optional
 
 logger = logging.getLogger("vesper.agent.proactive.weather_sentry")
@@ -48,6 +50,32 @@ class WeatherSentry:
         self._last_morning_briefing_date: Optional[datetime.date] = None
         self._last_rain_alert_time: Optional[datetime.datetime] = None
         self._running: bool = False
+        self.state_file = Path(__file__).resolve().parent.parent.parent.parent / "output" / "last_weather_alert.json"
+        self._load_state()
+
+    def _load_state(self) -> None:
+        """Loads previous alert timestamps from persistent storage."""
+        if self.state_file.exists():
+            try:
+                data = json.loads(self.state_file.read_text())
+                if data.get("last_rain_alert_time"):
+                    self._last_rain_alert_time = datetime.datetime.fromisoformat(data["last_rain_alert_time"])
+                if data.get("last_morning_briefing_date"):
+                    self._last_morning_briefing_date = datetime.date.fromisoformat(data["last_morning_briefing_date"])
+            except Exception as e:
+                logger.debug(f"[WeatherSentry] Failed loading state: {e}")
+
+    def _save_state(self) -> None:
+        """Persists alert timestamps to survive microservice restarts."""
+        try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "last_rain_alert_time": self._last_rain_alert_time.isoformat() if self._last_rain_alert_time else None,
+                "last_morning_briefing_date": self._last_morning_briefing_date.isoformat() if self._last_morning_briefing_date else None,
+            }
+            self.state_file.write_text(json.dumps(payload))
+        except Exception as e:
+            logger.warning(f"[WeatherSentry] Failed saving state: {e}")
 
     def start(self) -> None:
         """Starts the weather sentinel background loop."""
@@ -89,6 +117,8 @@ class WeatherSentry:
 
     async def _monitor_loop(self) -> None:
         """Main monitoring loop, runs every 30 minutes."""
+        # Initial grace period on boot to allow network & clients to settle
+        await asyncio.sleep(20.0)
         while self._running:
             try:
                 await self._run_checks()
@@ -120,6 +150,7 @@ class WeatherSentry:
                 if "error" not in weather:
                     await self._broadcast_morning_briefing(weather)
                     self._last_morning_briefing_date = today
+                    self._save_state()
             except Exception as e:
                 logger.warning(f"[WeatherSentry] Morning briefing failed: {e}")
 
@@ -138,6 +169,7 @@ class WeatherSentry:
                 if result.get("rain_likely"):
                     await self._broadcast_rain_alert(result)
                     self._last_rain_alert_time = now
+                    self._save_state()
             except Exception as e:
                 logger.warning(f"[WeatherSentry] Rain check failed: {e}")
 
