@@ -49,11 +49,12 @@ function timeAgo(ts?: number): string {
 // ── 1. Weather Card Renderer ────────────────────────────────────────────────
 const WeatherRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) => {
   const city = data.city || data.location || "Current Location";
-  const temp = data.temperature !== undefined ? `${data.temperature}°` : "--";
+  const tempVal = data.temperature ?? data.temp ?? data.temperature_c;
+  const temp = tempVal !== undefined ? `${tempVal}°` : "--";
   const condition = data.condition || data.summary || "Atmosphere Nominal";
-  const humidity = data.humidity;
-  const wind = data.wind_speed || data.wind;
-  const feelsLike = data.feels_like;
+  const humidity = data.humidity ?? data.humidity_pct;
+  const wind = data.wind_speed || data.wind || (data.wind_speed_kmh !== undefined ? `${data.wind_speed_kmh} km/h` : undefined);
+  const feelsLike = data.feels_like ?? data.feels_like_c;
   const forecast = Array.isArray(data.forecast) ? data.forecast : [];
 
   return (

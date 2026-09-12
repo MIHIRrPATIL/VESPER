@@ -77,6 +77,10 @@ export enum EventType {
 
   // Proactive Advisory Resolution
   PROACTIVE_RESOLVE = "PROACTIVE_RESOLVE",
+
+  // Distributed Workstation Command RPC
+  WORKSTATION_COMMAND_REQ = "WORKSTATION_COMMAND_REQ",
+  WORKSTATION_COMMAND_RES = "WORKSTATION_COMMAND_RES",
 }
 
 export interface ClientEnvelope {

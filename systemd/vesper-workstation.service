@@ -1,0 +1,19 @@
+[Unit]
+Description=VESPER Local Workstation Daemon (Wayland/Hyprland DPMS, OCR, Audio Sinks)
+After=graphical-session.target vesper-gateway.service
+Wants=vesper-gateway.service
+PartOf=vesper.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mihir/Codes/VESPER
+ExecStart=/home/mihir/Codes/VESPER/.venv/bin/python3 backend/workstation/daemon.py
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR PULSE_SERVER HYPRLAND_INSTANCE_SIGNATURE
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

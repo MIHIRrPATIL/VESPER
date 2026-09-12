@@ -18,6 +18,7 @@ from backend.gateway.routes.media import router as media_router
 from backend.gateway.routes.notifications import router as notifications_router
 from backend.gateway.routes.sync import router as sync_router
 from backend.gateway.routes.tasks import router as tasks_router
+from backend.gateway.routes.workstation import router as workstation_router
 from backend.gateway.routes.ws import router as ws_router
 from backend.gateway.task_registry import TaskRegistry
 from backend.shared.config import ENVIRONMENT, LOG_LEVEL
@@ -73,6 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         from backend.vision.device_probe import DeviceProbe
         from backend.sync.models import DeviceRegistration
+        caps = DeviceProbe.get_capabilities()
         # Check battery sensors on host machine
         batt = None
         try:
@@ -99,7 +101,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             is_charging=batt.power_plugged if batt else False,
             ram_total_gb=caps.ram_total_gb,
             ram_available_gb=caps.ram_available_gb,
-            ip_address=caps.ip_address or "127.0.0.1",
+            ip_address=getattr(caps, "ip_address", "127.0.0.1"),
             registered_at=time.time(),
             last_heartbeat=time.time(),
             is_online=True,
@@ -150,6 +152,7 @@ def create_app() -> FastAPI:
     app.include_router(tasks_router)
     app.include_router(media_router)
     app.include_router(finance_router)
+    app.include_router(workstation_router)
 
     @app.get("/briefing")
     @app.get("/notifications/briefing")

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from typing import Any, Dict, Optional
 
 import httpx
@@ -19,6 +20,7 @@ from backend.shared.config import AGENT_SERVICE_URL
 from backend.shared.events import (
     Channel,
     ClientEnvelope,
+    ClientType,
     EventType,
     PongPayload,
     ServerEnvelope,
@@ -43,6 +45,7 @@ class MessageRouter:
     ) -> None:
         self.manager = connection_manager
         self.tasks = task_registry
+        self._pending_workstation_requests: dict[str, asyncio.Future] = {}
 
     async def route(self, session: ClientSession, envelope: ClientEnvelope) -> None:
         """Main entry point for dispatching a validated ClientEnvelope."""
@@ -99,8 +102,73 @@ class MessageRouter:
             await self.manager.send_envelope(session.session_id, pong)
         elif event_type == EventType.MEDIA_CONTROL:
             await self._handle_media_control(session, envelope)
+        elif event_type == EventType.WORKSTATION_COMMAND_REQ:
+            await self._handle_workstation_command_req(session, envelope)
+        elif event_type == EventType.WORKSTATION_COMMAND_RES:
+            await self._handle_workstation_command_res(session, envelope)
         else:
             logger.warning(f"[ROUTER] Unhandled control event '{event_type}'")
+
+    async def _handle_workstation_command_req(self, session: ClientSession, envelope: ClientEnvelope) -> None:
+        """Broadcasts or forwards a workstation command request to connected DESK_HUD / workstation clients."""
+        fwd_env = ServerEnvelope(
+            uuid=envelope.uuid,
+            channel=Channel.CONTROL,
+            type=EventType.WORKSTATION_COMMAND_REQ,
+            payload=envelope.payload,
+        )
+        sent = await self.manager.broadcast(fwd_env, target_client_types=[ClientType.DESK_HUD])
+        logger.info(f"[ROUTER] Forwarded WORKSTATION_COMMAND_REQ '{envelope.uuid}' to {sent} desktop client(s)")
+
+    async def _handle_workstation_command_res(self, session: ClientSession, envelope: ClientEnvelope) -> None:
+        """Handles response envelope from workstation client and fulfills pending future."""
+        req_uuid = envelope.uuid or envelope.payload.get("request_uuid")
+        logger.info(f"[ROUTER] Received WORKSTATION_COMMAND_RES for request '{req_uuid}' from '{session.client_id}'")
+        if req_uuid and req_uuid in self._pending_workstation_requests:
+            fut = self._pending_workstation_requests[req_uuid]
+            if not fut.done():
+                fut.set_result(envelope.payload)
+
+    async def execute_workstation_command(
+        self,
+        command: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: float = 4.0,
+    ) -> Dict[str, Any]:
+        """Dispatches a workstation command down WebSocket to connected DESK_HUD and awaits result."""
+        req_uuid = str(uuid.uuid4())
+        req_env = ServerEnvelope(
+            uuid=req_uuid,
+            channel=Channel.CONTROL,
+            type=EventType.WORKSTATION_COMMAND_REQ,
+            payload={
+                "request_uuid": req_uuid,
+                "command": command,
+                "params": params or {},
+            },
+        )
+        # Check if any DESK_HUD client is connected
+        desk_sessions = [s for s in self.manager._sessions.values() if s.client_type == ClientType.DESK_HUD]
+        if not desk_sessions:
+            return {"success": False, "error": "No workstation or desktop companion connected to Gateway"}
+
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._pending_workstation_requests[req_uuid] = fut
+
+        sent = await self.manager.broadcast(req_env, target_client_types=[ClientType.DESK_HUD])
+        if sent == 0:
+            self._pending_workstation_requests.pop(req_uuid, None)
+            return {"success": False, "error": "Failed to dispatch command to desktop companion"}
+
+        try:
+            res_payload = await asyncio.wait_for(fut, timeout=timeout)
+            return res_payload if isinstance(res_payload, dict) else {"success": True, "result": res_payload}
+        except asyncio.TimeoutError:
+            logger.warning(f"[ROUTER] Workstation command '{command}' (req={req_uuid}) timed out after {timeout}s")
+            return {"success": False, "error": f"Workstation command '{command}' timed out after {timeout}s"}
+        finally:
+            self._pending_workstation_requests.pop(req_uuid, None)
 
     async def _handle_system(self, session: ClientSession, envelope: ClientEnvelope) -> None:
         """Handles high-priority system events and out-of-band INTERRUPT signals."""
@@ -843,7 +911,7 @@ class MessageRouter:
                     uuid=envelope.uuid,
                     channel=Channel.SYSTEM,
                     type=EventType.INTERRUPT,
-                    payload={"source": f"GESTURE:{gesture}", "reason": "USER_GESTURE_CANCEL", "cancelled_tasks": cancelled_count},
+                    payload={"source": "GESTURE:THUMB_DOWN", "reason": "USER_GESTURE_CANCEL", "cancelled_tasks": cancelled_count},
                 )
                 await self.manager.broadcast(interrupt_envelope)
                 idle_envelope = ServerEnvelope(

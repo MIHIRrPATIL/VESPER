@@ -33,6 +33,8 @@ import {
   Pause,
   SkipBack,
   SkipForward,
+  Thermometer,
+  Sun,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { notificationStore } from '../services/notification-store';
@@ -962,11 +964,12 @@ const SystemStatusCard: React.FC<{ data: Record<string, any> }> = ({ data }) => 
 // ── Weather Card ────────────────────────────────────────────────────────────
 
 const WeatherCard: React.FC<{ data: Record<string, any> }> = ({ data }) => {
-  const temp = data.temperature ?? data.temp ?? '--';
+  const temp = data.temperature ?? data.temp ?? data.temperature_c ?? '--';
   const condition = data.condition || data.description || 'Current Conditions';
-  const humidity = data.humidity;
-  const wind = data.wind_speed || data.wind;
+  const humidity = data.humidity ?? data.humidity_pct;
+  const wind = data.wind_speed || data.wind || (data.wind_speed_kmh !== undefined ? `${data.wind_speed_kmh} km/h` : undefined);
   const location = data.location || data.city;
+  const feelsLike = data.feels_like ?? data.feels_like_c;
 
   return (
     <div className="mt-4 pt-4 border-t border-white/[0.08] flex flex-col gap-4 text-left">
@@ -989,7 +992,19 @@ const WeatherCard: React.FC<{ data: Record<string, any> }> = ({ data }) => {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 pt-1">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1">
+        {feelsLike !== undefined && (
+          <div className="flex flex-col p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+            <div className="flex items-center gap-1.5 text-[#8E8A83] text-xs font-sans uppercase tracking-wider mb-1">
+              <Thermometer size={13} strokeWidth={1.8} />
+              <span>Feels Like</span>
+            </div>
+            <span className="font-mono text-xl font-medium text-[#E8E3DA] tabular-nums">
+              {feelsLike}°
+            </span>
+          </div>
+        )}
+
         {humidity !== undefined && (
           <div className="flex flex-col p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
             <div className="flex items-center gap-1.5 text-[#8E8A83] text-xs font-sans uppercase tracking-wider mb-1">
@@ -1014,14 +1029,14 @@ const WeatherCard: React.FC<{ data: Record<string, any> }> = ({ data }) => {
           </div>
         )}
 
-        {(data.feels_like !== undefined || data.high !== undefined || data.uv_index !== undefined) && (
+        {data.uv_index !== undefined && (
           <div className="flex flex-col p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
             <div className="flex items-center gap-1.5 text-[#8E8A83] text-xs font-sans uppercase tracking-wider mb-1">
-              <Sliders size={13} strokeWidth={1.8} />
-              <span>{data.feels_like !== undefined ? 'Feels Like' : data.high !== undefined ? 'High / Low' : 'UV Index'}</span>
+              <Sun size={13} strokeWidth={1.8} />
+              <span>UV Index</span>
             </div>
             <span className="font-mono text-xl font-medium text-[#E8E3DA] tabular-nums">
-              {data.feels_like !== undefined ? `${data.feels_like}°` : data.high !== undefined ? `${data.high}° / ${data.low ?? '--'}°` : data.uv_index}
+              {data.uv_index}
             </span>
           </div>
         )}

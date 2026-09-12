@@ -63,15 +63,15 @@ const BentoCard = ({
         <div className="bento-card-top-row flex items-center justify-between w-full mb-1">
           <div className="flex items-center gap-2.5">
             {Icon && (
-              <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.05] border border-white/[0.08] text-[#E8E3DA] shrink-0">
-                <Icon size={16} strokeWidth={1.8} />
+              <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.06] border border-white/[0.10] text-[#E8E3DA] shrink-0">
+                <Icon size={18} strokeWidth={2.0} />
               </div>
             )}
-            <h3 className="bento-title !text-base font-sans font-semibold text-[#E8E3DA] tracking-tight">{name}</h3>
+            <h3 className="bento-title !text-[17px] font-sans font-bold text-[#E8E3DA] tracking-tight">{name}</h3>
           </div>
           {headerRight}
         </div>
-        {description && <p className="bento-desc !text-xs text-[#8E8A83] font-sans leading-relaxed">{description}</p>}
+        {description && <p className="bento-desc !text-[13px] text-[#A1A1AA] font-sans leading-relaxed">{description}</p>}
         {children && <div className="mt-2.5 flex-1 flex flex-col justify-start">{children}</div>}
       </div>
     </div>

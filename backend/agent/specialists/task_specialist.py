@@ -23,7 +23,7 @@ from backend.agent.tools.calendar_tool import GoogleCalendarTool
 from backend.agent.title_normalizer import classify_action_type, extract_time_phrase, normalize_title
 from backend.data.models import PriorityLevel, TaskCreate, TaskModel
 from backend.data.repositories.tasks import TaskRepository
-from backend.voice.tts.normalizer import SpeechNormalizer
+from backend.shared.normalizer import SpeechNormalizer
 
 logger = logging.getLogger("vesper.agent.specialists.tasks")
 

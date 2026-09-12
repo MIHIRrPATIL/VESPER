@@ -45,9 +45,9 @@ async def update_state(req: StateUpdateRequest) -> Dict[str, Any]:
 @router.get("/devices", response_model=List[DeviceRegistration])
 async def list_active_devices() -> List[DeviceRegistration]:
     """Returns list of currently active online devices with battery telemetry and deduplication."""
-    # Evict any noisy unverified ARP neighbor entries or stale test mobile devices
+    # Evict only unverified ARP neighbor entries from legacy scans
     for k in list(sync_manager.state.active_devices.keys()):
-        if k.startswith("mobile_192_168_") or (k.startswith("mobile_") and k != "mobile_companion_provisioned"):
+        if k.startswith("mobile_192_168_"):
             del sync_manager.state.active_devices[k]
 
     active = sync_manager.get_active_devices()

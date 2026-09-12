@@ -295,7 +295,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                   type="button"
                   onClick={() => handleTabChange('overdue')}
                   className={cn(
-                    "font-mono text-[11px] px-2.5 py-1 rounded transition-colors flex items-center gap-1.5",
+                    "font-mono text-xs px-2.5 py-1 rounded transition-colors flex items-center gap-1.5",
                     taskTab === 'overdue'
                       ? "bg-white/[0.14] text-[#E8E3DA] font-semibold"
                       : "text-[#8E8A83] hover:text-[#D1CFC0]"
@@ -310,7 +310,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                   type="button"
                   onClick={() => handleTabChange('all')}
                   className={cn(
-                    "font-mono text-[11px] px-2.5 py-1 rounded transition-colors",
+                    "font-mono text-xs px-2.5 py-1 rounded transition-colors",
                     taskTab === 'all'
                       ? "bg-white/[0.14] text-[#E8E3DA] font-semibold"
                       : "text-[#8E8A83] hover:text-[#D1CFC0]"
@@ -322,7 +322,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                   type="button"
                   onClick={() => handleTabChange('completed')}
                   className={cn(
-                    "font-mono text-[11px] px-2.5 py-1 rounded transition-colors",
+                    "font-mono text-xs px-2.5 py-1 rounded transition-colors",
                     taskTab === 'completed'
                       ? "bg-white/[0.14] text-[#E8E3DA] font-semibold"
                       : "text-[#8E8A83] hover:text-[#D1CFC0]"
@@ -336,7 +336,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
             <div className="flex flex-col gap-2 w-full max-h-[220px] overflow-y-auto pr-1">
               {tasks.length === 0 ? (
                 <div className="py-8 flex flex-col items-center justify-center text-center">
-                  <span className="font-sans text-sm text-[#8E8A83]">
+                  <span className="font-sans text-[15px] text-[#8E8A83]">
                     {taskTab === 'overdue'
                       ? 'No overdue obligations. All matters are current, sir.'
                       : taskTab === 'today'
@@ -369,7 +369,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                       </div>
                       <span
                         className={cn(
-                          "font-sans text-sm truncate",
+                          "font-sans text-[15px] truncate",
                           task.done ? "line-through text-[#8E8A83]" : "text-[#E8E3DA] font-medium"
                         )}
                       >
@@ -378,20 +378,20 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       {task.category === 'overdue' && !task.done && (
-                        <span className="font-mono text-[10px] uppercase px-2 py-0.5 rounded bg-white/[0.08] text-[#E8E3DA] border border-white/20 font-bold">
+                        <span className="font-mono text-[11px] uppercase px-2 py-0.5 rounded bg-white/[0.08] text-[#E8E3DA] border border-white/20 font-bold">
                           OVERDUE • {task.age_label.toUpperCase()}
                         </span>
                       )}
                       {task.priority === 'high' && !task.done && task.category !== 'overdue' && (
-                        <span className="font-mono text-[10px] uppercase px-2 py-0.5 rounded bg-white/[0.06] text-[#D1CFC0] border border-white/15">
+                        <span className="font-mono text-[11px] uppercase px-2 py-0.5 rounded bg-white/[0.06] text-[#D1CFC0] border border-white/15">
                           HIGH
                         </span>
                       )}
-                      <span className="font-mono text-[10px] uppercase px-2 py-0.5 rounded bg-white/[0.04] text-[#8E8A83]">
+                      <span className="font-mono text-[11px] uppercase px-2 py-0.5 rounded bg-white/[0.04] text-[#8E8A83]">
                         {task.tag || 'TASK'}
                       </span>
                       {task.category !== 'overdue' && (
-                        <span className="font-mono text-[11px] text-[#8E8A83]">
+                        <span className="font-mono text-xs text-[#8E8A83]">
                           {task.age_label}
                         </span>
                       )}
@@ -408,7 +408,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
             description="Dynamic LAN hardware mesh" 
             Icon={Network}
             headerRight={
-              <span className="font-mono text-[11px] text-[#D1CFC0] px-2.5 py-1 rounded bg-white/[0.04] border border-white/[0.08]">
+              <span className="font-mono text-xs text-[#D1CFC0] px-2.5 py-1 rounded bg-white/[0.04] border border-white/[0.08]">
                 {uniqueDevices.length} Online
               </span>
             }
@@ -433,18 +433,18 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2.5 min-w-0">
                         <div className="flex items-center justify-center w-6 h-6 rounded-md bg-white/[0.06] border border-white/[0.08] text-[#E8E3DA] shrink-0">
-                          <IconComp size={13} strokeWidth={1.8} />
+                          <IconComp size={14} strokeWidth={1.8} />
                         </div>
-                        <span className="font-sans text-xs font-semibold text-[#E8E3DA] truncate">
+                        <span className="font-sans text-sm font-semibold text-[#E8E3DA] truncate">
                           {device.device_name}
                         </span>
                       </div>
 
                       {/* Status / Battery badge */}
-                      <div className="flex items-center gap-1.5 font-mono text-[10px] text-[#D1CFC0] shrink-0">
+                      <div className="flex items-center gap-1.5 font-mono text-xs text-[#D1CFC0] shrink-0">
                         <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white/[0.05] border border-white/[0.08]">
                           <span className={cn("w-1.5 h-1.5 rounded-full", device.is_online ? "bg-[#E8E3DA] animate-pulse" : "bg-white/30")} />
-                          <span className="font-mono text-[10px] text-[#E8E3DA] font-medium">
+                          <span className="font-mono text-[11px] text-[#E8E3DA] font-medium">
                             {device.battery_level !== undefined && device.battery_level !== null
                               ? `${device.battery_level}% bat${device.is_charging ? ' • chg' : ''}`
                               : device.cpu_usage_pct !== undefined
@@ -456,11 +456,11 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                     </div>
 
                     {/* Bottom Row: IP/Network + Platform Role */}
-                    <div className="flex items-center justify-between gap-2 font-mono text-[11px] text-[#A1A1AA] pl-8.5">
+                    <div className="flex items-center justify-between gap-2 font-mono text-xs text-[#A1A1AA] pl-8.5">
                       <span className="truncate">
                         {device.ip_address || device.hostname || (isDesktop ? '192.168.0.x (Local Host)' : 'Node Relay')}
                       </span>
-                      <span className="text-[10px] text-[#8E8A83] shrink-0 uppercase tracking-widest font-mono">
+                      <span className="text-[11px] text-[#8E8A83] shrink-0 uppercase tracking-widest font-mono">
                         {isDesktop ? 'HOST' : isMobile ? 'PHONE' : 'EDGE'}
                       </span>
                     </div>
@@ -476,7 +476,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
             description="Operational cognitive swarm & background services" 
             Icon={Layers} 
             headerRight={
-              <span className="font-mono text-[11px] text-[#D1CFC0] px-2.5 py-1 rounded bg-white/[0.04] border border-white/[0.08]">
+              <span className="font-mono text-xs text-[#D1CFC0] px-2.5 py-1 rounded bg-white/[0.04] border border-white/[0.08]">
                 {operationalServices.length} Active
               </span>
             }
@@ -487,22 +487,22 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                   key={svc.id}
                   type="button"
                   onClick={svc.action}
-                  className="p-2.5 rounded-lg bg-white/[0.02] hover:bg-white/[0.06] border border-white/[0.04] hover:border-white/[0.14] transition-all flex flex-col justify-between text-left group select-none cursor-pointer h-[66px]"
+                  className="p-2.5 rounded-lg bg-white/[0.02] hover:bg-white/[0.06] border border-white/[0.04] hover:border-white/[0.14] transition-all flex flex-col justify-between text-left group select-none cursor-pointer h-[72px]"
                   title={`Trigger ${svc.name}`}
                 >
                   <div className="flex items-center justify-between w-full">
                     <div className="flex items-center gap-1.5 min-w-0">
-                      <svc.Icon size={13} className="text-[#8E8A83] group-hover:text-[#E8E3DA] transition-colors shrink-0" />
-                      <span className="font-sans text-xs font-semibold text-[#E8E3DA] group-hover:text-white transition-colors truncate">
+                      <svc.Icon size={14} className="text-[#8E8A83] group-hover:text-[#E8E3DA] transition-colors shrink-0" />
+                      <span className="font-sans text-sm font-semibold text-[#E8E3DA] group-hover:text-white transition-colors truncate">
                         {svc.name}
                       </span>
                     </div>
                   </div>
                   <div className="flex items-center justify-between w-full gap-1">
-                    <span className="font-mono text-[9px] text-[#8E8A83] group-hover:text-[#D1CFC0] transition-colors truncate">
+                    <span className="font-mono text-[11px] text-[#8E8A83] group-hover:text-[#D1CFC0] transition-colors truncate">
                       {svc.role}
                     </span>
-                    <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-white/[0.05] text-[#D1CFC0] border border-white/[0.08] shrink-0">
+                    <span className="font-mono text-[10.5px] px-1.5 py-0.5 rounded bg-white/[0.05] text-[#D1CFC0] border border-white/[0.08] shrink-0">
                       {svc.status}
                     </span>
                   </div>
@@ -518,7 +518,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
             Icon={Calendar} 
             className="col-span-2"
             headerRight={
-              <span className="font-mono text-[11px] text-[#D1CFC0] px-2.5 py-1 rounded bg-white/[0.04] border border-white/[0.08]">
+              <span className="font-mono text-xs text-[#D1CFC0] px-2.5 py-1 rounded bg-white/[0.04] border border-white/[0.08]">
                 {tasks.filter(t => t.category === 'overdue' && !t.done).length} Overdue • {recentActivities.length} Ledger
               </span>
             }
@@ -527,24 +527,24 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
               {/* Left Column: Calendar & Real Financial Transactions Ledger */}
               <div className="flex flex-col gap-2">
                 <div className="flex items-center justify-between pb-1 border-b border-white/[0.04]">
-                  <span className="font-mono text-[10px] uppercase tracking-wider text-[#8E8A83]">Calendar & Financial Ledger</span>
-                  <span className="font-mono text-[10px] text-[#8E8A83]">Supabase DB</span>
+                  <span className="font-mono text-[11.5px] uppercase tracking-wider text-[#8E8A83]">Calendar & Financial Ledger</span>
+                  <span className="font-mono text-[11px] text-[#8E8A83]">Supabase DB</span>
                 </div>
                 
                 {calendarEvents.length > 0 ? (
                   calendarEvents.slice(0, 2).map((ev, i) => (
                     <div key={i} className="flex items-center justify-between p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
                       <div className="flex flex-col min-w-0 pr-2">
-                        <span className="font-sans text-xs font-semibold text-[#E8E3DA] truncate">{ev.summary}</span>
-                        <span className="font-mono text-[10px] text-[#8E8A83]">{ev.location || 'Scheduled Event'}</span>
+                        <span className="font-sans text-[13.5px] font-semibold text-[#E8E3DA] truncate">{ev.summary}</span>
+                        <span className="font-mono text-[11px] text-[#8E8A83]">{ev.location || 'Scheduled Event'}</span>
                       </div>
-                      <span className="font-mono text-[11px] text-[#D1CFC0] shrink-0">{ev.time}</span>
+                      <span className="font-mono text-xs text-[#D1CFC0] shrink-0">{ev.time}</span>
                     </div>
                   ))
                 ) : (
                   <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.04] flex items-center justify-between">
-                    <span className="font-sans text-xs text-[#E8E3DA] font-medium">Calendar is clear for today</span>
-                    <span className="font-mono text-[9px] text-[#8E8A83] uppercase px-1.5 py-0.5 rounded bg-white/[0.05]">SYNCED</span>
+                    <span className="font-sans text-[13.5px] text-[#E8E3DA] font-medium">Calendar is clear for today</span>
+                    <span className="font-mono text-[10.5px] text-[#8E8A83] uppercase px-1.5 py-0.5 rounded bg-white/[0.05]">SYNCED</span>
                   </div>
                 )}
 
@@ -552,10 +552,10 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                 {recentActivities.slice(0, 2).map((act, idx) => (
                   <div key={idx} className="flex items-center justify-between p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
                     <div className="flex items-center gap-2 min-w-0">
-                      <CreditCard size={13} className="text-[#8E8A83] shrink-0" />
-                      <span className="font-sans text-xs text-[#E8E3DA] truncate font-medium">{act}</span>
+                      <CreditCard size={14} className="text-[#8E8A83] shrink-0" />
+                      <span className="font-sans text-[13.5px] text-[#E8E3DA] truncate font-medium">{act}</span>
                     </div>
-                    <span className="font-mono text-[9px] text-[#8E8A83]">TRANSACTION</span>
+                    <span className="font-mono text-[10.5px] text-[#8E8A83]">TRANSACTION</span>
                   </div>
                 ))}
               </div>
@@ -563,13 +563,13 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
               {/* Right Column: Real Overdue Action Queue from DB */}
               <div className="flex flex-col gap-2">
                 <div className="flex items-center justify-between pb-1 border-b border-white/[0.04]">
-                  <span className="font-mono text-[10px] uppercase tracking-wider text-[#8E8A83]">Action Required (Overdue Queue)</span>
-                  <span className="font-mono text-[10px] text-[#8E8A83]">Supabase Tasks</span>
+                  <span className="font-mono text-[11.5px] uppercase tracking-wider text-[#8E8A83]">Action Required (Overdue Queue)</span>
+                  <span className="font-mono text-[11px] text-[#8E8A83]">Supabase Tasks</span>
                 </div>
 
                 {tasks.filter((t) => t.category === 'overdue' && !t.done).length === 0 ? (
                   <div className="p-3 rounded-lg bg-white/[0.01] border border-white/[0.03] text-center">
-                    <span className="font-sans text-xs text-[#8E8A83]">No pending overdue actions in queue.</span>
+                    <span className="font-sans text-[13.5px] text-[#8E8A83]">No pending overdue actions in queue.</span>
                   </div>
                 ) : (
                   tasks
@@ -579,14 +579,14 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                       <div key={task.id} className="flex items-center justify-between p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
                         <div className="flex flex-col min-w-0 pr-2">
                           <div className="flex items-center gap-1.5 mb-0.5">
-                            <span className="font-mono text-[9px] uppercase px-1.5 py-0.2 rounded bg-white/[0.08] text-[#E8E3DA] font-bold">
+                            <span className="font-mono text-[10px] uppercase px-1.5 py-0.2 rounded bg-white/[0.08] text-[#E8E3DA] font-bold">
                               {task.age_label.toUpperCase()}
                             </span>
                             {task.priority === 'high' && (
-                              <span className="font-mono text-[9px] text-[#E8E3DA] font-bold">HIGH</span>
+                              <span className="font-mono text-[10px] text-[#E8E3DA] font-bold">HIGH</span>
                             )}
                           </div>
-                          <span className="font-sans text-xs text-[#E8E3DA] truncate font-medium">{task.title}</span>
+                          <span className="font-sans text-[13.5px] text-[#E8E3DA] truncate font-medium">{task.title}</span>
                         </div>
                         <button
                           type="button"
@@ -594,7 +594,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                           className="p-1.5 rounded-md bg-white/[0.06] hover:bg-white/[0.14] text-[#E8E3DA] transition-colors shrink-0"
                           title="Resolve & Complete"
                         >
-                          <Check size={13} strokeWidth={2.5} />
+                          <Check size={14} strokeWidth={2.5} />
                         </button>
                       </div>
                     ))

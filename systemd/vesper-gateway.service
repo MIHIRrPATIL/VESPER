@@ -1,0 +1,17 @@
+[Unit]
+Description=VESPER Multiplexed Gateway Service
+After=network.target
+PartOf=vesper.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mihir/Codes/VESPER
+ExecStart=/home/mihir/Codes/VESPER/.venv/bin/python3 -m uvicorn backend.gateway.app:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -96,8 +96,9 @@ logging.basicConfig(
 )
 
 
-def play_audio_file(audio_path: Path, delete_after: bool = True) -> None:
+def play_audio_file(audio_path: Path | str, delete_after: bool = True) -> None:
     """Plays audio through system speakers via low-latency player."""
+    audio_path = Path(audio_path)
     p_str = str(audio_path)
     try:
         if sys.platform == "win32":
@@ -110,10 +111,10 @@ def play_audio_file(audio_path: Path, delete_after: bool = True) -> None:
 
         candidate_cmds = [
             ["afplay", p_str],
+            ["paplay", "--volume=65536", "--client-name=Alfred-Speech", "--stream-name=TTS-Voice", p_str],
+            ["mpv", "--no-video", "--really-quiet", "--volume=100", p_str],
             ["pw-play", p_str],
-            ["paplay", p_str],
             ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", p_str],
-            ["mpv", "--no-terminal", p_str],
         ]
         for cmd in candidate_cmds:
             if shutil.which(cmd[0]):
@@ -180,6 +181,12 @@ def _duck_background_audio(duck_pct: int = 20) -> Dict[str, Any]:
                 for i in range(1, len(blocks), 2):
                     sid = blocks[i]
                     block = blocks[i + 1]
+                    # Never duck Alfred's own TTS playback or speech processes
+                    app_match = re.search(r'application\.name\s*=\s*"([^"]+)"', block, re.IGNORECASE)
+                    app_name = app_match.group(1).lower() if app_match else ""
+                    if any(x in app_name for x in ("alfred", "pw-play", "paplay", "mpv", "ffplay", "piper")):
+                        continue
+
                     m = re.search(r"Volume:.*?/\s*(\d+)%", block)
                     curr_pct = int(m.group(1)) if m else 100
                     # If current volume is already ducked (<= 25%), retain previous normal baseline
@@ -752,9 +759,90 @@ class TerminalDesktopHUD:
                     console.print(f"[dim red][ERROR] Inbound parse error: {e}[/dim red]")
                 await asyncio.sleep(0.5)
 
+    async def _execute_workstation_command(self, cmd: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Natively executes a workstation command on the laptop session."""
+        try:
+            if cmd == "screen_capture":
+                from backend.vision.camera_stream import ScreenCapture
+                mon_idx = params.get("monitor_index")
+                mon_name = params.get("monitor_name")
+                res = await asyncio.to_thread(ScreenCapture.capture_screen, monitor_index=mon_idx, monitor_name=mon_name)
+                if res.success:
+                    return {
+                        "success": True,
+                        "image_base64": res.image_base64,
+                        "width": res.width,
+                        "height": res.height,
+                        "monitor_name": res.monitor_name,
+                    }
+                return {"success": False, "error": res.error or "Failed to capture screen"}
+
+            elif cmd == "camera_capture":
+                from backend.vision.camera_stream import CameraCapture
+                cam_idx = params.get("camera_index", 0)
+                res = await asyncio.to_thread(CameraCapture.capture_frame, camera_index=cam_idx)
+                if res.success:
+                    return {
+                        "success": True,
+                        "image_base64": res.image_base64,
+                        "width": res.width,
+                        "height": res.height,
+                    }
+                return {"success": False, "error": res.error or "Failed to capture camera frame"}
+
+            elif cmd == "dpms":
+                st = params.get("state", "off").lower()
+                if st == "on":
+                    from backend.vision.display_sentry import turn_display_on
+                    ok = await asyncio.to_thread(turn_display_on, True)
+                else:
+                    from backend.vision.display_sentry import turn_display_off
+                    ok = await asyncio.to_thread(turn_display_off)
+                return {"success": ok, "state": st}
+
+            elif cmd == "session_lock":
+                import subprocess
+                subprocess.Popen(["loginctl", "lock-session"])
+                return {"success": True, "locked": True}
+
+            elif cmd == "media_control":
+                action = params.get("action", "play-pause")
+                from backend.vision.gesture_service import _control_media_player
+                await asyncio.to_thread(_control_media_player, action, False)
+                return {"success": True, "action": action}
+
+            elif cmd == "audio_sink":
+                vol = params.get("volume")
+                if vol is not None:
+                    from backend.vision.gesture_service import _set_system_volume
+                    await asyncio.to_thread(_set_system_volume, int(vol))
+                    return {"success": True, "volume": int(vol)}
+                return {"success": False, "error": "Missing volume param"}
+
+            else:
+                return {"success": False, "error": f"Unknown workstation command: {cmd}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     async def _render_incoming_envelope(self, envelope: ServerEnvelope) -> None:
         """Renders server events into styled terminal components."""
         p = envelope.payload
+
+        if envelope.type == EventType.WORKSTATION_COMMAND_REQ:
+            req_uuid = envelope.uuid or p.get("request_uuid")
+            cmd = p.get("command", "")
+            params = p.get("params", {})
+            res_payload = await self._execute_workstation_command(cmd, params)
+            res_env = ClientEnvelope(
+                uuid=req_uuid,
+                channel=Channel.CONTROL,
+                type=EventType.WORKSTATION_COMMAND_RES,
+                payload={"request_uuid": req_uuid, "command": cmd, **res_payload},
+            )
+            async with self._send_lock:
+                if self.websocket:
+                    await self.websocket.send(res_env.model_dump_json())
+            return
 
         if envelope.type == EventType.AGENT_RESPONSE:
             response = p.get("response", "")
@@ -1654,8 +1742,6 @@ class TerminalDesktopHUD:
             self._is_playing_ack = True
 
         async with self._tts_lock:
-            if is_ack:
-                self._is_playing_ack = False
             if self._wakeword_listener:
                 self._wakeword_listener.pause()
 
@@ -1673,36 +1759,46 @@ class TerminalDesktopHUD:
                 import tempfile
                 import shutil
 
+                logger.info(f"[TTS] Synthesizing speech ({len(text)} chars, ack={is_ack}): '{text[:60]}...'")
                 chunks = []
                 async for chunk in self._tts_mgr.stream_speech(text):
                     chunks.append(chunk)
 
                 if not chunks:
+                    logger.warning("[TTS] No audio chunks returned from TTSManager.")
                     return
 
                 audio_bytes, ext = prepare_audio_for_playback(chunks)
                 if not audio_bytes:
+                    logger.warning("[TTS] Prepared audio bytes empty.")
                     return
 
                 with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
                     f.write(audio_bytes)
                     temp_audio_path = f.name
 
-                player = shutil.which("mpv")
-                cmd = [player, "--no-video", "--really-quiet", temp_audio_path] if player else None
+                cmd = None
+                if ext == ".wav":
+                    if shutil.which("paplay"):
+                        cmd = ["paplay", "--volume=65536", "--client-name=Alfred-Speech", "--stream-name=TTS-Voice", temp_audio_path]
+                    elif shutil.which("mpv"):
+                        cmd = ["mpv", "--no-video", "--really-quiet", "--volume=100", temp_audio_path]
+                    elif shutil.which("pw-play"):
+                        cmd = ["pw-play", "--volume", "1.0", temp_audio_path]
                 if not cmd:
-                    ffplay = shutil.which("ffplay")
-                    if ffplay:
-                        cmd = [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet", temp_audio_path]
-                if not cmd and ext == ".wav":
-                    paplay = shutil.which("paplay")
-                    if paplay:
-                        cmd = [paplay, temp_audio_path]
+                    if shutil.which("mpv"):
+                        cmd = ["mpv", "--no-video", "--really-quiet", "--volume=100", temp_audio_path]
+                    elif shutil.which("ffplay"):
+                        cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", temp_audio_path]
+                    elif shutil.which("paplay"):
+                        cmd = ["paplay", "--volume=65536", "--client-name=Alfred-Speech", "--stream-name=TTS-Voice", temp_audio_path]
 
                 if cmd:
+                    logger.info(f"[TTS] Executing audio player: {' '.join(cmd)}")
                     self._current_tts_proc = await asyncio.create_subprocess_exec(*cmd)
                     await self._current_tts_proc.wait()
                     self._current_tts_proc = None
+                    logger.info("[TTS] Audio playback completed.")
 
             except asyncio.CancelledError:
                 if self._current_tts_proc:
@@ -1711,10 +1807,14 @@ class TerminalDesktopHUD:
                     except Exception:
                         pass
                     self._current_tts_proc = None
+                logger.info("[TTS] Playback task cancelled.")
                 raise
             except Exception as e:
-                logger.debug(f"[TTS Playback Error] {e}")
+                logger.error(f"[TTS Playback Error] {e}", exc_info=True)
+                console.print(f"[dim red][TTS Error] {e}[/dim red]")
             finally:
+                if is_ack:
+                    self._is_playing_ack = False
                 if self._voice_watchdog_task and not self._voice_watchdog_task.done():
                     self._voice_watchdog_task.cancel()
                 if self._tts_duck_state is not None:
@@ -1998,6 +2098,7 @@ class TerminalDesktopHUD:
         with_gestures: bool = False,
         with_wakeword: bool = False,
         with_sentry: bool = False,
+        headless: bool = False,
     ) -> None:
         """Runs the background receivers, armed daemons, and interactive REPL."""
         self._loop = asyncio.get_running_loop()
@@ -2026,6 +2127,12 @@ class TerminalDesktopHUD:
                 pass
 
         asyncio.create_task(_prewarm_tts())
+
+        if headless:
+            console.print("[bold green]VESPER Workstation Daemon active (headless mode - camera & wake word armed).[/bold green]")
+            while self.is_running:
+                await asyncio.sleep(1.0)
+            return
 
         # Welcome banner
         console.print(
@@ -2334,6 +2441,7 @@ def main():
     parser.add_argument("--with-gestures", action="store_true", help="Also arm live webcam touchless gesture tracker")
     parser.add_argument("--with-wakeword", action="store_true", help="Also arm live microphone 'Hey Alfred' wake word listener")
     parser.add_argument("--with-sentry", action="store_true", help="Also arm DPMS power sentry with camera presence detection & Caelestia recovery")
+    parser.add_argument("--headless", action="store_true", help="Run in headless daemon mode (no stdin/TTY REPL, ideal for systemd)")
     args = parser.parse_args()
 
     supervisor = ServiceSupervisor()
@@ -2441,6 +2549,7 @@ def main():
                 with_gestures=args.with_gestures,
                 with_wakeword=args.with_wakeword,
                 with_sentry=args.with_sentry,
+                headless=args.headless,
             )
         finally:
             if not args.client_only:

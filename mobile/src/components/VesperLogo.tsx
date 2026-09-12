@@ -15,16 +15,18 @@ interface VesperLogoProps {
  * paired with the refined editorial italic wordmark.
  */
 export const VesperLogo: React.FC<VesperLogoProps> = ({
-  size = 24,
+  size = 22,
   color = theme.colors.textPrimary,
   showWordmark = true,
   style,
 }) => {
+  const emblemWidth = Math.round(size * 1.24);
+
   return (
     <View style={[styles.container, style]}>
       <Image
-        source={require("../../assets/vesper-logo-transparent.png")}
-        style={{ width: size, height: size }}
+        source={require("../../assets/vesper-emblem.png")}
+        style={{ width: emblemWidth, height: size }}
         resizeMode="contain"
       />
       {showWordmark && (

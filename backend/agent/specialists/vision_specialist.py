@@ -383,21 +383,39 @@ class VisionSpecialist(BaseSpecialist):
                 mon_name = "eDP-1"
 
         caps = DeviceProbe.get_capabilities()
-        if caps.is_headless or not caps.has_display:
-            return SpecialistResult(
-                success=False,
-                action="inspect_screen",
-                speech_summary=f"This unit ({caps.device_model}) is running in headless mode without an active desktop display server, sir.",
-                data={"is_headless": True},
-            )
-
         frame = ScreenCapture.capture_screen(monitor_index=mon_idx, monitor_name=mon_name)
         if not frame.success:
+            # Fall back to Workstation RPC via Gateway (for remote swarm nodes)
+            try:
+                import httpx
+                from backend.shared.config import GATEWAY_URL
+                from backend.vision.camera_stream import FrameCaptureResult
+                async with httpx.AsyncClient(timeout=4.5) as client:
+                    rpc_res = await client.post(
+                        f"{GATEWAY_URL.rstrip('/')}/api/workstation/command",
+                        json={"command": "screen_capture", "params": {"monitor_index": mon_idx, "monitor_name": mon_name}, "timeout": 3.8},
+                    )
+                    if rpc_res.status_code == 200:
+                        data = rpc_res.json()
+                        if data.get("success") and data.get("image_base64"):
+                            frame = FrameCaptureResult(
+                                success=True,
+                                source="screen_remote",
+                                image_base64=data["image_base64"],
+                                width=data.get("width", 1920),
+                                height=data.get("height", 1080),
+                                monitor_name=data.get("monitor_name") or mon_name or "Workstation Display",
+                            )
+            except Exception as rpc_err:
+                logger.debug(f"[VisionSpecialist] Remote workstation screen capture fallback failed: {rpc_err}")
+
+        if not frame.success:
+            err_msg = frame.error or f"This unit ({caps.device_model}) has no active display and no connected workstation was available."
             return SpecialistResult(
                 success=False,
                 action="inspect_screen",
-                speech_summary=f"I was unable to capture the desktop screen, sir: {frame.error}",
-                error=frame.error,
+                speech_summary=f"I was unable to capture the desktop screen, sir: {err_msg}",
+                error=err_msg,
                 data={"source": "screen"},
             )
 
@@ -478,21 +496,39 @@ class VisionSpecialist(BaseSpecialist):
                 mon_name = "eDP-1"
 
         caps = DeviceProbe.get_capabilities()
-        if caps.is_headless or not caps.has_display:
-            return SpecialistResult(
-                success=False,
-                action="ocr_screen",
-                speech_summary=f"This unit ({caps.device_model}) is running in headless mode with no display to transcribe, sir.",
-                data={"is_headless": True},
-            )
-
         frame = ScreenCapture.capture_screen(monitor_index=mon_idx, monitor_name=mon_name)
         if not frame.success:
+            # Fall back to Workstation RPC via Gateway (for remote swarm nodes)
+            try:
+                import httpx
+                from backend.shared.config import GATEWAY_URL
+                from backend.vision.camera_stream import FrameCaptureResult
+                async with httpx.AsyncClient(timeout=4.5) as client:
+                    rpc_res = await client.post(
+                        f"{GATEWAY_URL.rstrip('/')}/api/workstation/command",
+                        json={"command": "screen_capture", "params": {"monitor_index": mon_idx, "monitor_name": mon_name}, "timeout": 3.8},
+                    )
+                    if rpc_res.status_code == 200:
+                        data = rpc_res.json()
+                        if data.get("success") and data.get("image_base64"):
+                            frame = FrameCaptureResult(
+                                success=True,
+                                source="screen_remote",
+                                image_base64=data["image_base64"],
+                                width=data.get("width", 1920),
+                                height=data.get("height", 1080),
+                                monitor_name=data.get("monitor_name") or mon_name or "Workstation Display",
+                            )
+            except Exception as rpc_err:
+                logger.debug(f"[VisionSpecialist] Remote workstation screen OCR fallback failed: {rpc_err}")
+
+        if not frame.success:
+            err_msg = frame.error or f"This unit ({caps.device_model}) has no display and no connected workstation was available."
             return SpecialistResult(
                 success=False,
                 action="ocr_screen",
-                speech_summary=f"I could not capture the desktop screen for OCR, sir: {frame.error}",
-                error=frame.error,
+                speech_summary=f"I could not capture the desktop screen for OCR, sir: {err_msg}",
+                error=err_msg,
                 data={"source": "screen"},
             )
 

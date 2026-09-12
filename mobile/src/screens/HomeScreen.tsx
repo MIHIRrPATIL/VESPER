@@ -135,7 +135,7 @@ export default function HomeScreen() {
       {!zenMode && (
         <View style={styles.headerBar}>
           <View style={styles.headerBrandCol}>
-            <VesperLogo size={18} showWordmark={true} />
+            <VesperLogo size={22} showWordmark={true} />
           </View>
 
           <View style={styles.headerRightRow}>

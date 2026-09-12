@@ -438,6 +438,21 @@ class SystemSpecialist(BaseSpecialist):
             st = "off"
 
         success = await asyncio.to_thread(self._run_dpms_control, st)
+        if not success:
+            # Fall back to Workstation RPC via Gateway (for remote swarm nodes)
+            try:
+                import httpx
+                from backend.shared.config import GATEWAY_URL
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    resp = await client.post(
+                        f"{GATEWAY_URL.rstrip('/')}/api/workstation/command",
+                        json={"command": "dpms", "params": {"state": st}, "timeout": 2.5},
+                    )
+                    if resp.status_code == 200 and resp.json().get("success"):
+                        success = True
+            except Exception as rpc_err:
+                logger.debug(f"[SystemSpecialist] Workstation RPC dpms failed: {rpc_err}")
+
         if success:
             speech = "Turning off the display now, sir." if st == "off" else "Display powered on, sir."
             return SpecialistResult(
@@ -475,6 +490,21 @@ class SystemSpecialist(BaseSpecialist):
     async def lock_session(self) -> SpecialistResult:
         """Locks the desktop session securely."""
         success = await asyncio.to_thread(self._run_lock_session)
+        if not success:
+            # Fall back to Workstation RPC via Gateway (for remote swarm nodes)
+            try:
+                import httpx
+                from backend.shared.config import GATEWAY_URL
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    resp = await client.post(
+                        f"{GATEWAY_URL.rstrip('/')}/api/workstation/command",
+                        json={"command": "session_lock", "params": {}, "timeout": 2.5},
+                    )
+                    if resp.status_code == 200 and resp.json().get("success"):
+                        success = True
+            except Exception as rpc_err:
+                logger.debug(f"[SystemSpecialist] Workstation RPC lock_session failed: {rpc_err}")
+
         if success:
             speech = "Locking the session now, sir."
             return SpecialistResult(

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=VESPER
+GenericName=Intelligent OS Desk Companion HUD
+Comment=VESPER Intelligent OS Desk Companion HUD & Swarm Interface
+Exec=/home/mihir/Codes/VESPER/desktop/src-tauri/target/release/vesper-desktop
+Icon=/home/mihir/.local/share/icons/hicolor/512x512/apps/vesper-desktop.png
+Terminal=false
+Categories=Utility;Development;AudioVideo;
+StartupWMClass=vesper-desktop
+Keywords=vesper;hud;agent;voice;assistant;

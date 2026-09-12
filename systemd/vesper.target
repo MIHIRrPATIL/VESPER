@@ -1,0 +1,6 @@
+[Unit]
+Description=VESPER Intelligent OS Full Stack Target
+Wants=vesper-gateway.service vesper-agent.service vesper-voice.service vesper-workstation.service
+
+[Install]
+WantedBy=default.target

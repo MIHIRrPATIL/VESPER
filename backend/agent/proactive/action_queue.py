@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 import os
 import sys
+
+from backend.shared.config import GATEWAY_URL
 logger = logging.getLogger("vesper.agent.proactive.queue")
 
 
@@ -120,7 +122,7 @@ class ActionQueueManager:
                 self._remote_syncing = True
                 import httpx
                 params = {"domain": domain} if domain else {}
-                resp = httpx.get("http://127.0.0.1:8000/sync/proactive/actions/active", params=params, timeout=0.2)
+                resp = httpx.get(f"{GATEWAY_URL.rstrip('/')}/sync/proactive/actions/active", params=params, timeout=0.5)
                 if resp.status_code == 200:
                     data = resp.json()
                     if isinstance(data, list):
@@ -154,8 +156,8 @@ class ActionQueueManager:
                 self._remote_syncing = True
                 import httpx
                 resp = httpx.get(
-                    f"http://127.0.0.1:8000/sync/proactive/actions/recent?max_age={max_age_sec}",
-                    timeout=0.2,
+                    f"{GATEWAY_URL.rstrip('/')}/sync/proactive/actions/recent?max_age={max_age_sec}",
+                    timeout=0.5,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
@@ -183,8 +185,8 @@ class ActionQueueManager:
                     self._remote_syncing = True
                     import httpx
                     resp = httpx.post(
-                        f"http://127.0.0.1:8000/sync/proactive/actions/{action_id}/resolve?new_status={resolution}&confirmed_by={confirmed_by}",
-                        timeout=0.2,
+                        f"{GATEWAY_URL.rstrip('/')}/sync/proactive/actions/{action_id}/resolve?new_status={resolution}&confirmed_by={confirmed_by}",
+                        timeout=0.5,
                     )
                     if resp.status_code == 200 and resp.json().get("success"):
                         return StagedAction(**resp.json()["action"])

@@ -3,70 +3,15 @@ import { ApiTask, TaskStats } from '../types/vesper';
 export type TaskListener = () => void;
 
 const DEFAULT_STATS: TaskStats = {
-  total: 6,
-  today_count: 2,
-  overdue_count: 2,
-  upcoming_count: 1,
-  completed_count: 1,
-  pending_count: 5,
+  total: 0,
+  today_count: 0,
+  overdue_count: 0,
+  upcoming_count: 0,
+  completed_count: 0,
+  pending_count: 0,
 };
 
-const INITIAL_FALLBACK_TASKS: ApiTask[] = [
-  {
-    id: 'task_demo_1',
-    title: 'Review PR #42 & verification test suite',
-    done: false,
-    priority: 'high',
-    category: 'today',
-    age_label: 'Today • 14:30',
-    tag: 'DEV',
-  },
-  {
-    id: 'task_demo_2',
-    title: 'Synchronize Android node notification relay',
-    done: false,
-    priority: 'normal',
-    category: 'today',
-    age_label: 'Today • 16:00',
-    tag: 'SYNC',
-  },
-  {
-    id: 'task_demo_3',
-    title: 'Quarterly infrastructure security audit and API key rotation',
-    done: false,
-    priority: 'urgent',
-    category: 'overdue',
-    age_label: '2 days overdue',
-    tag: 'SECURITY',
-  },
-  {
-    id: 'task_demo_4',
-    title: 'Re-index graphify knowledge graph for mobile subproject',
-    done: false,
-    priority: 'normal',
-    category: 'overdue',
-    age_label: '1 day overdue',
-    tag: 'DOCS',
-  },
-  {
-    id: 'task_demo_5',
-    title: 'Deploy Caelestia QML lock-screen power sentry daemon',
-    done: false,
-    priority: 'normal',
-    category: 'upcoming',
-    age_label: 'Tomorrow • 10:00',
-    tag: 'LINUX',
-  },
-  {
-    id: 'task_demo_6',
-    title: 'Calibrate BlazeFace camera presence sentry',
-    done: true,
-    priority: 'normal',
-    category: 'completed',
-    age_label: 'Completed',
-    tag: 'VISION',
-  },
-];
+const INITIAL_FALLBACK_TASKS: ApiTask[] = [];
 
 class TaskService {
   private tasks: ApiTask[] = INITIAL_FALLBACK_TASKS;
