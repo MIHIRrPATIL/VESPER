@@ -393,7 +393,9 @@ class MediaSpecialist(BaseSpecialist):
                         "artist": artists,
                         "album": album_name,
                         "album_art": album_art,
+                        "cover_url": album_art,
                         "url": spotify_url,
+                        "uri": track_uri,
                         "device": target_name,
                     },
                 )
@@ -1203,15 +1205,28 @@ class MediaSpecialist(BaseSpecialist):
                 for v in video_results[:max_results]:
                     channel_info = v.get("channel", {})
                     channel_name = channel_info.get("name", "Unknown Channel") if isinstance(channel_info, dict) else str(channel_info)
-                    thumb = v.get("thumbnail", {}).get("static", "") if isinstance(v.get("thumbnail"), dict) else ""
+                    thumb = v.get("thumbnail", {}).get("static", "") if isinstance(v.get("thumbnail"), dict) else (v.get("thumbnail") if isinstance(v.get("thumbnail"), str) else "")
+                    link = v.get("link", "")
+                    video_id = ""
+                    if "watch?v=" in link:
+                        video_id = link.split("watch?v=")[1].split("&")[0]
+                    elif "youtu.be/" in link:
+                        video_id = link.split("youtu.be/")[1].split("?")[0]
+
+                    if not thumb and video_id:
+                        thumb = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
 
                     cards.append({
                         "title": v.get("title", "Untitled Video"),
-                        "link": v.get("link", ""),
+                        "link": link,
+                        "video_id": video_id,
                         "channel": channel_name,
                         "duration": v.get("length", ""),
                         "thumbnail": thumb,
+                        "thumbnail_url": thumb,
                         "views": v.get("views", ""),
+                        "deep_link_android": f"vnd.youtube:{video_id}" if video_id else None,
+                        "deep_link_ios": f"youtube://watch?v={video_id}" if video_id else None,
                     })
 
                 top = cards[0]
@@ -1228,8 +1243,12 @@ class MediaSpecialist(BaseSpecialist):
                         "title": top["title"],
                         "channel": top["channel"],
                         "link": top["link"],
+                        "video_id": top.get("video_id", ""),
                         "duration": top["duration"],
                         "thumbnail": top["thumbnail"],
+                        "thumbnail_url": top["thumbnail"],
+                        "deep_link_android": top.get("deep_link_android"),
+                        "deep_link_ios": top.get("deep_link_ios"),
                         "videos": cards,
                     },
                 )

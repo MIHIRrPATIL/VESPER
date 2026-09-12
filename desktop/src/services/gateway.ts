@@ -197,9 +197,17 @@ class GatewayClient {
     });
   }
 
-  public sendZenModeToggle(): boolean {
+  public sendZenModeToggle(target?: boolean): boolean {
     return this.send('SYSTEM', 'ZEN_MODE_STATE', {
-      toggle: true,
+      toggle: target === undefined,
+      ...(target !== undefined ? { zen_mode: target, enabled: target } : {}),
+    });
+  }
+
+  public sendZenTimerUpdate(action: 'start' | 'pause' | 'reset' | 'preset' | 'soundscape' | 'tick', payload: any = {}): boolean {
+    return this.send('SYSTEM', 'ZEN_TIMER_UPDATE', {
+      action,
+      ...payload,
     });
   }
 
@@ -281,3 +289,4 @@ class GatewayClient {
 }
 
 export const gatewayService = new GatewayClient();
+export const gateway = gatewayService;

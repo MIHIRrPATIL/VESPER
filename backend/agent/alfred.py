@@ -39,6 +39,7 @@ class AlfredResponse(BaseModel):
     specialist_actions: List[Dict[str, Any]] = Field(default_factory=list)
     latency_ms: float = 0.0
     navigate_to: Optional[str] = None
+    resolved_advisory_ids: List[str] = Field(default_factory=list)
 
 
 ALFRED_SYNTHESIS_PROMPT = """You are Alfred, an intelligent, poised, and impeccably articulate British personal assistant inspired by J.A.R.V.I.S.
@@ -564,23 +565,23 @@ class AlfredSupervisor:
 
         if plan.plan_type == "direct" and exec_result.direct_response:
             raw_response = exec_result.direct_response
-            eval_res = OutputEvaluator.evaluate(raw_response)
+            eval_res = OutputEvaluator.evaluate(raw_response, query=cleaned_query)
         elif direct_research_answer:
             # Guaranteed instant (<1ms) answer synthesis when research specialist provides exact fact
             raw_response = direct_research_answer
-            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results)
+            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results, query=cleaned_query)
         elif is_pure_finance:
             # Guaranteed 100% numerical accuracy bypass: specialist speech_summary formatted without LLM rounding
             raw_response = " ".join([r.speech_summary for r in exec_result.specialist_results if r.speech_summary])
-            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results)
+            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results, query=cleaned_query)
         elif is_pure_system_status:
             # Guaranteed instantaneous (<5ms) system and cluster report: precise butler summaries without LLM delay
             raw_response = " ".join([r.speech_summary for r in exec_result.specialist_results if r.speech_summary])
-            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results)
+            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results, query=cleaned_query)
         elif can_bypass_synthesis:
             # Single-action synthesis bypass: saves ~1,800 tokens and 600ms latency
             raw_response = exec_result.specialist_results[0].speech_summary
-            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results)
+            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results, query=cleaned_query)
         else:
             # Build outcomes summary for Alfred synthesis
             outcome_lines = []
@@ -662,7 +663,7 @@ class AlfredSupervisor:
             if not raw_response:
                 summaries = [r.speech_summary for r in exec_result.specialist_results if r.speech_summary]
                 raw_response = " ".join(summaries) if summaries else "I have completed the task, sir."
-            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results)
+            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results, query=cleaned_query)
 
         if has_sandbox_data:
             sandbox_notice = "[Sandbox Notice] I am currently referencing offline sandbox data as live account credentials are not yet connected, sir. "
@@ -858,4 +859,5 @@ class AlfredSupervisor:
             specialist_actions=action_records,
             latency_ms=total_elapsed_ms,
             navigate_to=navigate_to,
+            resolved_advisory_ids=plan.resolved_advisory_ids,
         )

@@ -138,10 +138,49 @@ class OutputEvaluator:
         return cleaned
 
     @classmethod
+    def condense_briefing_speech(cls, text: str, max_words: int = 45) -> str:
+        """Extracts a concise executive spoken summary for TTS when detailed pointers are moved to HUD."""
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        intro_parts: List[str] = []
+        outro_parts: List[str] = []
+        found_bullet = False
+
+        for line in lines:
+            is_bullet = bool(re.match(r"^(?:[-*•]|\d+\.)\s+", line))
+            if is_bullet:
+                found_bullet = True
+                continue
+            clean_l = line.rstrip(":").strip()
+            # Skip pure section heading labels that are 1-2 words
+            if len(clean_l.split()) <= 2 and not any(w in clean_l.lower() for w in ("here", "good", "sir", "please", "overall", "finally")):
+                continue
+            if not found_bullet:
+                intro_parts.append(clean_l)
+            else:
+                outro_parts.append(clean_l)
+
+        if intro_parts:
+            intro_clean = cls.sanitize_speech_text(" ".join(intro_parts))
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", intro_clean) if s.strip()]
+            spoken_intro = " ".join(sentences[:2]) if len(sentences) >= 2 else (sentences[0] if sentences else intro_clean)
+            strip_punc = spoken_intro.rstrip(".,;:")
+            return f"{strip_punc}. I have displayed the detailed breakdown on your HUD, sir."
+
+        if outro_parts:
+            outro_clean = cls.sanitize_speech_text(" ".join(outro_parts))
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", outro_clean) if s.strip()]
+            spoken_outro = sentences[0] if sentences else outro_clean
+            strip_punc = spoken_outro.rstrip(".,;:")
+            return f"{strip_punc}. I have displayed the detailed breakdown on your HUD, sir."
+
+        return "I have compiled the briefing for you, sir. The details are displayed on your HUD."
+
+    @classmethod
     def evaluate(
         cls,
         raw_text: Optional[str],
         specialist_results: Optional[List[SpecialistResult]] = None,
+        query: Optional[str] = None,
     ) -> EvaluatorResult:
         """Evaluates raw output and specialist returns into speech and HUD presentation."""
         raw_text_str = (raw_text or "").strip()
@@ -166,11 +205,45 @@ class OutputEvaluator:
                     "data": res.data,
                 })
 
-        # Sanitize speech text for TTS
-        speech_text = cls.sanitize_speech_text(raw_text_str)
-
         # Sanitize markdown body to remove internal chain-of-thought leaks
         markdown_body = cls.strip_chain_of_thought(raw_text_str)
+
+        # Detect structured pointer-based / analytical briefing content
+        bullet_count = len(re.findall(r"(?:^|\n)\s*(?:[-*•]|\d+\.)\s+", markdown_body))
+        has_headers = bool(re.search(r"(?:^|\n)#{1,4}\s+\w+", markdown_body))
+        has_named_sections = bool(re.search(r"(?:^|\n)[A-Z][A-Za-z0-9\s/&-]{2,25}:\s*(?:\n|$)", markdown_body))
+        is_pointer_briefing = (bullet_count >= 2) or (has_headers and bullet_count >= 1) or (has_named_sections and bullet_count >= 1)
+
+        # Auto-generate Briefing HUD card if no specialist card was emitted
+        if not hud_cards and is_pointer_briefing:
+            card_title = "Analytical Briefing"
+            if query:
+                q_clean = query.strip().rstrip("?").strip()
+                if any(w in q_clean.lower() for w in ("compare", "vs", "versus", "better", "difference", "which")):
+                    card_title = f"Comparative Briefing // {q_clean.title()[:35]}"
+                else:
+                    card_title = f"Briefing // {q_clean.title()[:35]}"
+            elif any(w in markdown_body.lower() for w in ("compare", "versus", "difference", "better")):
+                card_title = "Comparative Analysis"
+
+            hud_cards.append({
+                "type": "briefing",
+                "title": card_title,
+                "data": {
+                    "title": card_title,
+                    "query": query or "",
+                    "text": markdown_body,
+                    "summary": markdown_body,
+                    "briefing": markdown_body,
+                    "markdown": markdown_body,
+                },
+            })
+
+            # Condense spoken speech for TTS so Alfred doesn't speak out lists of raw bullets
+            speech_text = cls.condense_briefing_speech(raw_text_str)
+        else:
+            # Sanitize speech text for TTS
+            speech_text = cls.sanitize_speech_text(raw_text_str)
 
         # Fallback if speech text was completely stripped
         if not speech_text:

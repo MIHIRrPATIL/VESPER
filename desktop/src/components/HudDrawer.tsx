@@ -1725,26 +1725,39 @@ const BriefingCard: React.FC<{ data: Record<string, any> }> = ({ data }) => {
   const emails = Array.isArray(data.emails) ? data.emails : [];
   const todayTasksCount = data.today_tasks_count ?? 0;
   const overdueCount = data.overdue_tasks_count ?? overdueTasks.length;
+  const textContent = data.text || data.summary || data.markdown || data.briefing || data.answer;
+  const hasMetrics = overdueTasks.length > 0 || events.length > 0 || emails.length > 0 || todayTasksCount > 0 || overdueCount > 0;
 
   return (
     <div className="mt-4 pt-4 border-t border-white/[0.08] flex flex-col gap-4 text-left">
       {/* Metrics Row */}
-      <div className="grid grid-cols-3 gap-2">
-        <div className="flex flex-col p-2.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
-          <span className="font-sans text-[10px] text-[#8E8A83] uppercase tracking-wider">Today's Agenda</span>
-          <span className="font-mono text-xl font-semibold text-[#E8E3DA] mt-0.5">{todayTasksCount} Tasks</span>
+      {hasMetrics && (
+        <div className="grid grid-cols-3 gap-2">
+          <div className="flex flex-col p-2.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+            <span className="font-sans text-[10px] text-[#8E8A83] uppercase tracking-wider">Today's Agenda</span>
+            <span className="font-mono text-xl font-semibold text-[#E8E3DA] mt-0.5">{todayTasksCount} Tasks</span>
+          </div>
+          <div className="flex flex-col p-2.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+            <span className="font-sans text-[10px] text-[#8E8A83] uppercase tracking-wider">Overdue Matters</span>
+            <span className={cn("font-mono text-xl font-semibold mt-0.5", overdueCount > 0 ? "text-[#E8E3DA]" : "text-[#8E8A83]")}>
+              {overdueCount} Items
+            </span>
+          </div>
+          <div className="flex flex-col p-2.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+            <span className="font-sans text-[10px] text-[#8E8A83] uppercase tracking-wider">Calendar & Mail</span>
+            <span className="font-mono text-xl font-semibold text-[#E8E3DA] mt-0.5">{events.length + emails.length} Sync</span>
+          </div>
         </div>
-        <div className="flex flex-col p-2.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
-          <span className="font-sans text-[10px] text-[#8E8A83] uppercase tracking-wider">Overdue Matters</span>
-          <span className={cn("font-mono text-xl font-semibold mt-0.5", overdueCount > 0 ? "text-[#E8E3DA]" : "text-[#8E8A83]")}>
-            {overdueCount} Items
-          </span>
+      )}
+
+      {/* Briefing Text / Markdown Body */}
+      {textContent && (
+        <div className="p-3.5 rounded-xl bg-white/[0.02] border border-white/[0.06] text-left">
+          <p className="font-sans text-sm md:text-base text-[#D1CFC0] leading-relaxed whitespace-pre-wrap select-text">
+            <AnimatedCardText text={String(textContent)} />
+          </p>
         </div>
-        <div className="flex flex-col p-2.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
-          <span className="font-sans text-[10px] text-[#8E8A83] uppercase tracking-wider">Calendar & Mail</span>
-          <span className="font-mono text-xl font-semibold text-[#E8E3DA] mt-0.5">{events.length + emails.length} Sync</span>
-        </div>
-      </div>
+      )}
 
       {/* Overdue Matters Section */}
       {overdueTasks.length > 0 && (

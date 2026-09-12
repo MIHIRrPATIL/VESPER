@@ -23,6 +23,7 @@ import { zenStore } from './services/zen-store';
 import { AgentStatusPill } from './components/AgentStatusPill';
 import { ProactiveAdvisoryDrawer } from './components/ProactiveAdvisoryDrawer';
 import { ToolEmitterView } from './components/ToolEmitterView';
+import { mediaService } from './services/media-service';
 // ── Deterministic Page Resolution Helper ─────────────────────────────────────
 
 export function resolveDeterministicView(
@@ -164,6 +165,7 @@ export function App() {
     return 'What can I help you shape today?';
   });
   const [isHudDrawerOpen, setIsHudDrawerOpen] = useState<boolean>(false);
+  const wasAutoOpenedByAgentRef = useRef<boolean>(false);
   const [hudDrawerTitle, setHudDrawerTitle] = useState<string>('HUD INTELLIGENCE DECK');
   const [hudDrawerSubtitle, setHudDrawerSubtitle] = useState<string>('Cognitive specialist output & structured execution parameters');
 
@@ -388,6 +390,7 @@ export function App() {
 
         // If this response has HUD cards, open the drawer
         if (payload.hud_cards && payload.hud_cards.length > 0) {
+          wasAutoOpenedByAgentRef.current = true;
           setIsHudDrawerOpen(true);
         }
       } else if (type === 'AGENT_SPEAKING') {
@@ -395,11 +398,20 @@ export function App() {
         // Do not override active view so page remains open during TTS speech
       } else if (type === 'AGENT_IDLE') {
         setAgentState('IDLE');
+        if (wasAutoOpenedByAgentRef.current) {
+          setIsHudDrawerOpen(false);
+          wasAutoOpenedByAgentRef.current = false;
+        }
+      } else if (type === 'PROACTIVE_RESOLVE') {
+        const actionIds: string[] = payload?.action_ids || (payload?.action_id ? [payload.action_id] : []);
+        for (const aid of actionIds) {
+          notificationStore.dismissAlert(aid);
+        }
       } else if (type === 'ZEN_MODE_STATE') {
-        const isZen = payload.zen_mode ?? payload.enabled ?? payload.toggle;
+        const isZen = payload.zen_mode ?? payload.enabled;
         if (typeof isZen === 'boolean') {
           setZenMode(isZen);
-          zenStore.onZenModeStateChange(isZen);
+          zenStore.onZenModeStateChange(isZen, payload.timer);
           if (isZen) {
             handleSelectNavView('zen');
           } else if (activeViewRef.current === 'zen') {
@@ -420,6 +432,11 @@ export function App() {
           ]);
         }
       } else if (type === 'MEDIA_CONTROL') {
+        if (payload.track) {
+          mediaService.updateFromTrack(payload.track);
+        } else {
+          mediaService.fetchNowPlaying();
+        }
         setMessages((prev) => [
           ...prev,
           {
@@ -433,6 +450,8 @@ export function App() {
             channel: 'CONTROL',
           },
         ]);
+      } else if (type === 'ZEN_TIMER_UPDATE') {
+        zenStore.applyInboundTimerUpdate(payload.action, payload.timer || payload);
       } else if (type === 'SET_VOLUME') {
         setMessages((prev) => [
           ...prev,
@@ -479,8 +498,25 @@ export function App() {
       } else if (type === 'INTERRUPT_ACK') {
         setAgentState('IDLE');
       } else if (type === 'WAKE_WORD_STATE') {
-        if (typeof payload.wakeword_active === 'boolean') {
-          setIsWakeWordArmed(payload.wakeword_active);
+        const active = typeof payload.wakeword_active === 'boolean'
+          ? payload.wakeword_active
+          : typeof payload.active === 'boolean'
+          ? payload.active
+          : typeof payload.enabled === 'boolean'
+          ? payload.enabled
+          : typeof payload.is_armed === 'boolean'
+          ? payload.is_armed
+          : undefined;
+        if (typeof active === 'boolean') {
+          setIsWakeWordArmed(active);
+        }
+      } else if (type === 'STATE_SNAPSHOT' || type === 'STATE_SYNC') {
+        const state = payload.state || payload;
+        if (typeof state?.wakeword_active === 'boolean') {
+          setIsWakeWordArmed(state.wakeword_active);
+        }
+        if (typeof state?.zen_mode === 'boolean') {
+          setZenMode(state.zen_mode);
         }
       }
       // Note: NOTIFICATION_RELAY, NOTIFICATION_DIGEST, CALL_STATE, and
@@ -507,21 +543,25 @@ export function App() {
     };
   }, [handleEnvelope]);
 
-  const handleToggleWakeWord = () => {
-    const next = !isWakeWordArmed;
+  const handleToggleWakeWord = (target?: boolean) => {
+    const next = typeof target === 'boolean' ? target : !isWakeWordArmed;
     setIsWakeWordArmed(next);
     gatewayService.sendWakeWordToggle(next);
   };
 
   const handleSimulateWakeWord = () => {
+    if (!isWakeWordArmed) {
+      console.warn('[VOICE] Cannot trigger wake word while wake word acoustic detector is muted/disarmed.');
+      return;
+    }
     gatewayService.sendWakeWord('hey alfred', 0.98);
     setAgentState('LISTENING');
   };
 
-  const handleToggleZenMode = () => {
+  const handleToggleZenMode = (target?: boolean) => {
     setZenMode((prev) => {
-      const next = !prev;
-      gatewayService.sendZenModeToggle();
+      const next = target !== undefined ? target : !prev;
+      gatewayService.sendZenModeToggle(next);
       zenStore.onZenModeStateChange(next);
       if (next) {
         handleSelectNavView('zen');
@@ -630,18 +670,29 @@ export function App() {
           },
         ]);
 
-        setTimeout(() => {
-          setAgentState('IDLE');
-        }, 3200);
+        // HUD close is now driven by the backend AGENT_IDLE event (TTS duration + 5s linger)
       }, 700);
     }
   };
 
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
 
+  const handleInterrupt = () => {
+    setAgentState('IDLE');
+    if (wasAutoOpenedByAgentRef.current) {
+      setIsHudDrawerOpen(false);
+      wasAutoOpenedByAgentRef.current = false;
+    }
+    gatewayService.sendInterrupt('USER_BARGE_IN');
+  };
+
   const handleToggleVoice = () => {
     if (agentState === 'LISTENING') {
       setAgentState('IDLE');
+      if (wasAutoOpenedByAgentRef.current) {
+        setIsHudDrawerOpen(false);
+        wasAutoOpenedByAgentRef.current = false;
+      }
       gatewayService.sendInterrupt();
     } else {
       handleSimulateWakeWord();
@@ -698,6 +749,8 @@ export function App() {
             onToggleWakeWord={handleToggleWakeWord}
             isCameraActive={isCameraActive}
             onToggleCamera={handleToggleCamera}
+            isProcessing={agentState === 'LISTENING' || agentState === 'THINKING' || agentState === 'SPEAKING'}
+            onInterrupt={handleInterrupt}
           />
         </div>
 

@@ -68,13 +68,28 @@ class SyncManager:
             await self._notify_listeners({"device_registered": reg.device_id})
             return self.state
 
-    async def record_heartbeat(self, device_id: str) -> bool:
-        """Updates the heartbeat timestamp for a connected device."""
+    async def record_heartbeat(
+        self,
+        device_id: str,
+        battery_level: Optional[int] = None,
+        is_charging: Optional[bool] = None,
+        ip_address: Optional[str] = None,
+        device_name: Optional[str] = None,
+    ) -> bool:
+        """Updates the heartbeat timestamp and telemetry for a connected device."""
         async with self._lock:
             if device_id in self.state.active_devices:
                 dev = self.state.active_devices[device_id]
                 dev.last_heartbeat = time.time()
                 dev.is_online = True
+                if battery_level is not None:
+                    dev.battery_level = battery_level
+                if is_charging is not None:
+                    dev.is_charging = is_charging
+                if ip_address is not None:
+                    dev.ip_address = ip_address
+                if device_name:
+                    dev.device_name = device_name
                 return True
             return False
 
@@ -97,6 +112,10 @@ class SyncManager:
                 if self.state.zen_mode != diff["zen_mode"]:
                     self.state.zen_mode = diff["zen_mode"]
                     modified = True
+
+            if "zen_timer" in diff and isinstance(diff["zen_timer"], dict):
+                self.state.zen_timer.update(diff["zen_timer"])
+                modified = True
 
             if "focus_mode" in diff and isinstance(diff["focus_mode"], bool):
                 if self.state.focus_mode != diff["focus_mode"]:

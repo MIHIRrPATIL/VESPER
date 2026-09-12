@@ -86,6 +86,14 @@ AGENT_URL = AGENT_SERVICE_URL
 VOICE_URL = VOICE_SERVICE_URL
 OUTPUT_DIR = PROJECT_ROOT / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = OUTPUT_DIR / "vesper_services.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+    ],
+)
 
 
 def play_audio_file(audio_path: Path, delete_after: bool = True) -> None:
@@ -927,7 +935,7 @@ class TerminalDesktopHUD:
                     asyncio.create_task(
                         self.send_envelope(Channel.GESTURE, EventType.GESTURE_EVENT, {"gesture": "PEACE_SIGN"})
                     )
-            elif gesture in ("TOGGLE_WAKEWORD", "WAKEWORD_TOGGLE"):
+            elif gesture in ("POINTING_UP", "TOGGLE_WAKEWORD", "WAKEWORD_TOGGLE"):
                 self._wakeword_manually_muted = not self._wakeword_manually_muted
                 if self._wakeword_manually_muted:
                     if self._wakeword_listener:
@@ -937,6 +945,14 @@ class TerminalDesktopHUD:
                     if self._wakeword_listener and self.is_running:
                         self._wakeword_listener.resume()
                     console.print(f"\n[bold green][WAKE WORD] Listener ARMED (Gesture: {gesture})[/bold green]")
+                if self.websocket:
+                    asyncio.create_task(
+                        self.send_envelope(
+                            Channel.VOICE,
+                            EventType.WAKE_WORD_TOGGLE,
+                            {"wakeword_active": not self._wakeword_manually_muted, "source": f"GESTURE:{gesture}"},
+                        )
+                    )
 
             elif gesture in ("ROCK_ON", "GESTURE_LOCK", "TOGGLE_GESTURES") or gesture.startswith("GESTURE_TOGGLE"):
                 if self._gesture_worker:
@@ -969,13 +985,35 @@ class TerminalDesktopHUD:
             sys.stdout.flush()
 
         elif envelope.type == EventType.WAKE_WORD_DETECTED:
-            # Only print if originated from another cluster client (avoid echo from self)
+            # Only print and trigger if originated from another cluster client (avoid echo from self)
             if p.get("source") != self.client_id:
                 ww = p.get("wake_word", "hey alfred")
                 conf = float(p.get("confidence", 1.0))
-                console.print(f"\n[bold green][WAKE DETECTED] Wake word detected on cluster: '{ww}' (conf={conf:.2f}). Alfred is listening...[/bold green]")
+                console.print(f"\n[bold green][WAKE DETECTED] Wake word received from cluster node '{p.get('source')}': '{ww}'. Alfred is listening...[/bold green]")
                 sys.stdout.write("vesper> ")
                 sys.stdout.flush()
+
+                # Trigger local host microphone capture if listener is running
+                if self._wakeword_listener:
+                    if self._voice_duck_state is None and self._call_duck_state is None:
+                        async def _duck_on_remote_wake():
+                            self._voice_duck_state = await asyncio.to_thread(_duck_background_audio, 20)
+                        asyncio.create_task(_duck_on_remote_wake())
+
+                    if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+                        self._voice_watchdog_task.cancel()
+
+                    async def _voice_timeout_watchdog():
+                        try:
+                            await asyncio.sleep(6.0)
+                            if self._voice_duck_state and self._call_duck_state is None:
+                                await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
+                                self._voice_duck_state = None
+                        except asyncio.CancelledError:
+                            pass
+
+                    self._voice_watchdog_task = asyncio.create_task(_voice_timeout_watchdog())
+                    self._wakeword_listener.trigger_listen()
 
         elif envelope.type == EventType.AGENT_SPEAKING:
             console.print(f"\n[dim green][SPEAKING] Alfred is speaking...[/dim green]")

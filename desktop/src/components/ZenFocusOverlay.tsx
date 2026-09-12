@@ -23,6 +23,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { zenStore, ZenTaskItem } from '../services/zen-store';
 import { ambientAudio, SoundscapeType } from '../services/ambient-audio';
 import { mediaService } from '../services/media-service';
+import { gateway } from '../services/gateway';
 import { NowPlayingTrack } from '../types/vesper';
 import { cn } from '../lib/utils';
 
@@ -456,7 +457,18 @@ export const ZenFocusView: React.FC<ZenFocusViewProps> = ({
                 <button
                   key={opt.id}
                   type="button"
-                  onClick={() => ambientAudio.setSoundscape(opt.id)}
+                  onClick={() => {
+                    ambientAudio.setSoundscape(opt.id);
+                    gateway.sendZenTimerUpdate('soundscape', {
+                      soundscape: opt.id,
+                      music_source: opt.id === 'spotify' ? 'spotify' : 'ambient',
+                      is_running: zenStore.isRunning,
+                      seconds_remaining: zenStore.secondsRemaining,
+                    });
+                    if (opt.id === 'spotify') {
+                      mediaService.fetchNowPlaying();
+                    }
+                  }}
                   className={cn(
                     "flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg border font-mono text-[11px] transition-all cursor-pointer",
                     isSelected
@@ -470,6 +482,29 @@ export const ZenFocusView: React.FC<ZenFocusViewProps> = ({
               );
             })}
           </div>
+
+          {/* Real Audio Soundscape Active Badge */}
+          {soundscape !== 'off' && soundscape !== 'spotify' && (
+            <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                <div className="w-7 h-7 rounded-md bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                  <Volume2 size={13} className="text-emerald-400" />
+                </div>
+                <div className="flex flex-col min-w-0 text-left">
+                  <span className="text-[#E8E3DA] font-mono text-[11px] truncate font-medium">
+                    {soundscape === 'ocean'
+                      ? 'Pacific Ocean Waves'
+                      : soundscape === 'rain'
+                      ? 'Gentle Rainstorm'
+                      : 'Crackling Hearth'}
+                  </span>
+                  <span className="text-emerald-400/80 font-mono text-[9px] truncate">
+                    High-Definition Stereo Field Recording
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Spotify Now-Playing Micro Controller */}
           {soundscape === 'spotify' && (

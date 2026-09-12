@@ -125,6 +125,49 @@ def is_display_on() -> bool:
     return True
 
 
+def _probe_drm_connectors() -> List[str]:
+    """Actively probes DRM sysfs connectors to wake DP AUX link and discover physical monitors."""
+    connected: List[str] = []
+    drm_path = Path("/sys/class/drm")
+    if drm_path.exists():
+        for status_file in drm_path.glob("card*-*/status"):
+            try:
+                # Reading sysfs status forces the kernel DRM driver to poll the physical connector / DP AUX bus
+                status = status_file.read_text().strip()
+                if status == "connected":
+                    conn_name = status_file.parent.name.split("-", 1)[1]
+                    connected.append(conn_name)
+            except Exception:
+                pass
+    return connected
+
+
+def _get_configured_monitor_names() -> List[str]:
+    """Reads ~/.config/hypr/monitors.conf to know which monitors the user explicitly configured."""
+    monitors: List[str] = []
+    conf_path = Path.home() / ".config" / "hypr" / "monitors.conf"
+    if conf_path.exists():
+        try:
+            for line in conf_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("monitor=") and "," in line:
+                    name = line.split("=")[1].split(",")[0].strip()
+                    if name and not name.startswith("fallback"):
+                        monitors.append(name)
+        except Exception:
+            pass
+    return monitors
+
+
+def _get_expected_monitor_names() -> List[str]:
+    """Returns all expected monitors combining physical DRM probes, hyprland config, and active monitors."""
+    probed = _probe_drm_connectors()
+    configured = _get_configured_monitor_names()
+    # Merge without duplicates preserving order
+    expected = list(dict.fromkeys(probed + configured))
+    return expected or ["eDP-1", "DP-3"]
+
+
 def _get_active_monitor_names() -> List[str]:
     """Queries Hyprland for active monitor names (e.g. eDP-1, DP-3)."""
     try:
@@ -143,19 +186,27 @@ def _get_active_monitor_names() -> List[str]:
                     return names
     except Exception:
         pass
-    return ["eDP-1", "DP-3"]
+    return _get_expected_monitor_names()
 
 
-def _wait_for_monitors_ready(timeout_sec: float = 6.0) -> bool:
-    """Waits for all connected/enabled monitors to complete DPMS wake and DRM modesetting."""
+def _wait_for_monitors_ready(timeout_sec: float = 8.0) -> bool:
+    """Waits for all expected monitors (e.g. DP-3 and eDP-1) to complete DPMS wake and DRM modesetting."""
     if not shutil.which("hyprctl"):
         return True
 
+    expected = set(_get_expected_monitor_names())
+    logger.info(f"[DisplaySentry] Waiting for monitors to complete link training: {list(expected)}")
+
     start_time = time.time()
+    reloaded_once = False
+
     while time.time() - start_time < timeout_sec:
+        # Re-probe physical DRM status to wake DP AUX
+        _probe_drm_connectors()
+
         try:
             res = subprocess.run(
-                ["hyprctl", "monitors", "all", "-j"],
+                ["hyprctl", "monitors", "-j"],
                 capture_output=True,
                 text=True,
                 timeout=2,
@@ -165,23 +216,39 @@ def _wait_for_monitors_ready(timeout_sec: float = 6.0) -> bool:
                 try:
                     monitors = json.loads(res.stdout)
                 except Exception:
-                    return True
+                    monitors = []
 
-                if isinstance(monitors, list):
-                    active = [m for m in monitors if not m.get("disabled", False)]
-                    if active and all(m.get("dpmsStatus", False) for m in active):
-                        # All active monitors have completed link training and reported DPMS active.
-                        # Allow 0.6s settling delay for DRM modesetting before Caelestia layers bind.
+                if isinstance(monitors, list) and monitors:
+                    awake_names = {
+                        m.get("name")
+                        for m in monitors
+                        if m.get("name") and m.get("dpmsStatus", False) and not m.get("disabled", False)
+                    }
+
+                    # If all expected monitors are awake, or if no expected monitor set exists and all active are awake
+                    if expected and expected.issubset(awake_names):
+                        logger.info(f"[DisplaySentry] All expected monitors confirmed awake: {list(awake_names)}")
+                        time.sleep(0.6)  # Settling delay for DRM modesetting before Caelestia layers bind
+                        return True
+                    elif not expected and awake_names:
                         time.sleep(0.6)
                         return True
-            else:
-                return True
+
+            # If an external monitor hasn't reconnected after 1.5s, trigger hyprctl reload & targeted DPMS
+            if not reloaded_once and (time.time() - start_time) > 1.5:
+                reloaded_once = True
+                logger.info("[DisplaySentry] Triggering Hyprland reload and targeted DPMS to re-attach external monitors...")
+                subprocess.run(["hyprctl", "reload"], check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["hyprctl", "dispatch", "dpms", "on"], check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for mon in expected:
+                    subprocess.run(["hyprctl", "dispatch", "dpms", "on", mon], check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
         except Exception as e:
             logger.debug(f"[DisplaySentry] Monitor readiness probe glitch: {e}")
-            return True
-        time.sleep(0.2)
 
-    time.sleep(0.5)
+        time.sleep(0.3)
+
+    logger.warning("[DisplaySentry] Timeout waiting for all monitors to wake; proceeding with best-effort recovery.")
     return False
 
 
@@ -412,13 +479,23 @@ def turn_display_on(recover_caelestia: bool = True) -> bool:
             return True
 
         if shutil.which("hyprctl"):
+            # 1. Probe physical DRM connectors to wake DisplayPort AUX bus
+            _probe_drm_connectors()
+
+            # 2. Dispatch global DPMS on
             subprocess.run(["hyprctl", "dispatch", "dpms", "on"], check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            logger.info("[DisplaySentry] Display powered ON (DPMS wake)")
+
+            # 3. Explicitly wake all expected monitors by name (eDP-1, DP-3, etc.)
+            expected = _get_expected_monitor_names()
+            for m_name in expected:
+                subprocess.run(["hyprctl", "dispatch", "dpms", "on", m_name], check=False, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            logger.info(f"[DisplaySentry] Display powered ON (DPMS wake dispatched for {expected})")
 
             if recover_caelestia:
                 # Wait for all monitors (e.g. DP-3 and eDP-1) to complete link training and modesetting
-                _wait_for_monitors_ready(timeout_sec=6.0)
-                # Force restart Caelestia shell on display wake so layer surfaces re-bind cleanly
+                _wait_for_monitors_ready(timeout_sec=8.0)
+                # Force restart Caelestia shell on display wake so layer surfaces re-bind cleanly across all screens
                 ensure_caelestia_running(force_restart=True)
 
             return True

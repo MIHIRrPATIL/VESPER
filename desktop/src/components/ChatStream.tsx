@@ -143,7 +143,9 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
     }
   };
 
-  const uniqueDevices = Array.from(new Map(devices.map((d) => [d.device_id, d])).values());
+  const uniqueDevices = Array.from(new Map(devices.map((d) => [d.device_id, d])).values()).filter(
+    (d) => d.is_online && d.device_id !== 'mobile_companion_provisioned'
+  );
 
   const operationalServices = [
     {
@@ -413,15 +415,11 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
           >
             <div className="flex flex-col gap-2.5 w-full max-h-[230px] overflow-y-auto pr-1 scrollbar-thin">
               {uniqueDevices.map((device) => {
-                const isProvisionedPhone =
-                  device.device_id.includes('provisioned') ||
-                  device.ip_address === 'Provisioned' ||
-                  device.network_type?.includes('Provisioned');
                 const isMobile =
-                  isProvisionedPhone ||
                   device.device_type === 'mobile' ||
-                  device.device_type.includes('mobile') ||
-                  device.device_type.includes('android');
+                  device.device_type?.includes('mobile') ||
+                  device.device_type?.includes('android') ||
+                  device.device_type?.includes('phone');
                 const isCamera = device.device_type === 'camera';
                 const isDesktop = device.device_type === 'desktop';
                 const IconComp = isMobile ? Smartphone : isCamera ? Eye : Monitor;
@@ -444,36 +442,23 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
 
                       {/* Status / Battery badge */}
                       <div className="flex items-center gap-1.5 font-mono text-[10px] text-[#D1CFC0] shrink-0">
-                        {isProvisionedPhone ? (
-                          <>
-                            <span className="px-2 py-0.5 rounded text-[9px] bg-white/[0.08] text-[#E8E3DA] border border-white/20 font-mono font-semibold tracking-wider">
-                              PROVISIONED
-                            </span>
-                            <span className="text-[#A1A1AA]">
-                              {device.battery_level !== undefined && device.battery_level !== null ? `${device.battery_level}%` : '100%'}
-                            </span>
-                          </>
-                        ) : (
-                          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white/[0.05] border border-white/[0.08]">
-                            <span className={cn("w-1.5 h-1.5 rounded-full", device.is_online ? "bg-[#E8E3DA] animate-pulse" : "bg-white/30")} />
-                            <span className="font-mono text-[10px] text-[#E8E3DA] font-medium">
-                              {device.battery_level !== undefined && device.battery_level !== null
-                                ? `${device.battery_level}% bat${device.is_charging ? ' • chg' : ''}`
-                                : device.cpu_usage_pct !== undefined
-                                ? `${device.cpu_usage_pct}% cpu`
-                                : device.is_online ? 'ONLINE' : 'OFFLINE'}
-                            </span>
-                          </div>
-                        )}
+                        <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white/[0.05] border border-white/[0.08]">
+                          <span className={cn("w-1.5 h-1.5 rounded-full", device.is_online ? "bg-[#E8E3DA] animate-pulse" : "bg-white/30")} />
+                          <span className="font-mono text-[10px] text-[#E8E3DA] font-medium">
+                            {device.battery_level !== undefined && device.battery_level !== null
+                              ? `${device.battery_level}% bat${device.is_charging ? ' • chg' : ''}`
+                              : device.cpu_usage_pct !== undefined
+                              ? `${device.cpu_usage_pct}% cpu`
+                              : device.is_online ? 'ONLINE' : 'OFFLINE'}
+                          </span>
+                        </div>
                       </div>
                     </div>
 
                     {/* Bottom Row: IP/Network + Platform Role */}
                     <div className="flex items-center justify-between gap-2 font-mono text-[11px] text-[#A1A1AA] pl-8.5">
                       <span className="truncate">
-                        {isProvisionedPhone
-                          ? 'Standby Mesh • App in Dev'
-                          : device.ip_address || device.hostname || (isDesktop ? '192.168.0.x (Local Host)' : 'Node Relay')}
+                        {device.ip_address || device.hostname || (isDesktop ? '192.168.0.x (Local Host)' : 'Node Relay')}
                       </span>
                       <span className="text-[10px] text-[#8E8A83] shrink-0 uppercase tracking-widest font-mono">
                         {isDesktop ? 'HOST' : isMobile ? 'PHONE' : 'EDGE'}

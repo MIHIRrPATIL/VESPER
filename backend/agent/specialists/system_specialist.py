@@ -135,11 +135,33 @@ class SystemSpecialist(BaseSpecialist):
     # ── Hardware Telemetry (<5ms) ─────────────────────────────────────────────
 
     def _collect_vitals(self) -> Dict[str, Any]:
-        """Collects CPU, RAM, Disk, and Battery telemetry synchronously."""
+        """Collects CPU, RAM, Disk, Battery, and Hardware telemetry synchronously."""
         cpu_pct = psutil.cpu_percent(interval=0.1)
         vmem = psutil.virtual_memory()
         disk = psutil.disk_usage("/")
         battery = psutil.sensors_battery()
+
+        # Hardware models (CPU & GPU)
+        cpu_model = ""
+        try:
+            with open("/proc/cpuinfo", "r") as f:
+                for line in f:
+                    if "model name" in line:
+                        cpu_model = line.split(":", 1)[1].strip()
+                        break
+        except Exception:
+            cpu_model = "Intel/AMD Multi-core Processor"
+
+        gpu_model = ""
+        try:
+            lspci_out = subprocess.check_output(["lspci"], text=True, timeout=1.0)
+            for line in lspci_out.splitlines():
+                if "vga compatible controller" in line.lower() or "3d controller" in line.lower():
+                    parts = line.split(":", 2)
+                    gpu_model = parts[-1].strip() if len(parts) >= 3 else line.strip()
+                    break
+        except Exception:
+            gpu_model = "Integrated Graphics"
 
         # Thermals
         temps = {}
@@ -153,6 +175,11 @@ class SystemSpecialist(BaseSpecialist):
 
         return {
             "cpu_percent": cpu_pct,
+            "hardware": {
+                "cpu_model": cpu_model,
+                "cpu_cores": psutil.cpu_count(logical=True),
+                "gpu_model": gpu_model,
+            },
             "ram": {
                 "used_gb": round(vmem.used / (1024**3), 2),
                 "total_gb": round(vmem.total / (1024**3), 2),
@@ -178,10 +205,13 @@ class SystemSpecialist(BaseSpecialist):
         ram_pct = vitals["ram"]["percent"]
         ram_used = vitals["ram"]["used_gb"]
         ram_total = vitals["ram"]["total_gb"]
+        hw = vitals.get("hardware", {})
+        cpu_name = hw.get("cpu_model") or "CPU"
+        gpu_name = hw.get("gpu_model") or "GPU"
 
         speech = (
-            f"Core vitals are optimal, sir. CPU utilization is currently at {cpu}%, "
-            f"and memory consumption stands at {ram_used:.1f} of {ram_total:.1f} gigabytes ({ram_pct}%)."
+            f"Your laptop is powered by a {cpu_name} with {ram_total:.0f} gigabytes of RAM "
+            f"and {gpu_name}. Current CPU load is {cpu}%, with {ram_used:.1f} GB memory in use."
         )
 
         return SpecialistResult(
@@ -191,6 +221,8 @@ class SystemSpecialist(BaseSpecialist):
             speech_summary=speech,
             card_payload={
                 "type": "system_vitals_card",
+                "cpu_model": cpu_name,
+                "gpu_model": gpu_name,
                 "cpu_percent": cpu,
                 "ram_percent": ram_pct,
                 "ram_used_gb": ram_used,
@@ -354,6 +386,13 @@ class SystemSpecialist(BaseSpecialist):
 
     def _run_dpms_control(self, state: str) -> bool:
         """Dispatches display power management state (Hyprland / wlopm / xset) safely."""
+        if state == "on":
+            try:
+                from backend.vision.display_sentry import turn_display_on
+                return turn_display_on(recover_caelestia=True)
+            except Exception as e:
+                logger.warning(f"[System:dpms] turn_display_on error: {e}")
+
         hyprctl = shutil.which("hyprctl")
         if hyprctl:
             try:

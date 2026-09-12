@@ -33,12 +33,48 @@ type StateListener = (state: SynchronizedState) => void;
 type StatusListener = (status: ConnectionStatus) => void;
 type QueueListener = (count: number) => void;
 
+function resolveDeviceName(): string {
+  try {
+    const brand = (Device.manufacturer || Device.brand || "").trim();
+    const model = (Device.modelName || Device.productName || "").trim();
+    const customName = (Device.deviceName || "").trim();
+
+    const formattedBrand = brand
+      ? brand.charAt(0).toUpperCase() + brand.slice(1)
+      : "";
+
+    let hardwareModel = model;
+    if (!hardwareModel) {
+      hardwareModel = Platform.OS === "android" ? "Android Phone" : Platform.OS === "ios" ? "iPhone" : "Mobile Node";
+    }
+
+    let fullModel = hardwareModel;
+    if (formattedBrand && !fullModel.toLowerCase().includes(formattedBrand.toLowerCase())) {
+      fullModel = `${formattedBrand} ${fullModel}`;
+    }
+
+    if (
+      customName &&
+      customName !== fullModel &&
+      customName !== hardwareModel &&
+      customName.toLowerCase() !== "android" &&
+      customName.toLowerCase() !== "localhost"
+    ) {
+      return `${customName} (${fullModel})`;
+    }
+
+    return fullModel;
+  } catch {
+    return Platform.OS === "android" ? "VESPER Android" : "VESPER iOS";
+  }
+}
+
 class GatewayClient {
   private ws: WebSocket | null = null;
   private gatewayUrl: string = Platform.OS === "web" ? "ws://127.0.0.1:8000/ws" : "ws://192.168.0.202:8000/ws";
   private status: ConnectionStatus = "disconnected";
   private clientId: string = `mobile_${Platform.OS}_${Math.random().toString(36).substring(2, 9)}`;
-  private deviceName: string = "Mobile Companion";
+  private deviceName: string = resolveDeviceName();
 
   private reconnectAttempts = 0;
   private reconnectTimer: any = null;
@@ -135,9 +171,7 @@ class GatewayClient {
 
   private async initDeviceInfo() {
     try {
-      const model = Device.modelName || Device.productName || (Platform.OS === "android" ? "Android Device" : "iOS Device");
-      const name = Device.deviceName ? `${Device.deviceName} (${model})` : model;
-      this.deviceName = name;
+      this.deviceName = resolveDeviceName();
 
       const savedUrl = await AsyncStorage.getItem("vesper_gateway_url");
       let subnetMismatched = false;
@@ -209,6 +243,10 @@ class GatewayClient {
 
   public getDeviceName(): string {
     return this.deviceName;
+  }
+
+  public getClientId(): string {
+    return this.clientId;
   }
 
   public getState(): SynchronizedState | null {
@@ -299,22 +337,51 @@ class GatewayClient {
 
   private startHeartbeatSupervisor() {
     this.stopHeartbeatSupervisor();
-    this.heartbeatSupervisorTimer = setInterval(() => {
+    this.heartbeatSupervisorTimer = setInterval(async () => {
       if (this.status !== "connected" || !this.ws) return;
       const elapsed = Date.now() - this.lastMessageTimestamp;
       if (elapsed > 35000) {
         console.warn(`[GatewayClient] Socket stalled (no traffic for ${Math.round(elapsed / 1000)}s). Forcing reconnect...`);
         this.disconnect();
         this.connect();
-      } else if (elapsed > 15000) {
-        // Proactive client ping to verify keepalive
+      } else {
+        // Send periodic telemetry heartbeat over Channel.SYNC
+        let batteryLevel: number | null = null;
+        let isCharging: boolean | null = null;
+        try {
+          const level = await Battery.getBatteryLevelAsync();
+          batteryLevel = level >= 0 ? Math.round(level * 100) : null;
+          const state = await Battery.getBatteryStateAsync();
+          isCharging = state === Battery.BatteryState.CHARGING || state === Battery.BatteryState.FULL;
+        } catch {}
+
+        let localIp: string | null = null;
+        try {
+          localIp = await Network.getIpAddressAsync();
+        } catch {}
+
         this.send({
-          channel: Channel.CONTROL,
-          type: EventType.PING,
-          payload: { client_id: this.clientId },
+          channel: Channel.SYNC,
+          type: EventType.DEVICE_HEARTBEAT,
+          payload: {
+            device_id: this.clientId,
+            device_name: this.deviceName,
+            battery_level: batteryLevel,
+            is_charging: isCharging,
+            ip_address: localIp,
+          },
         });
+
+        if (elapsed > 15000) {
+          // Proactive client ping to verify keepalive
+          this.send({
+            channel: Channel.CONTROL,
+            type: EventType.PING,
+            payload: { client_id: this.clientId },
+          });
+        }
       }
-    }, 12000);
+    }, 15000);
   }
 
   private stopHeartbeatSupervisor() {
@@ -362,6 +429,11 @@ class GatewayClient {
       isCharging = false;
     }
 
+    let localIp: string | null = null;
+    try {
+      localIp = await Network.getIpAddressAsync();
+    } catch {}
+
     // 3. Send DEVICE_REGISTER
     const regEnvelope: ClientEnvelope = {
       channel: Channel.SYNC,
@@ -370,7 +442,7 @@ class GatewayClient {
         device_id: this.clientId,
         device_type: Platform.OS === "android" ? "mobile_android" : "mobile_ios",
         device_name: this.deviceName,
-        hostname: Device.deviceName || "mobile",
+        hostname: Device.deviceName || this.deviceName,
         os_name: Platform.OS === "android" ? "Android" : "iOS",
         architecture: Platform.OS,
         has_display: true,
@@ -378,6 +450,7 @@ class GatewayClient {
         has_microphone: true,
         battery_level: batteryLevel,
         is_charging: isCharging,
+        ip_address: localIp,
         network_type: "wifi",
       },
     };
@@ -558,6 +631,18 @@ class GatewayClient {
     return false;
   }
 
+  public sendVoiceCommand(command: string): boolean {
+    return this.send({
+      channel: Channel.VOICE,
+      type: EventType.VOICE_COMMAND,
+      payload: {
+        command: command.trim(),
+        confidence: 1.0,
+        is_final: true,
+      },
+    });
+  }
+
   private enqueueOfflineNotification(payload: MobileNotificationPayload) {
     const existingIdx = this.offlineQueue.findIndex(
       (item) => item.package_name === payload.package_name && item.title === payload.title
@@ -598,7 +683,115 @@ class GatewayClient {
       type: EventType.ZEN_MODE_STATE,
       payload: {
         toggle: target === undefined,
-        zen_mode: target !== undefined ? target : !this.currentState?.zen_mode,
+        ...(target !== undefined ? { zen_mode: target, enabled: target } : {}),
+      },
+    });
+  }
+
+  public sendZenModeToggle(target?: boolean): boolean {
+    return this.toggleZenMode(target);
+  }
+
+  public sendZenTimerAction(
+    action: 'start' | 'pause' | 'reset' | 'preset' | 'soundscape' | 'tick',
+    payload: any = {}
+  ): boolean {
+    return this.send({
+      channel: Channel.SYSTEM,
+      type: EventType.ZEN_TIMER_UPDATE,
+      payload: {
+        action,
+        ...payload,
+      },
+    });
+  }
+
+  public sendWakeWord(wakeWord = 'hey alfred', confidence = 0.95, trigger = 'push_to_talk'): boolean {
+    return this.send({
+      channel: Channel.VOICE,
+      type: EventType.WAKE_WORD_DETECTED,
+      payload: {
+        wake_word: wakeWord,
+        confidence,
+        source: this.clientId,
+        trigger,
+      },
+    });
+  }
+
+  public sendWakeWordToggle(active?: boolean): boolean {
+    return this.send({
+      channel: Channel.VOICE,
+      type: EventType.WAKE_WORD_TOGGLE,
+      payload: {
+        ...(active !== undefined ? { wakeword_active: active } : { toggle: true }),
+      },
+    });
+  }
+
+  public sendCameraToggle(active?: boolean): boolean {
+    return this.send({
+      channel: Channel.GESTURE,
+      type: EventType.GESTURE_EVENT,
+      payload: {
+        gesture: active !== undefined ? (active ? 'GESTURE_RESUME' : 'GESTURE_PAUSE') : 'GESTURE_TOGGLE',
+        action: 'toggle_camera_sentry',
+      },
+    });
+  }
+
+  public sendInterrupt(reason = 'USER_BARGE_IN'): boolean {
+    return this.send({
+      channel: Channel.SYSTEM,
+      type: EventType.INTERRUPT,
+      payload: {
+        reason,
+        priority: 10,
+      },
+    });
+  }
+
+  public sendMediaControl(action: 'play' | 'pause' | 'play-pause' | 'next' | 'previous'): boolean {
+    const sent = this.send({
+      channel: Channel.CONTROL,
+      type: EventType.MEDIA_CONTROL,
+      payload: {
+        action,
+      },
+    });
+
+    // Dual-path immediate HTTP dispatch for high-reliability playback control
+    const baseUrl = this.getHttpUrl();
+    fetch(`${baseUrl}/api/media/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    }).catch(() => {});
+
+    return sent;
+  }
+
+  public async fetchNowPlaying(): Promise<any> {
+    const baseUrl = this.getHttpUrl();
+    try {
+      const res = await fetch(`${baseUrl}/api/media/now-playing`);
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch {
+      // Non-blocking
+    }
+    return null;
+  }
+
+  public sendToolExecution(toolName: string, parameters: Record<string, any> = {}): boolean {
+    return this.send({
+      channel: Channel.AGENT,
+      type: EventType.VOICE_COMMAND,
+      payload: {
+        command: `execute tool ${toolName}`,
+        tool_name: toolName,
+        parameters,
       },
     });
   }
@@ -634,6 +827,117 @@ class GatewayClient {
     }
   }
 
+  // ── Finance REST Helpers ────────────────────────────────────────────────
+
+  public async fetchFinanceOverview(): Promise<any | null> {
+    const baseUrl = this.getHttpUrl();
+    try {
+      const res = await fetch(`${baseUrl}/api/finance/overview`, {
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch (e) {
+      console.warn("[GatewayClient] fetchFinanceOverview failed:", e);
+      return null;
+    }
+  }
+
+  public async fetchFinanceAccounts(): Promise<any[]> {
+    const baseUrl = this.getHttpUrl();
+    try {
+      const res = await fetch(`${baseUrl}/api/finance/accounts`, {
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) return [];
+      return await res.json();
+    } catch (e) {
+      console.warn("[GatewayClient] fetchFinanceAccounts failed:", e);
+      return [];
+    }
+  }
+
+  public async fetchFinanceDebts(): Promise<any[]> {
+    const baseUrl = this.getHttpUrl();
+    try {
+      const res = await fetch(`${baseUrl}/api/finance/debts`, {
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) return [];
+      return await res.json();
+    } catch (e) {
+      console.warn("[GatewayClient] fetchFinanceDebts failed:", e);
+      return [];
+    }
+  }
+
+  public async fetchFinanceTransactions(limit = 15): Promise<any[]> {
+    const baseUrl = this.getHttpUrl();
+    try {
+      const res = await fetch(`${baseUrl}/api/finance/transactions?limit=${limit}`, {
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) return [];
+      return await res.json();
+    } catch (e) {
+      console.warn("[GatewayClient] fetchFinanceTransactions failed:", e);
+      return [];
+    }
+  }
+
+  // ── Directive / Query Execution ─────────────────────────────────────────
+
+  public async executeDirective(directiveText: string): Promise<any> {
+    const baseUrl = this.getHttpUrl();
+    try {
+      const res = await fetch(`${baseUrl}/query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          query: directiveText.trim(),
+          session_id: `mobile_${this.clientId}`,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      return await res.json();
+    } catch (e: any) {
+      console.warn("[GatewayClient] executeDirective failed:", e);
+      return {
+        success: false,
+        error: e?.message || "Failed to execute directive",
+        speech_text: "I was unable to reach the agent cluster, sir.",
+      };
+    }
+  }
+
+  public async resolveProactiveAction(
+    actionId: string,
+    resolution: "confirmed" | "dismissed"
+  ): Promise<any> {
+    try {
+      const baseUrl = this.gatewayUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+      const res = await fetch(
+        `${baseUrl}/sync/proactive/actions/${encodeURIComponent(actionId)}/resolve?new_status=${encodeURIComponent(resolution)}&confirmed_by=mobile_hud`,
+        {
+          method: "POST",
+          headers: { Accept: "application/json" },
+        }
+      );
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      return await res.json();
+    } catch (e: any) {
+      console.warn("[GatewayClient] resolveProactiveAction failed:", e);
+      return {
+        success: false,
+        error: e?.message || "Failed to resolve proactive action",
+      };
+    }
+  }
+
   // ── Listener Subscriptions ──────────────────────────────────────────────
 
   public onEnvelope(listener: EnvelopeListener): () => void {
@@ -659,6 +963,18 @@ class GatewayClient {
     this.queueListeners.add(listener);
     listener(this.offlineQueue.length);
     return () => this.queueListeners.delete(listener);
+  }
+
+  public subscribeEnvelope(listener: EnvelopeListener): () => void {
+    return this.onEnvelope(listener);
+  }
+
+  public subscribeStatus(listener: StatusListener): () => void {
+    return this.onStatus(listener);
+  }
+
+  public subscribeState(listener: StateListener): () => void {
+    return this.onState(listener);
   }
 
   private notifyStateListeners(state: SynchronizedState) {

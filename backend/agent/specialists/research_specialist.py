@@ -8,6 +8,7 @@ Provides dual-engine web intelligence and fast fact retrieval:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 import httpx
 
@@ -151,13 +152,81 @@ class ResearchSpecialist(BaseSpecialist):
 
         return None
 
+    # ── Recipe Detection ──────────────────────────────────────────────────────
+
+    _RECIPE_KEYWORDS = re.compile(
+        r"\b(recipe|how to make|how to cook|how to bake|how to prepare|ingredients for|cooking instructions)\b",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _is_recipe_query(query: str) -> bool:
+        return bool(ResearchSpecialist._RECIPE_KEYWORDS.search(query))
+
+    @staticmethod
+    def _extract_recipe(snippets: List[str], answer: Optional[str] = None) -> Dict[str, Any]:
+        """Best-effort extraction of structured recipe data from source snippets."""
+        all_text = "\n".join(snippets)
+        if answer:
+            all_text = answer + "\n" + all_text
+
+        # Extract ingredients -- lines that look like measurements or bullet items
+        ingredient_patterns = re.findall(
+            r"(?:^|\n)\s*(?:[-*]|\d+[).])\s*(.+?)(?=\n|$)",
+            all_text,
+        )
+        ingredients: List[str] = []
+        steps: List[str] = []
+
+        for line in ingredient_patterns:
+            line = line.strip()
+            if not line or len(line) < 3:
+                continue
+            # Heuristic: lines with measurements are ingredients
+            has_measure = bool(re.search(
+                r"\b(cup|cups|tbsp|tsp|tablespoon|teaspoon|gram|grams|kg|ml|liter|litre|oz|ounce|pound|lb|inch|piece|pieces|clove|cloves|handful|pinch|bunch|medium|large|small)s?\b",
+                line, re.IGNORECASE
+            ))
+            has_step_word = bool(re.search(
+                r"\b(heat|cook|add|stir|mix|blend|pour|bake|fry|saute|simmer|boil|serve|garnish|marinate|cover|preheat|remove|place|transfer|let|allow|set aside|drain)\b",
+                line, re.IGNORECASE
+            ))
+            if has_measure and not has_step_word:
+                ingredients.append(line)
+            elif has_step_word:
+                steps.append(line)
+
+        # Fallback: split numbered sequences as steps
+        if not steps:
+            numbered = re.findall(r"(?:^|\n)\s*(\d+)[).\s]+(.+?)(?=\n|$)", all_text)
+            for _, step_text in numbered:
+                step_text = step_text.strip()
+                if len(step_text) > 10:
+                    steps.append(step_text)
+
+        # Extract times
+        prep_match = re.search(r"prep\s*(?:time)?\s*[:=]?\s*(\d+\s*(?:min|minute|hour|hr)s?)", all_text, re.IGNORECASE)
+        cook_match = re.search(r"cook\s*(?:time)?\s*[:=]?\s*(\d+\s*(?:min|minute|hour|hr)s?)", all_text, re.IGNORECASE)
+
+        return {
+            "ingredients": ingredients[:25],
+            "steps": steps[:15],
+            "prep_time": prep_match.group(1).strip() if prep_match else None,
+            "cook_time": cook_match.group(1).strip() if cook_match else None,
+        }
+
     # ── Tool Implementations ─────────────────────────────────────────────────
 
     async def execute_web_search(
         self, query: str, search_depth: str = "basic", max_results: int = 4
     ) -> SpecialistResult:
         """Executes web search with Tavily primary and SerpAPI fallback."""
-        data = await self._search_tavily(query, search_depth=search_depth, max_results=max_results)
+        is_recipe = self._is_recipe_query(query)
+
+        # For recipe queries, always use advanced depth to get richer content
+        effective_depth = "advanced" if is_recipe else search_depth
+
+        data = await self._search_tavily(query, search_depth=effective_depth, max_results=max_results)
 
         if not data:
             logger.info(f"[Research] Tavily unavailable, falling back to SerpAPI for '{query}'...")
@@ -190,6 +259,39 @@ class ResearchSpecialist(BaseSpecialist):
 
         top_url = sources[0]["url"] if sources else ""
 
+        # ── Recipe Card Path ─────────────────────────────────────────────────
+        if is_recipe and snippets:
+            raw_snippets = [s.get("snippet", "") for s in sources if s.get("snippet")]
+            recipe_data = self._extract_recipe(raw_snippets, answer)
+            recipe_title = query.replace("recipe", "").replace("Recipe", "").strip().title()
+
+            if recipe_data["ingredients"] or recipe_data["steps"]:
+                speech = (
+                    f"I have found a recipe for {recipe_title}, sir. "
+                    f"It includes {len(recipe_data['ingredients'])} ingredients and {len(recipe_data['steps'])} preparation steps. "
+                    f"The full recipe is displayed on your HUD."
+                )
+
+                return SpecialistResult(
+                    success=True,
+                    action="web_search",
+                    data={"query": query, "answer": answer, "top_url": top_url, "sources": sources, "recipe": recipe_data},
+                    speech_summary=speech,
+                    card_payload={
+                        "type": "recipe_card",
+                        "title": recipe_title,
+                        "query": query,
+                        "ingredients": recipe_data["ingredients"],
+                        "steps": recipe_data["steps"],
+                        "prep_time": recipe_data["prep_time"],
+                        "cook_time": recipe_data["cook_time"],
+                        "source_url": top_url,
+                        "source_title": sources[0]["title"] if sources else "",
+                        "sources": sources,
+                    },
+                )
+
+        # ── Standard Research Card Path ──────────────────────────────────────
         if answer:
             speech = f"{answer}"
         elif snippets:

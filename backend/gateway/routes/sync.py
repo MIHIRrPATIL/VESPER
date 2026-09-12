@@ -102,37 +102,17 @@ async def list_active_devices() -> List[DeviceRegistration]:
         except Exception as e:
             logger.warning(f"[SYNC] Failed to create host device: {e}")
 
-    # Provisioned phone companion in standby mode until mobile app is launched
-    has_provisioned = any(d.device_id == "mobile_companion_provisioned" for d in active)
-    if not has_provisioned:
-        provisioned_phone = DeviceRegistration(
-            device_id="mobile_companion_provisioned",
-            device_type="mobile",
-            device_name="Mobile Companion (Phone)",
-            hostname="android-provisioned",
-            os_name="Android",
-            architecture="arm64",
-            is_headless=False,
-            has_camera=True,
-            has_display=True,
-            has_microphone=True,
-            battery_level=100,
-            is_charging=False,
-            network_type="Provisioned (Standby)",
-            ip_address="Provisioned",
-            registered_at=time.time(),
-            last_heartbeat=time.time(),
-            is_online=True,
-        )
-        active.append(provisioned_phone)
+    # Filter out provisioned placeholder and any offline devices
+    active = [
+        d for d in active
+        if d.device_id != "mobile_companion_provisioned" and d.is_online
+    ]
 
-    # Strictly deduplicate devices by device_id and device_name
+    # Deduplicate devices by device_id and device_name
     seen_ids = set()
     seen_names = set()
     deduped: List[DeviceRegistration] = []
     for d in active:
-        if d.device_id.startswith("mobile_192_168_"):
-            continue
         if d.device_id in seen_ids or d.device_name in seen_names:
             continue
         seen_ids.add(d.device_id)

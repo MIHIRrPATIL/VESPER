@@ -10,8 +10,8 @@ export const WebsiteNavbar: React.FC<WebsiteNavbarProps> = ({ onLaunchWorkstatio
       <div className="navbar-inner">
         {/* Brand Monogram & Title */}
         <div className="navbar-brand-group" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}>
-          <div className="brand-monogram-box">
-            <span>V</span>
+          <div className="brand-monogram-box flex items-center justify-center">
+            <img src="/vesper-logo-transparent.png" alt="VESPER" style={{ width: '22px', height: '22px', objectFit: 'contain' }} />
           </div>
           <span className="brand-title-text">VESPER</span>
           <span className="pill-tag green">Core v2.4 Active</span>

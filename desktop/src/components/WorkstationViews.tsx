@@ -202,7 +202,9 @@ export const DirectivesView: React.FC<DirectivesViewProps> = ({
             </button>
           </div>
           <span className="font-mono text-xl font-semibold text-[#E8E3DA] truncate">"Hey Alfred" / "Jarvis"</span>
-          <span className="font-sans text-xs text-[#8E8A83] mt-2">Threshold: 0.45 • OpenWakeWord v0.6</span>
+          <span className="font-sans text-xs text-[#8E8A83] mt-2">
+            {isWakeWordArmed ? 'Threshold: 0.45 • OpenWakeWord v0.6' : 'Acoustic listener muted (Standby)'}
+          </span>
         </div>
 
         <div className="p-5 rounded-xl bg-[#181818] border border-white/[0.08] flex flex-col justify-between">
@@ -213,10 +215,16 @@ export const DirectivesView: React.FC<DirectivesViewProps> = ({
           <button
             type="button"
             onClick={onSimulateWakeWord}
-            className="w-full py-2 px-3 rounded-lg bg-white/[0.08] hover:bg-white/[0.14] text-[#E8E3DA] text-xs font-mono border border-white/[0.10] transition-colors flex items-center justify-center gap-2"
+            disabled={!isWakeWordArmed}
+            className={cn(
+              "w-full py-2 px-3 rounded-lg text-xs font-mono border transition-colors flex items-center justify-center gap-2",
+              isWakeWordArmed
+                ? "bg-white/[0.08] hover:bg-white/[0.14] text-[#E8E3DA] border-white/[0.10] cursor-pointer"
+                : "bg-white/[0.02] text-[#8E8A83]/50 border-white/[0.05] cursor-not-allowed"
+            )}
           >
             <Volume2 size={13} />
-            Simulate Wake Trigger
+            {isWakeWordArmed ? "Simulate Wake Trigger" : "Wake Word Muted"}
           </button>
           <span className="font-sans text-xs text-[#8E8A83] mt-2">Instantly engages listening state</span>
         </div>
@@ -298,7 +306,18 @@ interface ServicesViewProps {
 }
 
 export const ServicesView: React.FC<ServicesViewProps> = ({ onSendUserMessage, onOpenTools }) => {
-  const [devices] = useState(deviceService.getDevices());
+  const [devices, setDevices] = useState(
+    deviceService.getDevices().filter((d) => d.is_online && d.device_id !== 'mobile_companion_provisioned')
+  );
+
+  useEffect(() => {
+    const unsub = deviceService.subscribe(() => {
+      setDevices(
+        deviceService.getDevices().filter((d) => d.is_online && d.device_id !== 'mobile_companion_provisioned')
+      );
+    });
+    return unsub;
+  }, []);
 
   const specialistAgents = [
     {
@@ -502,10 +521,11 @@ export const ServicesView: React.FC<ServicesViewProps> = ({ onSendUserMessage, o
         <span className="font-mono text-xs text-[#8E8A83] uppercase tracking-wider">Synchronized Hardware Mesh</span>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {devices.map((dev) => {
-            const isProvisioned =
-              dev.device_id.includes('provisioned') ||
-              dev.ip_address === 'Provisioned' ||
-              dev.network_type?.includes('Provisioned');
+            const isMobile =
+              dev.device_type === 'phone' ||
+              dev.device_type === 'mobile' ||
+              dev.device_type?.includes('mobile') ||
+              dev.device_type?.includes('android');
             return (
               <div
                 key={dev.device_id}
@@ -513,12 +533,12 @@ export const ServicesView: React.FC<ServicesViewProps> = ({ onSendUserMessage, o
               >
                 <div className="flex items-start gap-3">
                   <div className="p-2.5 rounded-lg bg-black/40 border border-white/[0.08] text-[#E8E3DA]">
-                    {dev.device_type === 'phone' || dev.device_type === 'mobile' ? <Smartphone size={20} /> : <Laptop size={20} />}
+                    {isMobile ? <Smartphone size={20} /> : <Laptop size={20} />}
                   </div>
                   <div className="flex flex-col">
                     <span className="font-sans text-sm font-semibold text-[#E8E3DA]">{dev.device_name}</span>
                     <span className="font-mono text-xs text-[#8E8A83] mt-0.5">
-                      {isProvisioned ? 'Provisioned (Standby) • App in Dev' : dev.ip_address || 'Local IPC'}
+                      {dev.ip_address || 'Local IPC'}
                     </span>
                     <span className="font-mono text-[10px] text-[#8E8A83] mt-2">
                       Battery: {dev.battery_level !== undefined && dev.battery_level !== null ? `${dev.battery_level}%${dev.is_charging ? ' (Charging)' : ''}` : 'AC Power'}
@@ -531,7 +551,7 @@ export const ServicesView: React.FC<ServicesViewProps> = ({ onSendUserMessage, o
                     dev.is_online ? "bg-[#E8E3DA] animate-pulse" : "bg-white/40"
                   )} />
                   <span className="font-mono text-[10px] uppercase text-[#D1CFC0]">
-                    {isProvisioned ? 'PROVISIONED' : dev.is_online ? 'ONLINE' : 'STANDBY'}
+                    {dev.is_online ? 'ONLINE' : 'STANDBY'}
                   </span>
                 </div>
               </div>

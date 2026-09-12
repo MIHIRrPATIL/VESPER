@@ -36,6 +36,7 @@ class SwarmPlan(BaseModel):
     direct_response: Optional[str] = None
     steps: List[Dict[str, Any]] = Field(default_factory=list)
     provider_used: Optional[str] = "unknown"
+    resolved_advisory_ids: List[str] = Field(default_factory=list)
 
 
 class ExecutionResult(BaseModel):
@@ -105,10 +106,21 @@ PLANNING RULES:
    - When the user asks to check bank emails or transaction alerts in their mailbox: route to 'email:search_emails' with the bank or transaction query.
    - NEVER route general financial inquiries to mobile SMS notifications! Mobile notifications ('tasks:search_mobile_notifications') are strictly for phone alerts (WhatsApp, Slack, Telegram, SMS) when explicitly mentioned by the user.
 
+9. System Hardware, Laptop Specifications & Capability:
+   - When the user asks about laptop/system/computer specifications ("check my laptop specs", "what are my PC specs", "hardware vitals", "RAM/CPU/GPU details"):
+     * ALWAYS route to 'system:get_system_vitals'.
+     * If asking whether the laptop/system can run a specific game or software (e.g. "can I play God of War on this laptop"):
+       Use sequential plan:
+       Step 1: {{"agent": "system", "action": "get_system_vitals", "params": {{}}}}
+       Step 2: {{"agent": "research", "action": "web_search", "params": {{"query": "<game_name> PC system requirements minimum recommended"}}}}
+     * NEVER route laptop/system specs inquiries to 'vision:inspect_screen' or 'vision:ocr_screen'!
+
 FEW-SHOT EXAMPLES:
 - Financial standing: {{"plan_type": "parallel", "steps": [{{"agent": "finance", "action": "get_financial_summary", "params": {{}}}}]}}
 - Bank balance: {{"plan_type": "parallel", "steps": [{{"agent": "finance", "action": "get_balance", "params": {{"account_name": "Saraswat"}}}}]}}
 - Bank email transaction: {{"plan_type": "parallel", "steps": [{{"agent": "email", "action": "search_emails", "params": {{"query": "Saraswat Bank transaction"}}}}]}}
+- Laptop specs: {{"plan_type": "parallel", "steps": [{{"agent": "system", "action": "get_system_vitals", "params": {{}}}}]}}
+- Can laptop run game: {{"plan_type": "sequential", "steps": [{{"agent": "system", "action": "get_system_vitals", "params": {{}}}}, {{"agent": "research", "action": "web_search", "params": {{"query": "God of War PC system requirements minimum recommended"}}}}]}}
 - Reminder: {{"plan_type": "parallel", "steps": [{{"agent": "tasks", "action": "set_reminder", "params": {{"reminder": "Pick up my mom", "time": "5:45 PM today"}}}}]}}
 - Task: {{"plan_type": "parallel", "steps": [{{"agent": "tasks", "action": "add_task", "params": {{"title": "Deploy backend"}}}}]}}
 - Event: {{"plan_type": "parallel", "steps": [{{"agent": "tasks", "action": "schedule_event", "params": {{"summary": "Meeting with Rohit", "start_time": "tomorrow at 3pm"}}}}]}}
@@ -272,6 +284,7 @@ class SwarmPlanner:
                 plan_type="direct",
                 provider_used="prefilter",
                 direct_response=f"Very well, sir. I have dismissed and discarded the proposal: {target.verbatim_text}.",
+                resolved_advisory_ids=[target.id],
             )
         elif len(neg_matches) > 1:
             return SwarmPlan(
@@ -293,6 +306,7 @@ class SwarmPlanner:
                     "action": target.action,
                     "params": target.params,
                 }],
+                resolved_advisory_ids=[target.id],
             )
         elif len(pos_matches) > 1:
             return SwarmPlan(
@@ -326,6 +340,7 @@ class SwarmPlanner:
                         "action": recent_prompted.action,
                         "params": recent_prompted.params,
                     }],
+                    resolved_advisory_ids=[recent_prompted.id],
                 )
             elif is_negative:
                 action_queue.resolve_action(recent_prompted.id, "rejected", confirmed_by="voice_15s_window")
@@ -334,6 +349,7 @@ class SwarmPlanner:
                     plan_type="direct",
                     provider_used="prefilter",
                     direct_response="Understood, sir. I have discarded that proposal.",
+                    resolved_advisory_ids=[recent_prompted.id],
                 )
 
         # 0d. Pending Email Draft Confirmation or Cancellation:
@@ -614,10 +630,41 @@ class SwarmPlanner:
                 steps=[{"agent": "finance", "action": "list_transactions", "params": params}],
             )
 
+        # 2b. System Specifications & Laptop Hardware Queries
+        is_specs_query = (
+            any(w in q_lower for w in ["laptop spec", "laptop's spec", "computer spec", "system spec", "pc spec", "hardware spec", "system vitals", "laptop hardware"])
+            or (("spec" in q_lower or "hardware" in q_lower or "vitals" in q_lower) and any(w in q_lower for w in ["laptop", "computer", "system", "pc", "machine", "my"]))
+        )
+        if is_specs_query:
+            can_play_match = re.search(r"(?:can i play|can my laptop run|can this (?:laptop|pc) run|play|run)\s+([A-Za-z0-9\s:_-]+?)(?:\s+on (?:my|the) (?:laptop|pc)|\s+or\b|\s+well|\?|$)", query, re.I)
+            game_candidate = ""
+            if can_play_match:
+                extracted = can_play_match.group(1).strip()
+                if extracted.lower() not in ("it", "this", "games", "game", "anything"):
+                    game_candidate = extracted
+
+            if game_candidate:
+                logger.info(f"[Planner.PreFilter] Matched laptop specs + game capability query for '{game_candidate}'")
+                return SwarmPlan(
+                    plan_type="sequential",
+                    provider_used="prefilter",
+                    steps=[
+                        {"agent": "system", "action": "get_system_vitals", "params": {}},
+                        {"agent": "research", "action": "web_search", "params": {"query": f"{game_candidate} PC system requirements minimum recommended"}},
+                    ],
+                )
+            else:
+                logger.info("[Planner.PreFilter] Matched system specs query -> system:get_system_vitals")
+                return SwarmPlan(
+                    plan_type="parallel",
+                    provider_used="prefilter",
+                    steps=[{"agent": "system", "action": "get_system_vitals", "params": {}}],
+                )
+
         # 3. Explicit Screen perception: Screen/desktop look/inspect/ocr
-        has_screen_target = any(w in q_lower for w in ["screen", "monitor", "display", "desktop", "ide"])
+        has_screen_target = any(w in q_lower for w in ["screen", "monitor", "display", "ide"]) or ("desktop" in q_lower and "spec" not in q_lower)
         has_perception_verb = any(w in q_lower for w in ["look", "see", "read", "ocr", "check", "inspect"])
-        if has_screen_target and has_perception_verb:
+        if has_screen_target and has_perception_verb and not is_specs_query:
             act = "ocr_screen" if "ocr" in q_lower else "inspect_screen"
             logger.info(f"[Planner.PreFilter] Matched explicit screen query -> vision:{act}")
             return SwarmPlan(

@@ -93,6 +93,20 @@ class ConnectionManager:
                 await session.websocket.close()
             except Exception:
                 pass
+
+            try:
+                from backend.sync.sync_manager import sync_manager
+                if session.client_id in sync_manager.state.active_devices:
+                    sync_manager.state.active_devices[session.client_id].is_online = False
+                    offline_env = ServerEnvelope(
+                        uuid=str(uuid.uuid4()),
+                        channel=Channel.SYNC,
+                        type=EventType.DEVICE_OFFLINE,
+                        payload={"device_id": session.client_id, "is_online": False},
+                    )
+                    await self.broadcast(offline_env)
+            except Exception as e:
+                logger.warning(f"[GATEWAY] Failed to broadcast device offline state: {e}")
         return session
 
     def record_pong(self, session_id: str) -> bool:

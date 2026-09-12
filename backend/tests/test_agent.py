@@ -158,6 +158,30 @@ def test_evaluator_sanitization():
     assert "| Account | Balance |" in eval_result.markdown_body
 
 
+def test_output_evaluator_pointer_briefing():
+    """Verifies that pointer-based structured text generates a briefing HUD card and condenses spoken speech."""
+    pointer_text = (
+        "Good morning, sir. Here is the comparative breakdown of dogs versus cats:\n\n"
+        "- Companionship: Dogs require frequent social engagement and daily outdoor walks.\n"
+        "- Independence: Cats are largely self-sufficient, requiring less direct intervention.\n"
+        "- Space Requirements: Dogs generally demand larger quarters than indoor felines.\n\n"
+        "Ultimately, the decision depends on your daily schedule and residence size."
+    )
+    eval_result = OutputEvaluator.evaluate(pointer_text, query="which is better a dog or a cat")
+
+    # Should generate a briefing HUD card
+    assert len(eval_result.hud_cards) == 1
+    card = eval_result.hud_cards[0]
+    assert card["type"] == "briefing"
+    assert "Comparative Briefing" in card["title"]
+    assert "Dogs require frequent social engagement" in card["data"]["markdown"]
+
+    # Speech text should be concise, not reciting all bullet points
+    assert "Companionship: Dogs require frequent" not in eval_result.speech_text
+    assert "I have displayed the detailed breakdown on your HUD, sir." in eval_result.speech_text
+    assert len(eval_result.speech_text) < len(pointer_text)
+
+
 def test_specialist_registry():
     """Verifies dynamic specialist registration and capability generation."""
     reg = SpecialistRegistry()

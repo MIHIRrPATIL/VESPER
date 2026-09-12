@@ -255,6 +255,26 @@ class NotificationStore {
       return;
     }
 
+    // Proactive Advisory Resolution (from voice or backend resolve)
+    if (type === 'PROACTIVE_RESOLVE') {
+      const actionIds: string[] = payload.action_ids || (payload.action_id ? [payload.action_id] : []);
+      if (actionIds.length > 0) {
+        let changed = false;
+        for (const a of this._alerts) {
+          const stagedId = a.stagedActionId || (a.stagedAction as any)?.id || (a.stagedAction as any)?.action_id || a.id;
+          if (actionIds.includes(stagedId) || actionIds.includes(a.id)) {
+            if (!a.dismissed || !a.toastDismissed) {
+              a.dismissed = true;
+              a.toastDismissed = true;
+              changed = true;
+            }
+          }
+        }
+        if (changed) this._notify();
+      }
+      return;
+    }
+
     // Agent response with HUD cards or intent-based content
     if (type === 'AGENT_RESPONSE') {
       const cards: any[] = payload.hud_cards || [];

@@ -251,7 +251,7 @@ def _set_system_mute(muted: bool) -> None:
 _LAST_MEDIA_ACTION_TIME: float = 0.0
 
 
-def _control_media_player(action: str) -> None:
+def _control_media_player(action: str, is_gesture: bool = False) -> None:
     """Controls running media players (Spotify, Apple Music, browsers) across Linux, macOS, and Windows.
 
     Uses real player status inspection to make toggles strictly idempotent and avoid
@@ -259,8 +259,8 @@ def _control_media_player(action: str) -> None:
     """
     global _LAST_MEDIA_ACTION_TIME
     now = time.time()
-    if action in ("play-pause", "toggle") and (now - _LAST_MEDIA_ACTION_TIME < 1.0):
-        logger.debug(f"[MediaCtrl] Suppressed rapid toggle ({now - _LAST_MEDIA_ACTION_TIME:.2f}s since last)")
+    if is_gesture and action in ("play-pause", "toggle") and (now - _LAST_MEDIA_ACTION_TIME < 0.8):
+        logger.debug(f"[MediaCtrl] Suppressed rapid gesture toggle ({now - _LAST_MEDIA_ACTION_TIME:.2f}s since last)")
         return
     _LAST_MEDIA_ACTION_TIME = now
 
@@ -277,20 +277,30 @@ def _control_media_player(action: str) -> None:
 
         playerctl = shutil.which("playerctl")
         if playerctl:
-            target_cmd = action
-            if action in ("play-pause", "toggle"):
-                status_res = subprocess.run(
-                    [playerctl, "-p", "spotify,%any", "status"],
-                    capture_output=True, text=True, timeout=1, check=False,
-                )
-                curr_status = status_res.stdout.strip().lower()
-                target_cmd = "pause" if curr_status == "playing" else "play"
+            target_cmd = action.lower().strip()
+            if target_cmd in ("play-pause", "toggle"):
+                target_cmd = "play-pause"
+            elif target_cmd == "play":
+                target_cmd = "play"
+            elif target_cmd == "pause":
+                target_cmd = "pause"
+            elif target_cmd == "next":
+                target_cmd = "next"
+            elif target_cmd in ("previous", "prev"):
+                target_cmd = "previous"
 
-            subprocess.run(
+            res = subprocess.run(
                 [playerctl, "-p", "spotify,%any", target_cmd],
                 timeout=2, check=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
+            # If target player specifier failed, fallback to default playerctl
+            if res.returncode != 0:
+                subprocess.run(
+                    [playerctl, target_cmd],
+                    timeout=2, check=False,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
     except Exception as e:
         logger.debug(f"[MediaCtrl] Media player {action} failed: {e}")
 
@@ -1276,7 +1286,7 @@ class GestureWorker:
                 # Real system effect: mute + pause running media player (standalone only)
                 if not self.on_gesture_callback and not self.gateway_url:
                     await asyncio.to_thread(_set_system_mute, True)
-                    await asyncio.to_thread(_control_media_player, "pause")
+                    await asyncio.to_thread(_control_media_player, "pause", True)
 
             elif gesture in ("OPEN_PALM", "RESUME", "PLAY", "UNMUTE"):
                 restore_vol = getattr(self, "_saved_volume", 60)
@@ -1291,15 +1301,15 @@ class GestureWorker:
                 if not self.on_gesture_callback and not self.gateway_url:
                     await asyncio.to_thread(_set_system_mute, False)
                     await asyncio.to_thread(_set_system_volume, restore_vol)
-                    await asyncio.to_thread(_control_media_player, "play")
+                    await asyncio.to_thread(_control_media_player, "play", True)
 
             elif gesture in ("NEXT_TRACK", "SWIPE_RIGHT", "GUN_RIGHT", "GUN_POINT_RIGHT"):
                 logger.info(f"[GestureWorker] Dispatched NEXT_TRACK media action ({gesture})")
-                await asyncio.to_thread(_control_media_player, "next")
+                await asyncio.to_thread(_control_media_player, "next", True)
 
             elif gesture in ("PREV_TRACK", "PREVIOUS_TRACK", "SWIPE_LEFT", "GUN_LEFT", "GUN_POINT_LEFT"):
                 logger.info(f"[GestureWorker] Dispatched PREV_TRACK media action ({gesture})")
-                await asyncio.to_thread(_control_media_player, "previous")
+                await asyncio.to_thread(_control_media_player, "previous", True)
 
             elif gesture in ("THUMB_UP", "VOLUME_UP"):
                 # Step volume up +10% (sync state + real system)
@@ -1344,7 +1354,7 @@ class GestureWorker:
                     source_device_id="gesture_worker",
                 )
                 if not self.on_gesture_callback and not self.gateway_url:
-                    await asyncio.to_thread(_control_media_player, "play-pause")
+                    await asyncio.to_thread(_control_media_player, "play-pause", True)
                 logger.info(f"[GestureWorker] THREE_FINGERS toggled playback -> {'PLAY' if new_playing else 'PAUSE'} (Volume untouched: {cur_vol}%)")
 
             elif gesture in ("PEACE_SIGN", "VICTORY", "TOGGLE_ZEN", "ZEN_MODE"):

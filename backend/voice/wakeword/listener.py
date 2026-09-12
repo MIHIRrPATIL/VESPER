@@ -56,6 +56,7 @@ class WakeWordListener:
         self.is_paused = False  # Paused during TTS to prevent self-triggering
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._manual_trigger_event = threading.Event()
 
     def _handle_detector_wake(self, evt: WakeWordEvent) -> None:
         """Callback triggered by detector (ONNX or speech utterance verification)."""
@@ -102,6 +103,12 @@ class WakeWordListener:
         self.is_paused = False
         logger.debug("[WakeWordListener] Resumed wake word detection.")
 
+    def trigger_listen(self) -> None:
+        """Manually triggers the listener to capture an utterance as if wake word was detected."""
+        logger.info("[WakeWordListener] Manual listen trigger received from cluster / PTT.")
+        self.is_paused = False
+        self._manual_trigger_event.set()
+
     def _audio_loop(self) -> None:
         """Audio streaming loop using sounddevice or fallback queue."""
         try:
@@ -138,8 +145,13 @@ class WakeWordListener:
                     if self.is_paused:
                         continue
 
-                    # Process through detector
-                    event = self.detector.process_frame(bytes(data))
+                    # Process through detector or handle manual trigger
+                    if self._manual_trigger_event.is_set():
+                        self._manual_trigger_event.clear()
+                        from backend.voice.wakeword.detector import WakeWordEvent
+                        event = WakeWordEvent(detected=True, wake_word="hey alfred", confidence=1.0)
+                    else:
+                        event = self.detector.process_frame(bytes(data))
 
                     # Emit real-time frame telemetry to UI / meter callback
                     if self.on_audio_frame:

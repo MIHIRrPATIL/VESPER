@@ -752,111 +752,142 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({ onSendUserMe
             </button>
           </div>
 
-          {/* Grouped by person */}
+          {/* Summary Stats Header */}
+          {overview?.debts?.people && overview.debts.people.length > 0 && (() => {
+            const peopleCount = overview.debts.people.length;
+            const totalItems = overview.debts.people.reduce((acc, p) => acc + (p.debts?.length || 0), 0);
+            const totalNet = overview.debts.people.reduce((acc, p) => acc + (p.net_amount || 0), 0);
+            const isOverallReceivable = totalNet >= 0;
+
+            return (
+              <div className="flex flex-wrap items-center gap-3 p-3.5 rounded-xl bg-white/[0.03] border border-white/[0.08] text-xs font-mono">
+                <div className="flex items-center gap-2">
+                  <span className="text-[#8E8A83]">PEOPLE:</span>
+                  <span className="text-[#E8E3DA] font-semibold">{peopleCount}</span>
+                </div>
+                <span className="text-white/20">•</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[#8E8A83]">ACTIVE ITEMS:</span>
+                  <span className="text-[#E8E3DA] font-semibold">{totalItems}</span>
+                </div>
+                <span className="text-white/20">•</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[#8E8A83]">NET BALANCE:</span>
+                  <span className={cn('font-semibold tabular-nums', isOverallReceivable ? 'text-[#E8E3DA]' : 'text-amber-400')}>
+                    {isOverallReceivable ? '+' : '-'}₹{Math.abs(totalNet).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Grouped by person with scrollable viewport */}
           {overview?.debts?.people && overview.debts.people.length > 0 ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
-              {overview.debts.people.map((p) => {
-                const isNetReceivable = p.net_amount >= 0;
-                return (
-                  <div
-                    key={p.person}
-                    className="p-6 rounded-2xl bg-[#141414]/90 border border-white/[0.08] hover:border-white/15 transition-all flex flex-col justify-between text-left"
-                  >
-                    <div>
-                      <div className="flex items-start justify-between w-full mb-3">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-full bg-white/[0.06] border border-white/10 flex items-center justify-center font-mono font-bold text-sm text-[#E8E3DA]">
-                            {p.person.slice(0, 2).toUpperCase()}
+            <div className="relative w-full">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-h-[calc(100vh-320px)] overflow-y-auto pr-1.5 scrollbar-thin">
+                {overview.debts.people.map((p) => {
+                  const isNetReceivable = p.net_amount >= 0;
+                  return (
+                    <div
+                      key={p.person}
+                      className="p-6 rounded-2xl bg-[#141414]/90 border border-white/[0.08] hover:border-white/15 transition-all flex flex-col justify-between text-left"
+                    >
+                      <div>
+                        <div className="flex items-start justify-between w-full mb-3">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-full bg-white/[0.06] border border-white/10 flex items-center justify-center font-mono font-bold text-sm text-[#E8E3DA]">
+                              {p.person.slice(0, 2).toUpperCase()}
+                            </div>
+                            <div className="flex flex-col">
+                              <span className="font-sans text-base font-semibold text-[#E8E3DA]">
+                                {p.person}
+                              </span>
+                              <span className="font-mono text-[11px] text-[#8E8A83]">
+                                {p.debts.length} active item{p.debts.length > 1 ? 's' : ''}
+                              </span>
+                            </div>
                           </div>
-                          <div className="flex flex-col">
-                            <span className="font-sans text-base font-semibold text-[#E8E3DA]">
-                              {p.person}
-                            </span>
-                            <span className="font-mono text-[11px] text-[#8E8A83]">
-                              {p.debts.length} active item{p.debts.length > 1 ? 's' : ''}
+
+                          <div className="text-right">
+                            <div
+                              className={cn(
+                                'font-mono text-xl font-bold tabular-nums',
+                                isNetReceivable ? 'text-[#E8E3DA]' : 'text-amber-400'
+                              )}
+                            >
+                              {isNetReceivable ? '+' : '-'}₹
+                              {Math.abs(p.net_amount).toLocaleString('en-IN', {
+                                minimumFractionDigits: 2,
+                              })}
+                            </div>
+                            <span className="font-mono text-[10px] text-[#8E8A83] uppercase">
+                              {isNetReceivable ? 'Owes You' : 'You Owe'}
                             </span>
                           </div>
                         </div>
 
-                        <div className="text-right">
-                          <div
-                            className={cn(
-                              'font-mono text-xl font-bold tabular-nums',
-                              isNetReceivable ? 'text-[#E8E3DA]' : 'text-amber-400'
-                            )}
-                          >
-                            {isNetReceivable ? '+' : '-'}₹
-                            {Math.abs(p.net_amount).toLocaleString('en-IN', {
-                              minimumFractionDigits: 2,
-                            })}
-                          </div>
-                          <span className="font-mono text-[10px] text-[#8E8A83] uppercase">
-                            {isNetReceivable ? 'Owes You' : 'You Owe'}
-                          </span>
+                        {/* Itemized tabs with per-card scroll limit */}
+                        <div className="flex flex-col gap-2 my-4 max-h-[200px] overflow-y-auto pr-1 scrollbar-thin">
+                          {p.debts.map((d) => (
+                            <div
+                              key={d.id}
+                              className="p-3 rounded-xl bg-black/40 border border-white/[0.04] flex items-center justify-between"
+                            >
+                              <div className="flex flex-col pr-2">
+                                <span className="font-sans text-xs text-[#E8E3DA]">
+                                  {d.description || 'Running Tab'}
+                                </span>
+                                <span className="font-mono text-[10px] text-[#8E8A83] mt-0.5">
+                                  {d.created_at ? new Date(d.created_at).toLocaleDateString() : 'Active'}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-xs font-semibold text-[#E8E3DA] tabular-nums">
+                                  ₹{d.amount.toLocaleString('en-IN')}
+                                </span>
+                                <button
+                                  type="button"
+                                  title="Settle"
+                                  onClick={() => setSettleModalDebt(d)}
+                                  className="p-1 rounded bg-white/[0.06] hover:bg-white/[0.12] text-[#E8E3DA] hover:text-white transition-colors cursor-pointer"
+                                >
+                                  <CheckCircle2 size={13} />
+                                </button>
+                                <button
+                                  type="button"
+                                  title="Edit"
+                                  onClick={() => handleOpenEditDebt(d)}
+                                  className="p-1 rounded hover:bg-white/[0.06] text-[#8E8A83] hover:text-[#E8E3DA] transition-colors cursor-pointer"
+                                >
+                                  <Edit2 size={13} />
+                                </button>
+                                <button
+                                  type="button"
+                                  title="Delete"
+                                  onClick={() => handleDeleteDebt(d.id)}
+                                  className="p-1 rounded hover:bg-red-500/10 text-[#8E8A83] hover:text-red-400 transition-colors cursor-pointer"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       </div>
 
-                      {/* Itemized tabs */}
-                      <div className="flex flex-col gap-2 my-4">
-                        {p.debts.map((d) => (
-                          <div
-                            key={d.id}
-                            className="p-3 rounded-xl bg-black/40 border border-white/[0.04] flex items-center justify-between"
-                          >
-                            <div className="flex flex-col pr-2">
-                              <span className="font-sans text-xs text-[#E8E3DA]">
-                                {d.description || 'Running Tab'}
-                              </span>
-                              <span className="font-mono text-[10px] text-[#8E8A83] mt-0.5">
-                                {d.created_at ? new Date(d.created_at).toLocaleDateString() : 'Active'}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-xs font-semibold text-[#E8E3DA] tabular-nums">
-                                ₹{d.amount.toLocaleString('en-IN')}
-                              </span>
-                              <button
-                                type="button"
-                                title="Settle"
-                                onClick={() => setSettleModalDebt(d)}
-                                className="p-1 rounded bg-white/[0.06] hover:bg-white/[0.12] text-[#E8E3DA] hover:text-white transition-colors cursor-pointer"
-                              >
-                                <CheckCircle2 size={13} />
-                              </button>
-                              <button
-                                type="button"
-                                title="Edit"
-                                onClick={() => handleOpenEditDebt(d)}
-                                className="p-1 rounded hover:bg-white/[0.06] text-[#8E8A83] hover:text-[#E8E3DA] transition-colors cursor-pointer"
-                              >
-                                <Edit2 size={13} />
-                              </button>
-                              <button
-                                type="button"
-                                title="Delete"
-                                onClick={() => handleDeleteDebt(d.id)}
-                                className="p-1 rounded hover:bg-red-500/10 text-[#8E8A83] hover:text-red-400 transition-colors cursor-pointer"
-                              >
-                                <Trash2 size={13} />
-                              </button>
-                            </div>
-                          </div>
-                        ))}
+                      <div className="pt-2 border-t border-white/[0.04] flex items-center justify-between">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenAddDebt(p.person)}
+                          className="text-[11px] font-mono text-[#8E8A83] hover:text-[#E8E3DA] cursor-pointer"
+                        >
+                          + Add item for {p.person}
+                        </button>
                       </div>
                     </div>
-
-                    <div className="pt-2 border-t border-white/[0.04] flex items-center justify-between">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenAddDebt(p.person)}
-                        className="text-[11px] font-mono text-[#8E8A83] hover:text-[#E8E3DA] cursor-pointer"
-                      >
-                        + Add item for {p.person}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           ) : (
             <div className="w-full p-12 rounded-2xl bg-[#141414]/90 border border-white/[0.08] flex flex-col items-center justify-center gap-2 text-center">

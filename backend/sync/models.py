@@ -59,6 +59,16 @@ class SynchronizedState(BaseModel):
             "progress_ms": 0,
         }
     )
+    zen_timer: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "is_running": False,
+            "seconds_remaining": 25 * 60,
+            "sprint_minutes": 25,
+            "completed_sprints": 0,
+            "soundscape": "ocean",
+            "music_source": "ambient",
+        }
+    )
     last_speech_summary: str = ""
     active_devices: Dict[str, DeviceRegistration] = Field(default_factory=dict)
     version: int = 1

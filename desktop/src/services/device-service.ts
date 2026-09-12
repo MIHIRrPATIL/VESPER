@@ -16,19 +16,9 @@ const INITIAL_FALLBACK_DEVICES: ConnectedDevice[] = [
     has_display: true,
     has_camera: true,
   },
-  {
-    device_id: 'mobile_companion_provisioned',
-    device_type: 'mobile',
-    device_name: 'Mobile Companion (Phone)',
-    hostname: 'android-provisioned',
-    is_online: true,
-    last_heartbeat: Date.now(),
-    battery_level: 100,
-    is_charging: false,
-    network_type: 'Provisioned (Standby)',
-    ip_address: 'Provisioned',
-  },
 ];
+
+import { gatewayService } from './gateway';
 
 class DeviceService {
   private devices: ConnectedDevice[] = INITIAL_FALLBACK_DEVICES;
@@ -45,6 +35,51 @@ class DeviceService {
       this.pollInterval = window.setInterval(() => {
         this.refreshAll();
       }, 15000);
+
+      // Real-time synchronization: subscribe to Gateway WebSocket envelopes on Channel.SYNC
+      gatewayService.subscribe((env: any) => {
+        if (env.channel === 'SYNC') {
+          if (env.type === 'DEVICE_HEARTBEAT' || env.type === 'DEVICE_REGISTER') {
+            const payload = env.payload || {};
+            const devId = payload.device_id;
+            if (devId && devId !== 'mobile_companion_provisioned') {
+              const idx = this.devices.findIndex((d) => d.device_id === devId);
+              if (idx >= 0) {
+                this.devices[idx] = {
+                  ...this.devices[idx],
+                  is_online: true,
+                  last_heartbeat: Date.now(),
+                  ...(payload.battery_level !== undefined ? { battery_level: payload.battery_level } : {}),
+                  ...(payload.is_charging !== undefined ? { is_charging: payload.is_charging } : {}),
+                  ...(payload.ip_address ? { ip_address: payload.ip_address } : {}),
+                  ...(payload.device_name ? { device_name: payload.device_name } : {}),
+                };
+              } else {
+                this.devices.push({
+                  device_id: devId,
+                  device_type: payload.device_type || 'mobile',
+                  device_name: payload.device_name || 'VESPER Mobile',
+                  hostname: payload.hostname || 'mobile',
+                  is_online: true,
+                  last_heartbeat: Date.now(),
+                  battery_level: payload.battery_level,
+                  is_charging: payload.is_charging,
+                  ip_address: payload.ip_address,
+                  network_type: payload.network_type || 'wifi',
+                });
+              }
+
+              this.notify();
+            }
+          } else if (env.type === 'DEVICE_OFFLINE') {
+            const devId = env.payload?.device_id;
+            if (devId) {
+              this.devices = this.devices.filter((d) => d.device_id !== devId);
+              this.notify();
+            }
+          }
+        }
+      });
     }
   }
 
@@ -102,13 +137,15 @@ class DeviceService {
         for (const d of data) {
           const id = d.device_id || 'unknown_device';
           if (seen.has(id)) continue;
+          if (id === 'mobile_companion_provisioned') continue;
+          if (d.is_online === false) continue;
           seen.add(id);
           parsed.push({
             device_id: id,
             device_type: d.device_type || 'edge',
             device_name: d.device_name || d.hostname || 'VESPER Node',
             hostname: d.hostname,
-            is_online: d.is_online !== undefined ? d.is_online : true,
+            is_online: true,
             last_heartbeat: d.last_heartbeat ? d.last_heartbeat * 1000 : Date.now(),
             battery_level: d.battery_level,
             is_charging: d.is_charging,
@@ -119,10 +156,14 @@ class DeviceService {
             ip_address: d.ip_address,
           });
         }
-        if (parsed.length > 0) {
-          this.devices = parsed;
-          this.notify();
+        const hasHost = parsed.some(
+          (d) => d.device_type === 'desktop' || d.device_id === 'vesper-host-workstation'
+        );
+        if (!hasHost) {
+          parsed.unshift(INITIAL_FALLBACK_DEVICES[0]);
         }
+        this.devices = parsed;
+        this.notify();
       }
     } catch (_) {
       // Keep resilient fallback

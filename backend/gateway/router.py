@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import httpx
 
@@ -97,6 +97,8 @@ class MessageRouter:
                 payload=PongPayload().model_dump(),
             )
             await self.manager.send_envelope(session.session_id, pong)
+        elif event_type == EventType.MEDIA_CONTROL:
+            await self._handle_media_control(session, envelope)
         else:
             logger.warning(f"[ROUTER] Unhandled control event '{event_type}'")
 
@@ -175,48 +177,218 @@ class MessageRouter:
             await self.manager.broadcast(broadcast_envelope)
 
         elif event_type in [EventType.ZEN_MODE_STATE, EventType.FOCUS_MODE_STATE]:
-            # Broadcast UI state toggles
-            is_enabled = payload.get("enabled", payload.get("toggle", True))
             key = "zen_mode" if event_type == EventType.ZEN_MODE_STATE else "focus_mode"
-            await sync_manager.update_state({key: is_enabled}, source_device_id=session.client_id)
+            current_val = getattr(sync_manager.get_snapshot(), key, False)
+
+            if "zen_mode" in payload:
+                new_state = bool(payload["zen_mode"])
+            elif "enabled" in payload:
+                new_state = bool(payload["enabled"])
+            elif "active" in payload:
+                new_state = bool(payload["active"])
+            elif payload.get("toggle", False) or "toggle" in payload:
+                new_state = not current_val
+            else:
+                new_state = True
+
+            diff: Dict[str, Any] = {key: new_state}
+            timer_state = dict(sync_manager.get_snapshot().zen_timer)
+
+            if new_state:
+                # Entering Zen Mode:
+                # 1. Pause Spotify if currently playing
+                try:
+                    from backend.vision.gesture_service import _control_media_player
+                    _control_media_player("pause")
+                except Exception as media_err:
+                    logger.debug(f"[Router] Zen pause Spotify error: {media_err}")
+
+                # 2. Automatically start Pomodoro timer
+                timer_state["is_running"] = True
+                if "seconds_remaining" in payload and isinstance(payload["seconds_remaining"], int):
+                    timer_state["seconds_remaining"] = payload["seconds_remaining"]
+                else:
+                    timer_state["seconds_remaining"] = timer_state.get("sprint_minutes", 25) * 60
+
+                timer_state["soundscape"] = payload.get("soundscape", "ocean")
+                timer_state["music_source"] = payload.get("music_source", "ambient")
+                diff["zen_timer"] = timer_state
+            else:
+                # Exiting Zen Mode:
+                timer_state["is_running"] = False
+                timer_state["soundscape"] = "off"
+                diff["zen_timer"] = timer_state
+
+            await sync_manager.update_state(diff, source_device_id=session.client_id)
+
+            broadcast_payload = {
+                "toggle": False,
+                key: new_state,
+                "enabled": new_state,
+                "zen_mode": new_state,
+                "timer": timer_state,
+                "soundscape": timer_state.get("soundscape", "off"),
+                "music_source": timer_state.get("music_source", "ambient"),
+            }
+
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.SYSTEM,
                 type=event_type,
-                payload=payload,
+                payload=broadcast_payload,
             )
             await self.manager.broadcast(broadcast_envelope)
 
-        elif event_type in [EventType.WAKE_WORD_TOGGLE, EventType.WAKE_WORD_STATE]:
-            cur_state = sync_manager.get_snapshot().wakeword_active
-            if "active" in payload:
-                new_state = bool(payload["active"])
-            elif "enabled" in payload:
-                new_state = bool(payload["enabled"])
-            elif "wakeword_active" in payload:
-                new_state = bool(payload["wakeword_active"])
-            else:
-                new_state = not cur_state
+        elif event_type == EventType.ZEN_TIMER_UPDATE:
+            # Handle timer actions (start, pause, reset, preset, soundscape)
+            timer_state = dict(sync_manager.get_snapshot().zen_timer)
+            action = payload.get("action", "")
 
-            await sync_manager.update_state({"wakeword_active": new_state}, source_device_id=session.client_id)
+            if action == "start":
+                timer_state["is_running"] = True
+                if "seconds_remaining" in payload:
+                    timer_state["seconds_remaining"] = int(payload["seconds_remaining"])
+            elif action == "pause":
+                timer_state["is_running"] = False
+                if "seconds_remaining" in payload:
+                    timer_state["seconds_remaining"] = int(payload["seconds_remaining"])
+            elif action == "reset":
+                timer_state["is_running"] = False
+                timer_state["seconds_remaining"] = timer_state.get("sprint_minutes", 25) * 60
+            elif action == "preset":
+                mins = int(payload.get("minutes", 25))
+                timer_state["sprint_minutes"] = mins
+                timer_state["seconds_remaining"] = mins * 60
+                timer_state["is_running"] = True
+            elif action == "tick":
+                secs = int(payload.get("seconds_remaining", timer_state.get("seconds_remaining", 0)))
+                timer_state["seconds_remaining"] = max(0, secs)
+                if secs <= 0:
+                    timer_state["is_running"] = False
+                    timer_state["completed_sprints"] = timer_state.get("completed_sprints", 0) + 1
+            elif action == "soundscape":
+                soundscape = payload.get("soundscape", "ocean")
+                music_source = payload.get("music_source", "ambient" if soundscape != "spotify" else "spotify")
+                timer_state["soundscape"] = soundscape
+                timer_state["music_source"] = music_source
+
+                # Preserve current timer countdown and running state if provided
+                if "is_running" in payload:
+                    timer_state["is_running"] = bool(payload["is_running"])
+                if "seconds_remaining" in payload and isinstance(payload["seconds_remaining"], int):
+                    timer_state["seconds_remaining"] = payload["seconds_remaining"]
+
+                # Media player switching
+                try:
+                    from backend.vision.gesture_service import _control_media_player
+                    if music_source == "spotify" or soundscape == "spotify":
+                        _control_media_player("play", is_gesture=False)
+                    else:
+                        _control_media_player("pause", is_gesture=False)
+                except Exception as media_err:
+                    logger.debug(f"[Router] Soundscape media control error: {media_err}")
+
+            await sync_manager.update_state({"zen_timer": timer_state}, source_device_id=session.client_id)
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
-                channel=Channel.VOICE,
-                type=EventType.WAKE_WORD_STATE,
-                payload={"wakeword_active": new_state, "source": session.client_id},
+                channel=Channel.SYSTEM,
+                type=EventType.ZEN_TIMER_UPDATE,
+                payload={"action": action, "timer": timer_state},
             )
             await self.manager.broadcast(broadcast_envelope)
 
+        elif event_type == EventType.MEDIA_CONTROL:
+            await self._handle_media_control(session, envelope)
+
+        elif event_type in [EventType.WAKE_WORD_TOGGLE, EventType.WAKE_WORD_STATE]:
+            await self._handle_wake_word_toggle(session, envelope)
+
+    async def _handle_media_control(self, session: ClientSession, envelope: ClientEnvelope) -> None:
+        """Executes hardware media playback control actions (play, pause, next, prev, play-pause)."""
+        payload = envelope.payload or {}
+        action = payload.get("action", "play-pause")
+        logger.info(f"[ROUTER] Handling MEDIA_CONTROL from '{session.client_id}': action={action}")
+
+        try:
+            from backend.vision.gesture_service import _control_media_player
+            await asyncio.to_thread(_control_media_player, action, False)
+            await asyncio.sleep(0.15)
+        except Exception as err:
+            logger.warning(f"[ROUTER] Error executing media control action: {err}")
+
+        try:
+            from backend.gateway.routes.media import _fetch_mpris_now_playing
+            track_info = await asyncio.to_thread(_fetch_mpris_now_playing)
+            await sync_manager.update_state({"current_media": track_info}, source_device_id=session.client_id)
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.SYSTEM,
+                type=EventType.MEDIA_CONTROL,
+                payload=track_info,
+            )
+            await self.manager.broadcast(broadcast_envelope)
+        except Exception as err:
+            logger.warning(f"[ROUTER] Error broadcasting updated media state: {err}")
+
+    async def _handle_wake_word_toggle(self, session: ClientSession, envelope: ClientEnvelope) -> None:
+        """Handles wake word enable/disable and broadcast to all cluster nodes."""
+        payload = envelope.payload or {}
+        cur_state = sync_manager.get_snapshot().wakeword_active
+        if "wakeword_active" in payload and isinstance(payload["wakeword_active"], bool):
+            new_state = payload["wakeword_active"]
+        elif "active" in payload and isinstance(payload["active"], bool):
+            new_state = payload["active"]
+        elif "enabled" in payload and isinstance(payload["enabled"], bool):
+            new_state = payload["enabled"]
+        elif "is_armed" in payload and isinstance(payload["is_armed"], bool):
+            new_state = payload["is_armed"]
+        elif payload.get("action") == "pause":
+            new_state = False
+        elif payload.get("action") == "resume":
+            new_state = True
+        elif payload.get("toggle", False) or "toggle" in payload:
+            new_state = not cur_state
+        else:
+            new_state = not cur_state
+
+        logger.info(f"[ROUTER] Wake word toggle from '{session.client_id}': new_state={new_state}")
+        await sync_manager.update_state({"wakeword_active": new_state}, source_device_id=session.client_id)
+
+        broadcast_envelope = ServerEnvelope(
+            uuid=envelope.uuid,
+            channel=Channel.VOICE,
+            type=EventType.WAKE_WORD_STATE,
+            payload={
+                "wakeword_active": new_state,
+                "active": new_state,
+                "enabled": new_state,
+                "is_armed": new_state,
+                "action": "resume" if new_state else "pause",
+                "toggle": True,
+                "source": session.client_id,
+            },
+        )
+        await self.manager.broadcast(broadcast_envelope)
 
     async def _handle_voice(self, session: ClientSession, envelope: ClientEnvelope) -> None:
         """Handles incoming voice transcripts, wake words, and commands."""
         event_type = envelope.type
 
+        # 0. Wake Word Toggle / State
+        if event_type in [EventType.WAKE_WORD_TOGGLE, EventType.WAKE_WORD_STATE]:
+            await self._handle_wake_word_toggle(session, envelope)
+            return
+
         # 1. Wake Word Detected Broadcast
         if event_type == EventType.WAKE_WORD_DETECTED:
+            is_explicit_ptt = envelope.payload.get("trigger") == "push_to_talk" or envelope.payload.get("source") != "acoustic_listener"
+            if not sync_manager.get_snapshot().wakeword_active and not is_explicit_ptt:
+                logger.info(f"[VOICE] Wake word suppressed because acoustic listener is DISARMED/MUTED (from '{session.client_id}')")
+                return
+
             wake_word = envelope.payload.get("wake_word", "hey alfred")
             conf = float(envelope.payload.get("confidence", 1.0))
-            logger.info(f"[VOICE] Wake word detected: '{wake_word}' (conf={conf:.2f}) from '{session.client_id}'")
+            logger.info(f"[VOICE] Wake word detected: '{wake_word}' (conf={conf:.2f}, ptt={is_explicit_ptt}) from '{session.client_id}'")
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.VOICE,
@@ -226,6 +398,7 @@ class MessageRouter:
                     "confidence": conf,
                     "state": "LISTENING",
                     "source": session.client_id,
+                    "trigger": envelope.payload.get("trigger", "push_to_talk" if is_explicit_ptt else "acoustic"),
                 },
             )
             await self.manager.broadcast(broadcast_envelope)
@@ -257,9 +430,12 @@ class MessageRouter:
                 response_text = f"Acknowledged: {command_text}"
                 markdown_body = response_text
                 hud_cards = []
+                specialist_actions: list[Any] = []
                 fast_path = False
                 intent = "CONVERSE"
                 latency_ms = 0.0
+                navigate_to: Optional[str] = None
+                resolved_advisory_ids: list[str] = []
 
                 try:
                     target_url = f"{AGENT_SERVICE_URL}/query"
@@ -299,6 +475,7 @@ class MessageRouter:
                             intent = data.get("plan_type", "CONVERSE")
                             latency_ms = data.get("latency_ms", 0.0)
                             navigate_to = data.get("navigate_to")
+                            resolved_advisory_ids = data.get("resolved_advisory_ids", [])
                         else:
                             logger.error(f"[VOICE] Agent returned HTTP {agent_res.status_code}: {agent_res.text}")
                             response_text = "I apologize, sir, but an error occurred within the cognitive swarm."
@@ -347,6 +524,21 @@ class MessageRouter:
                 )
                 await self.manager.broadcast(response_envelope)
 
+                # 3b. Proactive Advisory Resolution Broadcast (if voice resolved any advisories)
+                if resolved_advisory_ids:
+                    resolve_envelope = ServerEnvelope(
+                        uuid=envelope.uuid,
+                        channel=Channel.SYSTEM,
+                        type=EventType.PROACTIVE_RESOLVE,
+                        payload={
+                            "action_ids": resolved_advisory_ids,
+                            "resolution": "resolved",
+                            "source": "voice",
+                        },
+                    )
+                    await self.manager.broadcast(resolve_envelope)
+                    logger.info(f"[VOICE] Broadcast PROACTIVE_RESOLVE for advisory IDs: {resolved_advisory_ids}")
+
                 # 4. Agent Speaking Broadcast
                 speaking_envelope = ServerEnvelope(
                     uuid=envelope.uuid,
@@ -360,8 +552,13 @@ class MessageRouter:
                 )
                 await self.manager.broadcast(speaking_envelope)
 
-                # Maintain SPEAKING status briefly for UI visualizer animation
-                await asyncio.sleep(1.5)
+                # Estimate TTS speech duration (~150 WPM / 2.5 words per second)
+                # plus a 5-second linger buffer so the user has time to read the HUD card
+                word_count = len(response_text.split()) if response_text else 0
+                speech_seconds = max(3.0, word_count / 2.5)
+                hud_linger_wait = speech_seconds + 5.0
+                logger.debug(f"[VOICE] Estimated speech: {speech_seconds:.1f}s ({word_count} words) + 5s linger = {hud_linger_wait:.1f}s total")
+                await asyncio.sleep(hud_linger_wait)
 
                 # 5. Agent Idle Broadcast -> State transitions back to IDLE
                 idle_envelope = ServerEnvelope(
@@ -520,7 +717,15 @@ class MessageRouter:
                 uuid=envelope.uuid,
                 channel=Channel.VOICE,
                 type=EventType.WAKE_WORD_STATE,
-                payload={"wakeword_active": new_ww, "toggle": True, "source": f"GESTURE:{gesture}"},
+                payload={
+                    "wakeword_active": new_ww,
+                    "active": new_ww,
+                    "enabled": new_ww,
+                    "is_armed": new_ww,
+                    "action": "resume" if new_ww else "pause",
+                    "toggle": True,
+                    "source": f"GESTURE:{gesture}",
+                },
             )
             await self.manager.broadcast(ww_envelope)
 
@@ -847,7 +1052,32 @@ class MessageRouter:
 
         elif event_type == EventType.DEVICE_HEARTBEAT:
             dev_id = payload.get("device_id", session.client_id)
-            await sync_manager.record_heartbeat(dev_id)
+            battery_level = payload.get("battery_level")
+            is_charging = payload.get("is_charging")
+            ip_address = payload.get("ip_address")
+            device_name = payload.get("device_name")
+            await sync_manager.record_heartbeat(
+                dev_id,
+                battery_level=battery_level,
+                is_charging=is_charging,
+                ip_address=ip_address,
+                device_name=device_name,
+            )
+            # Re-broadcast device heartbeat across SYNC channel so desktop and mobile dashboards stay real-time
+            heartbeat_env = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.SYNC,
+                type=EventType.DEVICE_HEARTBEAT,
+                payload={
+                    "device_id": dev_id,
+                    "device_name": device_name,
+                    "battery_level": battery_level,
+                    "is_charging": is_charging,
+                    "ip_address": ip_address,
+                    "last_heartbeat": time.time(),
+                },
+            )
+            await self.manager.broadcast(heartbeat_env)
 
         elif event_type == EventType.STATE_SYNC:
             diff = payload.get("diff", payload)

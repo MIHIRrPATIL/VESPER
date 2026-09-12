@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import time
 from typing import Any, Dict, Optional
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from backend.vision.gesture_service import _control_media_player
@@ -126,12 +126,34 @@ async def get_now_playing() -> Dict[str, Any]:
 
 
 @router.post("/control")
-async def control_playback(req: MediaControlRequest) -> Dict[str, Any]:
+async def control_playback(req: MediaControlRequest, request: Request) -> Dict[str, Any]:
     """Executes media control action (play-pause, next, previous) and returns updated state."""
     action = req.action.lower().strip()
-    if action in ("play-pause", "toggle", "play", "pause", "next", "previous"):
-        _control_media_player(action)
-        # Brief pause for player to register state change
+    if action in ("play-pause", "toggle", "play", "pause", "next", "previous", "prev"):
+        _control_media_player(action, is_gesture=False)
         time.sleep(0.15)
 
-    return _fetch_mpris_now_playing()
+    track_info = _fetch_mpris_now_playing()
+
+    try:
+        from backend.sync.sync_manager import sync_manager
+        await sync_manager.update_state({"current_media": track_info}, source_device_id="media_endpoint")
+    except Exception:
+        pass
+
+    try:
+        conn_mgr = getattr(request.app.state, "connection_manager", None)
+        if conn_mgr is not None:
+            from backend.shared.events import Channel, EventType, ServerEnvelope
+            import uuid
+            env = ServerEnvelope(
+                uuid=str(uuid.uuid4()),
+                channel=Channel.SYSTEM,
+                type=EventType.MEDIA_CONTROL,
+                payload=track_info,
+            )
+            await conn_mgr.broadcast(env)
+    except Exception:
+        pass
+
+    return track_info

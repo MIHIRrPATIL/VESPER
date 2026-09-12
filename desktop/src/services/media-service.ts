@@ -48,6 +48,17 @@ class MediaService {
     return this.currentTrack;
   }
 
+  public updateFromTrack(track: Partial<NowPlayingTrack>): void {
+    if (!track) return;
+    this.currentTrack = {
+      ...this.currentTrack,
+      ...track,
+      is_playing: typeof track.is_playing === 'boolean' ? track.is_playing : this.currentTrack.is_playing,
+      status: track.status || (track.is_playing ? 'Playing' : 'Paused'),
+    };
+    this.notify();
+  }
+
   public async fetchNowPlaying(): Promise<void> {
     if (this.isUpdating) return;
     try {

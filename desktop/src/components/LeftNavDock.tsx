@@ -1,5 +1,5 @@
 import React from 'react';
-import { Mic, Eye, Moon, Volume2, VolumeX } from 'lucide-react';
+import { Mic, Eye, Moon, Volume2, VolumeX, Square } from 'lucide-react';
 import { Dock, DockIcon, DockItem, DockLabel } from './ui/dock';
 import { cn } from '../lib/utils';
 
@@ -12,6 +12,8 @@ interface LeftNavDockProps {
   onToggleWakeWord: () => void;
   isCameraActive: boolean;
   onToggleCamera: () => void;
+  isProcessing?: boolean;
+  onInterrupt?: () => void;
 }
 
 export const LeftNavDock: React.FC<LeftNavDockProps> = ({
@@ -23,10 +25,26 @@ export const LeftNavDock: React.FC<LeftNavDockProps> = ({
   onToggleWakeWord,
   isCameraActive,
   onToggleCamera,
+  isProcessing = false,
+  onInterrupt,
 }) => {
   return (
     <aside className="left-nav-dock-container" aria-label="Primary Navigation">
       <Dock magnification={48} distance={75} panelWidth={58}>
+        {/* Interrupt / Emergency Stop Control - Only accessible during active query processing */}
+        {isProcessing && onInterrupt && (
+          <DockItem 
+            onClick={onInterrupt} 
+            ariaLabel="Interrupt Active Query"
+            className="rounded-[18px] p-2 transition-all cursor-pointer border bg-rose-500/20 text-rose-300 border-rose-500/40 hover:bg-rose-500/30 hover:border-rose-400 animate-pulse"
+          >
+            <DockLabel>Interrupt Query</DockLabel>
+            <DockIcon>
+              <Square size={18} fill="currentColor" strokeWidth={0} />
+            </DockIcon>
+          </DockItem>
+        )}
+
         {/* Voice Listening Control */}
         <DockItem 
           onClick={onToggleVoice} 
@@ -67,14 +85,14 @@ export const LeftNavDock: React.FC<LeftNavDockProps> = ({
           ariaLabel={isWakeWordArmed ? 'Wake Word: Armed' : 'Wake Word: Muted'}
           className={cn(
             'rounded-[18px] p-2 transition-colors cursor-pointer border',
-            !isWakeWordArmed 
+            isWakeWordArmed 
               ? 'bg-white/[0.12] text-white border-white/20' 
               : 'bg-white/[0.04] text-[#E8E3DA]/60 border-transparent hover:border-white/10 hover:text-[#E8E3DA] hover:bg-white/[0.08]'
           )}
         >
           <DockLabel>{isWakeWordArmed ? 'Wake Word: Armed' : 'Wake Word: Muted'}</DockLabel>
           <DockIcon>
-            {!isWakeWordArmed ? <VolumeX size={20} strokeWidth={2} /> : <Volume2 size={20} strokeWidth={2} />}
+            {isWakeWordArmed ? <Volume2 size={20} strokeWidth={2} /> : <VolumeX size={20} strokeWidth={2} />}
           </DockIcon>
         </DockItem>
 

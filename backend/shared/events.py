@@ -72,6 +72,7 @@ class EventType(str, Enum):
     # System & Interruption
     SET_VOLUME = "SET_VOLUME"
     ZEN_MODE_STATE = "ZEN_MODE_STATE"
+    ZEN_TIMER_UPDATE = "ZEN_TIMER_UPDATE"
     FOCUS_MODE_STATE = "FOCUS_MODE_STATE"
     MEDIA_CONTROL = "MEDIA_CONTROL"
     INTERRUPT = "INTERRUPT"
@@ -80,12 +81,16 @@ class EventType(str, Enum):
     # Cross-Device State Synchronization
     DEVICE_REGISTER = "DEVICE_REGISTER"
     DEVICE_HEARTBEAT = "DEVICE_HEARTBEAT"
+    DEVICE_OFFLINE = "DEVICE_OFFLINE"
     STATE_SYNC = "STATE_SYNC"
     STATE_SNAPSHOT = "STATE_SNAPSHOT"
 
     # Status / Errors
     ERROR = "ERROR"
     STATUS_UPDATE = "STATUS_UPDATE"
+
+    # Proactive Advisory Resolution
+    PROACTIVE_RESOLVE = "PROACTIVE_RESOLVE"
 
 
 
