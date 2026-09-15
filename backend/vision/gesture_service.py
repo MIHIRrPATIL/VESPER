@@ -764,8 +764,8 @@ class GestureWorker:
                 top = result.gestures[0][0]
                 category = top.category_name
                 score = float(top.score)
-                # Rock On (ILoveYou with anatomical confirmation if landmarks present) or Open Palm held for 1.0s resumes gesture tracking
-                is_rock_on = (category == "ILoveYou" and score >= 0.80) and (hand_lms is None or self._is_rock_on_anatomy(hand_lms))
+                # Rock On (anatomical horns check or ILoveYou) or Open Palm held for 1.0s resumes gesture tracking
+                is_rock_on = (hand_lms is not None and self._is_rock_on_anatomy(hand_lms)) or (category == "ILoveYou" and score >= 0.80)
                 is_open_palm = (category == "Open_Palm" and score >= 0.70)
                 if is_rock_on or is_open_palm:
                     if self._toggle_gesture_start == 0.0:
@@ -1151,7 +1151,7 @@ class GestureWorker:
                 category = top_gesture.category_name
                 score = float(top_gesture.score)
 
-                is_rock_on = (category == "ILoveYou" and score >= 0.85) and (cur_lms is None or self._is_rock_on_anatomy(cur_lms))
+                is_rock_on = (cur_lms is not None and self._is_rock_on_anatomy(cur_lms)) or (category == "ILoveYou" and score >= 0.85)
                 if is_rock_on:
                     if now >= self._toggle_lockout_until and not is_hand_moving:
                         if self._toggle_gesture_start == 0.0:
@@ -1374,16 +1374,14 @@ class GestureWorker:
             elif gesture in ("SHAKA", "HANG_LOOSE", "AIR_TAP", "PINCH_TAP", "SELECT"):
                 logger.info(f"[GestureWorker] Dispatched touchless drawer/select action via {gesture}")
 
-            elif gesture in ("ROCK_ON", "GESTURE_LOCK") or gesture.startswith("GESTURE_TOGGLE"):
+            elif gesture in ("ROCK_ON", "GESTURE_LOCK", "TOGGLE_GESTURES", "GESTURE_TOGGLE") or gesture.startswith("GESTURE_TOGGLE"):
                 # Explicit state assignment prevents toggle flapping
                 if ":PAUSED" in gesture:
                     self.state.tracking_paused = True
                 elif ":RESUMED" in gesture:
                     self.state.tracking_paused = False
-                elif gesture.startswith("GESTURE_TOGGLE"):
-                    self.state.tracking_paused = not self.state.tracking_paused
                 else:
-                    return
+                    self.state.tracking_paused = not self.state.tracking_paused
                 status = "PAUSED" if self.state.tracking_paused else "RESUMED"
                 logger.info(f"[GestureWorker] Gesture tracking {status} via ROCK_ON")
 

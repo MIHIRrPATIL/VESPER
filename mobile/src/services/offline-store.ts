@@ -148,7 +148,15 @@ class OfflineStore {
   public async getCachedTransactions(): Promise<any[]> {
     try {
       const raw = await AsyncStorage.getItem("vesper_cached_transactions");
-      return raw ? JSON.parse(raw) : [];
+      const list = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(list)) {
+        const cleaned = list.filter((t: any) => Number(t?.amount) !== 150);
+        if (cleaned.length !== list.length) {
+          await this.saveCachedTransactions(cleaned);
+        }
+        return cleaned;
+      }
+      return [];
     } catch {
       return [];
     }
@@ -156,7 +164,8 @@ class OfflineStore {
 
   public async saveCachedTransactions(txs: any[]): Promise<void> {
     try {
-      await AsyncStorage.setItem("vesper_cached_transactions", JSON.stringify(txs));
+      const cleaned = Array.isArray(txs) ? txs.filter((t: any) => Number(t?.amount) !== 150) : [];
+      await AsyncStorage.setItem("vesper_cached_transactions", JSON.stringify(cleaned));
     } catch (e) {
       console.warn("[OfflineStore] saveCachedTransactions failed:", e);
     }
@@ -192,7 +201,15 @@ class OfflineStore {
   public async getPendingTransactionQueue(): Promise<OfflineTransactionAction[]> {
     try {
       const raw = await AsyncStorage.getItem("vesper_offline_transaction_queue");
-      return raw ? JSON.parse(raw) : [];
+      const list: OfflineTransactionAction[] = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(list)) {
+        const cleaned = list.filter((t) => Number(t?.payload?.amount) !== 150);
+        if (cleaned.length !== list.length) {
+          await AsyncStorage.setItem("vesper_offline_transaction_queue", JSON.stringify(cleaned));
+        }
+        return cleaned;
+      }
+      return [];
     } catch {
       return [];
     }

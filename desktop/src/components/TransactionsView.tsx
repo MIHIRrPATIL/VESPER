@@ -522,7 +522,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({ onSendUserMe
             <span className="font-mono text-2xl font-bold text-[#E8E3DA] tabular-nums">
               ₹{(overview?.bank_balance || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
             </span>
-            <span className="font-mono text-[10px] text-[#8E8A83]">Union Bank + SBI + Saraswat</span>
+            <span className="font-mono text-[10px] text-[#8E8A83]">Liquid Bank Accounts</span>
           </div>
 
           <div className="p-4 rounded-xl bg-[#141414]/90 border border-white/[0.08] flex flex-col gap-1 text-left">

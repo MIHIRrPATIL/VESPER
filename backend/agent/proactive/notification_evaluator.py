@@ -84,11 +84,36 @@ class NotificationEvaluator:
             staged = action_queue.stage_action(debt_action)
             return EvaluationResult(handled=True, staged_action=staged)
 
-        # 5. Check for OTP / 2FA code (Instant Ambient HUD, no staging)
+        # 5. Check for OTP / 2FA code (Instant Ambient HUD + Proactive TTS Speech)
         otp_code = self._try_extract_otp(notif)
         if otp_code:
-            logger.info(f"[NotificationEvaluator] Extracted ambient OTP: '{otp_code}' from {notif.title}")
-            return EvaluationResult(handled=True, reason="ambient_otp")
+            logger.info(f"[NotificationEvaluator] Extracted OTP: '{otp_code}' from {notif.title}")
+            source = self._clean_source_name(notif)
+            spaced_digits = " ".join(list(otp_code))
+            speech = f"Security code from {source}: {spaced_digits}."
+            action_id = f"act_otp_{int(time.time())}_{otp_code}"
+            staged_otp = StagedAction(
+                id=action_id,
+                domain="security",
+                action="display_otp",
+                params={
+                    "code": otp_code,
+                    "source": source,
+                    "title": notif.title,
+                    "raw_text": notif.text,
+                },
+                verbatim_text=f"OTP: {otp_code} ({source})",
+                speech_prompt=speech,
+                priority=NotificationPriority.URGENT,
+                raw_evidence={
+                    "otp": otp_code,
+                    "source": source,
+                    "raw_text": notif.text,
+                    "post_time": getattr(notif, "post_time", getattr(notif, "timestamp", time.time())),
+                },
+            )
+            staged = action_queue.stage_action(staged_otp)
+            return EvaluationResult(handled=True, staged_action=staged)
 
         # 5b. Group message triage rule:
         # If notification is from a group chat, only extract tasks if it specifically mentions the user ("Mihir").
@@ -219,25 +244,66 @@ class NotificationEvaluator:
 
         return False
 
-    def _try_parse_financial(self, notif: MobileNotification) -> Optional[StagedAction]:
-        """Deterministic regex parser for Indian bank debit/credit and UPI messages.
+    def _clean_source_name(self, notif: MobileNotification) -> str:
+        """Derives a human-friendly spoken sender name from notification headers."""
+        title = (notif.title or "").strip()
+        app = (notif.app_name or "").strip()
 
-        Enforces verbatim read-back and raw evidence storage.
+        # Check Indian bank/service sender headers like VK-HDFCBK, AD-SBIINB, JM-PAYTM, etc.
+        m = re.search(r"^[A-Za-z]{2}-([A-Za-z0-9]+)", title)
+        if m:
+            code = m.group(1).upper()
+            if "HDFC" in code: return "HDFC Bank"
+            if "ICICI" in code: return "ICICI Bank"
+            if "SBI" in code: return "State Bank of India"
+            if "AXIS" in code: return "Axis Bank"
+            if "KOTAK" in code: return "Kotak Bank"
+            if "PNB" in code: return "Punjab National Bank"
+            if "BOB" in code: return "Bank of Baroda"
+            if "PAYTM" in code: return "Paytm"
+            if "CRED" in code: return "CRED"
+            if "GPAY" in code: return "Google Pay"
+            if "PHONEPE" in code: return "PhonePe"
+            if "AMZN" in code or "AMAZON" in code: return "Amazon"
+            if "FLPKRT" in code: return "Flipkart"
+            if "SWIGGY" in code: return "Swiggy"
+            if "ZOMATO" in code: return "Zomato"
+            if "UBER" in code: return "Uber"
+            return code
+
+        if app and app not in ("App", "unknown", "Phone"):
+            return app
+        if title:
+            return title
+        return "Secure Service"
+
+    def _try_parse_financial(self, notif: MobileNotification) -> Optional[StagedAction]:
+        """Deterministic regex parser for Indian bank debit, credit, UPI, autopay, and SIP messages.
+
+        Enforces verbatim read-back and raw evidence storage for the Supabase ledger.
         """
         combined = f"{notif.title} {notif.text}"
         combined_lower = combined.lower()
 
-        # Check for debit or spent keywords
-        is_debit = any(w in combined_lower for w in [
-            "debited", "spent", "paid", "sent", "transferred", "txn of", "purchase of"
-        ])
-        if not is_debit:
+        # 1. Detect transaction intent (debit, credit, autopay, sip, emi, etc.)
+        debit_keywords = [
+            "debited", "spent", "paid", "sent", "transferred", "txn of", "purchase of",
+            "deducted", "autopay", "auto-debit", "auto debit", "sip", "emi", "withdrawn",
+            "payment of", "cleared for", "charged", "standing instruction"
+        ]
+        credit_keywords = [
+            "credited", "received", "refund", "salary", "cashback", "deposited", "reversed"
+        ]
+
+        is_debit = any(w in combined_lower for w in debit_keywords)
+        is_credit = any(w in combined_lower for w in credit_keywords)
+
+        if not is_debit and not is_credit:
             return None
 
-        # Extract Amount in INR (₹ or Rs or INR)
+        # 2. Extract Amount in INR (₹, Rs., Rs, INR)
         amt_match = re.search(r"(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d{1,2})?)", combined, re.IGNORECASE)
         if not amt_match:
-            # Fallback pattern: e.g. "for 1,850.00"
             amt_match = re.search(r"\b(?:amount|amt|for)\s+(?:rs\.?|inr|₹)?\s*([\d,]+(?:\.\d{1,2})?)", combined, re.IGNORECASE)
 
         if not amt_match:
@@ -252,34 +318,77 @@ class NotificationEvaluator:
         if amount <= 0:
             return None
 
-        # Extract merchant/payee
-        merchant = "Unknown Merchant"
-        merchant_match = re.search(
-            r"(?:at|to|vpa|info|towards)\s+([A-Za-z0-9\.\s\-_&]{2,30}?)(?:\s+on|\s+ref|\s+avl|\s+balance|\s+date|\.|$)",
-            combined,
-            re.IGNORECASE,
-        )
+        # 3. Classify transaction type, category, and label
+        source_name = self._clean_source_name(notif)
+        if "sip" in combined_lower or "mutual fund" in combined_lower:
+            tx_label = "SIP investment"
+            category = "Investment"
+            tx_type = "expense"
+        elif any(ap in combined_lower for ap in ["autopay", "auto-debit", "auto debit", "standing instruction"]):
+            tx_label = "autopay deduction"
+            category = "Subscription"
+            tx_type = "expense"
+        elif "emi" in combined_lower or "loan" in combined_lower:
+            tx_label = "EMI installment"
+            category = "EMI / Loans"
+            tx_type = "expense"
+        elif is_credit:
+            if "salary" in combined_lower:
+                tx_label = "salary credit"
+                category = "Salary"
+            elif "refund" in combined_lower:
+                tx_label = "refund credit"
+                category = "Refund"
+            elif "cashback" in combined_lower:
+                tx_label = "cashback"
+                category = "Cashback"
+            else:
+                tx_label = "credit"
+                category = "Income"
+            tx_type = "income"
+        else:
+            tx_label = "debit"
+            tx_type = "expense"
+
+        # 4. Extract merchant / payee / counterparty
+        merchant = source_name
+        if is_debit:
+            merchant_match = re.search(
+                r"(?:at|to|vpa|info|towards|paid to|sent to)\s+([A-Za-z0-9\.\s\-_&]{2,30}?)(?:\s+on|\s+ref|\s+avl|\s+balance|\s+date|\.|$)",
+                combined,
+                re.IGNORECASE,
+            )
+        else:
+            merchant_match = re.search(
+                r"(?:from|by|received from|credited by)\s+([A-Za-z0-9\.\s\-_&]{2,30}?)(?:\s+on|\s+ref|\s+avl|\s+balance|\s+date|\.|$)",
+                combined,
+                re.IGNORECASE,
+            )
+
         if merchant_match:
             candidate = merchant_match.group(1).strip()
-            if candidate and not any(w in candidate.lower() for w in ["your", "account", "a/c", "card"]):
+            if candidate and not any(w in candidate.lower() for w in ["your", "account", "a/c", "card", "vpa", "bank"]):
                 merchant = candidate
 
-        # Infer category
-        m_lower = merchant.lower()
-        if any(f in m_lower for f in ["swiggy", "zomato", "mcdonald", "starbucks", "domino", "restaurant", "cafe", "food"]):
-            category = "Dining"
-        elif any(u in m_lower for u in ["uber", "ola", "rapido", "metro", "fuel", "petrol", "shell"]):
-            category = "Transport"
-        elif any(s in m_lower for s in ["amazon", "flipkart", "myntra", "blinkit", "zepto", "instamart", "mart"]):
-            category = "Shopping"
-        else:
-            category = "General Expense"
+        # 5. Refine category for generic expenses if not already specialized
+        if category in ("General Expense", "Subscription"):
+            m_lower = f"{merchant} {combined}".lower()
+            if any(f in m_lower for f in ["swiggy", "zomato", "mcdonald", "starbucks", "domino", "restaurant", "cafe", "food"]):
+                category = "Dining"
+            elif any(u in m_lower for u in ["uber", "ola", "rapido", "metro", "fuel", "petrol", "shell"]):
+                category = "Transport"
+            elif any(s in m_lower for s in ["amazon", "flipkart", "myntra", "blinkit", "zepto", "instamart", "mart"]):
+                category = "Shopping"
+            elif any(b in m_lower for b in ["netflix", "spotify", "prime", "youtube", "hotstar", "apple", "google storage"]):
+                category = "Subscription"
+            elif any(e in m_lower for e in ["electricity", "bescom", "airtel", "jio", "vi", "broadband", "water"]):
+                category = "Utilities"
 
         action_id = f"act_fin_{int(time.time())}_{int(amount)}"
-        verbatim_text = f"INR {amount:,.2f} at {merchant}"
+        verbatim_text = f"Record {tx_label} of INR {amount:,.2f} for {merchant} to Ledger"
         speech_prompt = (
-            f"Sir, a debit of exactly {amount:,.2f} rupees at {merchant} was detected. "
-            f"Shall I log this under your {category} budget?"
+            f"Sir, a {tx_label} of exactly {amount:,.2f} rupees for {merchant} was detected. "
+            f"Shall I log this to your ledger under {category}?"
         )
 
         return StagedAction(
@@ -288,9 +397,10 @@ class NotificationEvaluator:
             action="log_transaction",
             params={
                 "amount": amount,
+                "type": tx_type,
+                "transaction_type": tx_type,
                 "category": category,
-                "description": f"Expense at {merchant}",
-                "transaction_type": "expense",
+                "description": f"{tx_label.title()} at {merchant}",
             },
             verbatim_text=verbatim_text,
             raw_evidence={
@@ -356,8 +466,16 @@ class NotificationEvaluator:
 
     def _try_extract_otp(self, notif: MobileNotification) -> Optional[str]:
         """Regex for OTP / verification codes to surface immediately on HUD."""
+        if getattr(notif, "otp_code", None):
+            return notif.otp_code
+
         combined = f"{notif.title} {notif.text}"
-        match = re.search(r"\b(?:otp|code|pin|verification)\b.*?\b(\d{4,8})\b", combined, re.IGNORECASE)
+        cleaned = re.sub(r"(?:rs\.?|inr|₹|\$)\s*[\d,]+(?:\.\d+)?", "", combined, flags=re.I)
+        match = re.search(r"\b(?:otp|secret code|verification code|security code)\b.*?\b(\d{4,8})\b", cleaned, re.IGNORECASE)
+        if not match:
+            match = re.search(r"\b(?:code|pin|verification)\b[^\w\d]*(?:is\s+)?(\d{4,8})\b", cleaned, re.IGNORECASE)
+        if not match:
+            match = re.search(r"\b(\d{4,8})\b.*?\b(?:is your (?:otp|verification|secret code)|for your account)\b", cleaned, re.IGNORECASE)
         if match:
             return match.group(1)
         return None

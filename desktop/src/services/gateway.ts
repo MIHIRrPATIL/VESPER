@@ -224,6 +224,13 @@ class GatewayClient {
     });
   }
 
+  public sendGesturesToggle(active?: boolean): boolean {
+    return this.send('GESTURE', 'GESTURE_TOGGLE', {
+      gesture: 'TOGGLE_GESTURES',
+      ...(active !== undefined ? { enabled: active } : { toggle: true }),
+    });
+  }
+
   private handleInboundEnvelope(envelope: VesperEnvelope): void {
     // Keepalive ping responder
     if (envelope.channel === 'CONTROL' && envelope.type === 'PING') {

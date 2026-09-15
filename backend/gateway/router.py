@@ -271,19 +271,20 @@ class MessageRouter:
                 except Exception as media_err:
                     logger.debug(f"[Router] Zen pause Spotify error: {media_err}")
 
-                # 2. Automatically start Pomodoro timer
                 timer_state["is_running"] = True
                 if "seconds_remaining" in payload and isinstance(payload["seconds_remaining"], int):
                     timer_state["seconds_remaining"] = payload["seconds_remaining"]
                 else:
                     timer_state["seconds_remaining"] = timer_state.get("sprint_minutes", 25) * 60
 
+                timer_state["ends_at"] = int(time.time() * 1000) + (timer_state["seconds_remaining"] * 1000)
                 timer_state["soundscape"] = payload.get("soundscape", "ocean")
                 timer_state["music_source"] = payload.get("music_source", "ambient")
                 diff["zen_timer"] = timer_state
             else:
                 # Exiting Zen Mode:
                 timer_state["is_running"] = False
+                timer_state["ends_at"] = None
                 timer_state["soundscape"] = "off"
                 diff["zen_timer"] = timer_state
 
@@ -316,24 +317,37 @@ class MessageRouter:
                 timer_state["is_running"] = True
                 if "seconds_remaining" in payload:
                     timer_state["seconds_remaining"] = int(payload["seconds_remaining"])
+                timer_state["ends_at"] = int(time.time() * 1000) + (timer_state["seconds_remaining"] * 1000)
             elif action == "pause":
                 timer_state["is_running"] = False
                 if "seconds_remaining" in payload:
                     timer_state["seconds_remaining"] = int(payload["seconds_remaining"])
+                timer_state["ends_at"] = None
             elif action == "reset":
                 timer_state["is_running"] = False
                 timer_state["seconds_remaining"] = timer_state.get("sprint_minutes", 25) * 60
+                timer_state["ends_at"] = None
             elif action == "preset":
                 mins = int(payload.get("minutes", 25))
                 timer_state["sprint_minutes"] = mins
                 timer_state["seconds_remaining"] = mins * 60
                 timer_state["is_running"] = True
+                timer_state["ends_at"] = int(time.time() * 1000) + (timer_state["seconds_remaining"] * 1000)
             elif action == "tick":
-                secs = int(payload.get("seconds_remaining", timer_state.get("seconds_remaining", 0)))
-                timer_state["seconds_remaining"] = max(0, secs)
-                if secs <= 0:
-                    timer_state["is_running"] = False
-                    timer_state["completed_sprints"] = timer_state.get("completed_sprints", 0) + 1
+                if timer_state.get("is_running") and timer_state.get("ends_at"):
+                    time_left = max(0, int(round((timer_state["ends_at"] - time.time() * 1000) / 1000)))
+                    timer_state["seconds_remaining"] = time_left
+                    if time_left <= 0:
+                        timer_state["is_running"] = False
+                        timer_state["ends_at"] = None
+                        timer_state["completed_sprints"] = timer_state.get("completed_sprints", 0) + 1
+                else:
+                    secs = int(payload.get("seconds_remaining", timer_state.get("seconds_remaining", 0)))
+                    timer_state["seconds_remaining"] = max(0, secs)
+                    if secs <= 0:
+                        timer_state["is_running"] = False
+                        timer_state["ends_at"] = None
+                        timer_state["completed_sprints"] = timer_state.get("completed_sprints", 0) + 1
             elif action == "soundscape":
                 soundscape = payload.get("soundscape", "ocean")
                 music_source = payload.get("music_source", "ambient" if soundscape != "spotify" else "spotify")
@@ -797,25 +811,27 @@ class MessageRouter:
             )
             await self.manager.broadcast(ww_envelope)
 
-        elif gesture in ("ROCK_ON", "GESTURE_LOCK", "TOGGLE_GESTURES") or gesture.startswith("GESTURE_TOGGLE"):
+        elif gesture in ("ROCK_ON", "GESTURE_LOCK", "TOGGLE_GESTURES", "GESTURE_TOGGLE") or gesture.startswith("GESTURE_TOGGLE"):
             # Toggle gesture tracking pause/lock via Rock On deliberate hold or explicit toggle
             cur_paused = getattr(self, "_gestures_paused", False)
-            if ":PAUSED" in gesture:
+            enabled_arg = payload.get("enabled")
+            if enabled_arg is not None:
+                new_paused = not bool(enabled_arg)
+            elif ":PAUSED" in gesture:
                 new_paused = True
             elif ":RESUMED" in gesture:
                 new_paused = False
-            elif gesture.startswith("GESTURE_TOGGLE"):
-                new_paused = not cur_paused
             else:
-                return
+                new_paused = not cur_paused
+
             self._gestures_paused = new_paused
             status_str = "PAUSED" if new_paused else "RESUMED"
-            logger.info(f"[GESTURE] Toggled gesture tracking via ROCK_ON -> {status_str}")
+            logger.info(f"[GESTURE] Toggled gesture tracking -> {status_str}")
             broadcast_envelope = ServerEnvelope(
                 uuid=envelope.uuid,
                 channel=Channel.GESTURE,
                 type=EventType.GESTURE_TOGGLE,
-                payload={"tracking_paused": new_paused, "status": status_str, "gesture": f"GESTURE_TOGGLE:{status_str}"},
+                payload={"tracking_paused": new_paused, "status": status_str, "gesture": f"GESTURE_TOGGLE:{status_str}", "enabled": not new_paused},
             )
             await self.manager.broadcast(broadcast_envelope)
 
@@ -1068,8 +1084,8 @@ class MessageRouter:
         )
         await self.manager.broadcast(hud_envelope)
 
-        # Trigger Proactive Agent VIP triage for HIGH/URGENT notifications
-        if notif.priority in ("URGENT", "HIGH"):
+        # Trigger Proactive Agent VIP triage for HIGH/URGENT alerts, financial transactions, and OTPs
+        if notif.priority in ("URGENT", "HIGH") or notif.otp_code or notif.category in ("FINANCIAL", "URGENT"):
             try:
                 from backend.agent.proactive_agent import proactive_agent
                 asyncio.create_task(proactive_agent.evaluate_notification(notif))

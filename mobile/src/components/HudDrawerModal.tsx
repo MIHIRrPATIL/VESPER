@@ -15,6 +15,7 @@ import {
 } from "react-native";
 import { theme } from "../styles/theme";
 import { workstationStore } from "../services/workstation-store";
+import { gatewayClient } from "../services/gateway";
 
 const { height: SCREEN_HEIGHT } = Dimensions.get("window");
 
@@ -149,6 +150,8 @@ const SpotifyRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) => {
 
   const playlist =
     data.playlist_name || data.playlist || (data.type === "spotify_playlist" ? data.name : null);
+  const station = data.station || (data.type === "spotify_radio" ? (data.station || data.title) : null);
+  const device = data.device || (data.device_name ? data.device_name : null);
 
   const trackUri =
     data.uri ||
@@ -176,66 +179,123 @@ const SpotifyRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) => {
     Linking.openURL(webUrl).catch(() => {});
   };
 
+  const handlePrevious = () => {
+    gatewayClient.sendMediaControl("previous");
+  };
+
   const handleTogglePlay = () => {
     setIsPlaying((prev) => !prev);
-    workstationStore.sendZenTimerAction("soundscape", { soundscape: "spotify", music_source: "spotify" });
+    gatewayClient.sendMediaControl("play-pause");
+  };
+
+  const handleNext = () => {
+    gatewayClient.sendMediaControl("next");
   };
 
   return (
     <View style={styles.cardDetailCol}>
-      {playlist && (
+      {/* Context Badges */}
+      {(playlist || station || device) && (
         <View style={styles.tagPillRow}>
-          <View style={styles.playlistPill}>
-            <Text style={styles.playlistPillText}>PLAYLIST // {String(playlist).toUpperCase()}</Text>
-          </View>
+          {playlist && (
+            <View style={styles.playlistPill}>
+              <Text style={styles.playlistPillText}>PLAYLIST // {String(playlist).toUpperCase()}</Text>
+            </View>
+          )}
+          {station && (
+            <View style={styles.playlistPill}>
+              <Text style={styles.playlistPillText}>RADIO // {String(station).toUpperCase()}</Text>
+            </View>
+          )}
+          {device && (
+            <View style={styles.devicePill}>
+              <Text style={styles.devicePillText}>DEVICE // {String(device).toUpperCase()}</Text>
+            </View>
+          )}
         </View>
       )}
 
-      {/* Main Track Row with Album Art */}
-      <View style={styles.spotifyTrackRow}>
-        <TouchableOpacity
-          style={styles.spotifyAlbumArtBox}
-          onPress={handleOpenInSpotify}
-          activeOpacity={0.8}
-        >
-          {artUrl ? (
-            <Image
-              source={{ uri: artUrl }}
-              style={styles.spotifyAlbumCoverImage}
-              resizeMode="cover"
-            />
-          ) : (
-            <View style={styles.spotifyVinylCircle}>
-              <View style={styles.spotifyVinylHole} />
+      {/* Symmetrical Vinyl Stage */}
+      <View style={styles.spotifyVinylShowcase}>
+        <View style={styles.spotifyVinylStage}>
+          {/* Popping Vinyl Disc with Concentric Grooves */}
+          <View style={styles.spotifyVinylDisc}>
+            <View style={[styles.spotifyVinylRing, styles.ring1]} />
+            <View style={[styles.spotifyVinylRing, styles.ring2]} />
+            <View style={[styles.spotifyVinylRing, styles.ring3]} />
+            <View style={[styles.spotifyVinylRing, styles.ring4]} />
+            <View style={styles.spotifyVinylCenterLabel}>
+              {artUrl ? (
+                <Image
+                  source={{ uri: artUrl }}
+                  style={styles.spotifyVinylCenterArt}
+                  resizeMode="cover"
+                />
+              ) : (
+                <Text style={styles.spotifyVinylCenterGlyph}>●</Text>
+              )}
+              <View style={styles.spotifyVinylSpindle} />
             </View>
-          )}
-          {isPlaying && (
-            <View style={styles.pulseEqBars}>
-              <View style={[styles.eqBar, styles.eqBar1]} />
-              <View style={[styles.eqBar, styles.eqBar2]} />
-              <View style={[styles.eqBar, styles.eqBar3]} />
-            </View>
-          )}
-        </TouchableOpacity>
-
-        <View style={styles.spotifyMetaCol}>
-          <View style={styles.spotifyStatusBadge}>
-            <Text style={styles.spotifyStatusText}>{isPlaying ? "NOW PLAYING" : "PAUSED"}</Text>
           </View>
-          <TouchableOpacity onPress={handleOpenInSpotify} activeOpacity={0.7}>
-            <Text style={styles.spotifyTrackTitle} numberOfLines={1}>{track}</Text>
+
+          {/* Front Sleeve Jacket */}
+          <TouchableOpacity
+            style={styles.spotifySleeveJacket}
+            onPress={handleOpenInSpotify}
+            activeOpacity={0.85}
+          >
+            {artUrl ? (
+              <Image
+                source={{ uri: artUrl }}
+                style={styles.spotifyAlbumCoverImage}
+                resizeMode="cover"
+              />
+            ) : (
+              <View style={styles.spotifyFallbackJacket}>
+                <Text style={styles.spotifyFallbackGlyph}>♫</Text>
+                <Text style={styles.spotifyFallbackText}>VESPER AUDIO</Text>
+              </View>
+            )}
+
+            {/* Equalizer Pulse Indicator on Jacket */}
+            {isPlaying && (
+              <View style={styles.pulseEqBars}>
+                <View style={[styles.eqBar, styles.eqBar1]} />
+                <View style={[styles.eqBar, styles.eqBar2]} />
+                <View style={[styles.eqBar, styles.eqBar3]} />
+              </View>
+            )}
           </TouchableOpacity>
-          <Text style={styles.spotifyArtistText} numberOfLines={1}>{artist}</Text>
-          {album && <Text style={styles.spotifyAlbumText} numberOfLines={1}>Disc // {album}</Text>}
         </View>
       </View>
 
-      {/* Playback Controls & Open in Native Spotify App */}
+      {/* Centered Track Metadata */}
+      <View style={styles.spotifyCenteredMeta}>
+        <View style={styles.spotifyStatusBadge}>
+          <Text style={styles.spotifyStatusText}>{isPlaying ? "NOW PLAYING" : "PAUSED"}</Text>
+        </View>
+        <TouchableOpacity onPress={handleOpenInSpotify} activeOpacity={0.7}>
+          <Text style={styles.spotifyLargeTrackTitle} numberOfLines={1}>
+            {track}
+          </Text>
+        </TouchableOpacity>
+        <Text style={styles.spotifyMediumArtist} numberOfLines={1}>
+          {artist}
+        </Text>
+        {album ? (
+          <Text style={styles.spotifyMonoAlbum} numberOfLines={1}>
+            DISC // {album}
+          </Text>
+        ) : null}
+      </View>
+
+      {/* MPRIS Playback Controls & Native Spotify App Launch */}
       <View style={styles.spotifyControlsRow}>
         <View style={styles.spotifyControlGroup}>
           <TouchableOpacity
             style={styles.spotifyCtrlBtn}
-            onPress={() => workstationStore.sendZenTimerAction("soundscape", { soundscape: "ocean" })}
+            onPress={handlePrevious}
+            activeOpacity={0.7}
           >
             <Text style={styles.spotifyCtrlGlyph}>|‹</Text>
           </TouchableOpacity>
@@ -243,13 +303,15 @@ const SpotifyRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) => {
           <TouchableOpacity
             style={[styles.spotifyCtrlBtn, styles.spotifyCtrlBtnActive]}
             onPress={handleTogglePlay}
+            activeOpacity={0.7}
           >
-            <Text style={styles.spotifyCtrlGlyphActive}>{isPlaying ? "||" : ">"}</Text>
+            <Text style={styles.spotifyCtrlGlyphActive}>{isPlaying ? "||" : "▶"}</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
             style={styles.spotifyCtrlBtn}
-            onPress={() => workstationStore.sendZenTimerAction("soundscape", { soundscape: "ambient" })}
+            onPress={handleNext}
+            activeOpacity={0.7}
           >
             <Text style={styles.spotifyCtrlGlyph}>›|</Text>
           </TouchableOpacity>
@@ -399,7 +461,8 @@ const TransactionRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) 
   if (isSummaryCard) {
     const netWorth = Number(data.total_net_worth || 0);
     const accounts: any[] = Array.isArray(data.accounts) ? data.accounts : [];
-    const recentTxns: any[] = Array.isArray(data.recent_transactions) ? data.recent_transactions : [];
+    const recentTxns: any[] = (Array.isArray(data.recent_transactions) ? data.recent_transactions : [])
+      .filter((t: any) => Number(t?.amount) !== 150);
 
     return (
       <View style={styles.cardDetailCol}>
@@ -1444,23 +1507,32 @@ const ToolCallRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) => 
         <Text style={styles.toolSignatureText}>{toolName}</Text>
       </View>
 
-      {args && (
+      {args && typeof args === "object" && Object.keys(args).length > 0 && (
         <View style={styles.sectionCol}>
-          <Text style={styles.sectionHeaderLabel}>EXECUTION PARAMETERS</Text>
-          <View style={styles.toolParamsWell}>
-            <Text selectable={true} style={styles.codeText}>
-              {typeof args === "object" ? JSON.stringify(args, null, 2) : String(args)}
-            </Text>
+          <Text style={styles.sectionHeaderLabel}>INVOCATION PARAMETERS</Text>
+          <View style={styles.paramGrid}>
+            {Object.entries(args).map(([k, v]) => (
+              <View key={k} style={styles.paramChip}>
+                <Text style={styles.paramChipKey}>{k.replace(/_/g, " ").toUpperCase()}</Text>
+                <Text style={styles.paramChipVal} numberOfLines={2}>
+                  {typeof v === "object" && v !== null
+                    ? ((v as Record<string, any>).name || (v as Record<string, any>).title || (v as Record<string, any>).id || Object.values(v as Record<string, any>).slice(0, 2).join(", "))
+                    : String(v)}
+                </Text>
+              </View>
+            ))}
           </View>
         </View>
       )}
 
       {Boolean(result) && (
         <View style={styles.sectionCol}>
-          <Text style={styles.sectionHeaderLabel}>RETURN TELEMETRY</Text>
+          <Text style={styles.sectionHeaderLabel}>EXECUTION RESULT</Text>
           <View style={styles.readingWell}>
             <Text style={styles.readingWellText}>
-              {typeof result === "object" ? JSON.stringify(result, null, 2) : String(result)}
+              {typeof result === "string"
+                ? result
+                : (result.speech_summary || result.summary || result.message || result.text || "Execution completed successfully.")}
             </Text>
           </View>
         </View>
@@ -1649,65 +1721,57 @@ const RecipeRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) => {
 // ── 24. Aerospace Structured Telemetry Inspector (Universal Fallback) ───────
 const TelemetryInspectorRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) => {
   const metaKeys = ["id", "type", "title", "subtitle", "timestamp", "intent"];
-  const rawKeys = Object.keys(data).filter((k) => !metaKeys.includes(k));
+  const narrative =
+    data.text ||
+    data.summary ||
+    data.response ||
+    data.briefing ||
+    data.message ||
+    data.markdown_body ||
+    data.markdown ||
+    data.answer ||
+    data.description ||
+    data.content;
+
+  const rawKeys = Object.keys(data).filter(
+    (k) =>
+      !metaKeys.includes(k) &&
+      !["text", "summary", "response", "briefing", "message", "markdown_body", "markdown", "answer", "description", "content"].includes(k)
+  );
 
   return (
     <View style={styles.cardDetailCol}>
+      {/* Executive Narrative / Briefing Body */}
+      {narrative ? (
+        <View style={styles.executiveNarrativeWell}>
+          <Text style={styles.executiveNarrativeText}>{String(narrative)}</Text>
+        </View>
+      ) : null}
+
+      {/* Structured Metric Chips */}
       {rawKeys.length > 0 ? (
-        <View style={styles.inspectorGrid}>
-          {rawKeys.map((key) => {
+        <View style={styles.paramGrid}>
+          {rawKeys.slice(0, 10).map((key) => {
             const val = data[key];
-            const isPrimitive = typeof val !== "object" || val === null;
+            let displayVal = "";
+            if (val === null || val === undefined) displayVal = "--";
+            else if (typeof val !== "object") displayVal = String(val);
+            else if (Array.isArray(val)) displayVal = `${val.length} items`;
+            else displayVal = val.name || val.title || val.status || val.id || "[Details Available]";
 
-            if (isPrimitive) {
-              return (
-                <View key={key} style={styles.inspectorSpecRow}>
-                  <Text style={styles.inspectorSpecKey}>{key.replace(/_/g, " ").toUpperCase()}</Text>
-                  <Text style={styles.inspectorSpecVal} numberOfLines={2}>{String(val)}</Text>
-                </View>
-              );
-            }
-
-            if (Array.isArray(val)) {
-              return (
-                <View key={key} style={styles.inspectorArrayBox}>
-                  <Text style={styles.inspectorSpecKey}>{key.replace(/_/g, " ").toUpperCase()} ({val.length})</Text>
-                  <View style={styles.sourcesChipRow}>
-                    {val.slice(0, 8).map((item, idx) => (
-                      <View key={idx} style={styles.sourceChip}>
-                        <Text style={styles.sourceChipText} numberOfLines={1}>
-                          {typeof item === "object" ? (item.name || item.title || item.id || `Item ${idx + 1}`) : String(item)}
-                        </Text>
-                      </View>
-                    ))}
-                  </View>
-                </View>
-              );
-            }
-
-            // Sub-object card
             return (
-              <View key={key} style={styles.inspectorSubCard}>
-                <Text style={styles.inspectorSpecKey}>{key.replace(/_/g, " ").toUpperCase()}</Text>
-                <View style={styles.inspectorSubCardInner}>
-                  {Object.keys(val).slice(0, 6).map((subKey) => (
-                    <View key={subKey} style={styles.inspectorSubRow}>
-                      <Text style={styles.inspectorSubKey}>{subKey}:</Text>
-                      <Text style={styles.inspectorSubVal} numberOfLines={1}>
-                        {typeof val[subKey] === "object" ? "[Object]" : String(val[subKey])}
-                      </Text>
-                    </View>
-                  ))}
-                </View>
+              <View key={key} style={styles.paramChip}>
+                <Text style={styles.paramChipKey}>{key.replace(/_/g, " ").toUpperCase()}</Text>
+                <Text style={styles.paramChipVal} numberOfLines={2}>{displayVal}</Text>
               </View>
             );
           })}
         </View>
-      ) : (
+      ) : !narrative ? (
         <View style={styles.readingWell}>
-          <Text style={styles.readingWellText}>Operational specialist telemetry captured without parameters.</Text>
+          <Text style={styles.readingWellText}>Operational specialist telemetry captured without extra parameters.</Text>
         </View>
-      )}
+      ) : null}
     </View>
   );
 };
@@ -1785,9 +1849,15 @@ export const HudDrawerModal: React.FC<HudDrawerModalProps> = ({
   } else if (primaryType === "youtube" || primaryType === "video" || primaryType.includes("video")) {
     deckTitle = "YOUTUBE MEDIA RUNTIME";
     deckSubtitle = "Connected video streaming & media playback telemetry";
-  } else if (primaryType === "spotify" || primaryType === "media" || primaryType === "spotify_playlist") {
-    deckTitle = "MEDIA & SOUNDSCAPE";
-    deckSubtitle = "Connected Spotify audio & acoustic backdrop";
+  } else if (
+    primaryType.includes("spotify") ||
+    primaryType.includes("media") ||
+    primaryType.includes("music") ||
+    primaryType === "now_playing" ||
+    primaryType === "playback"
+  ) {
+    deckTitle = "SPOTIFY & VINYL ENGINE";
+    deckSubtitle = "Active MPRIS media controls & live audio telemetry";
   } else if (primaryType.startsWith("email") || primaryType === "inbox" || primaryType === "draft") {
     deckTitle = "COMMUNICATIONS & INBOX";
     deckSubtitle = "Synchronized email correspondence & draft parameters";
@@ -1827,7 +1897,15 @@ export const HudDrawerModal: React.FC<HudDrawerModalProps> = ({
     if (type === "youtube" || type === "video" || type.includes("video")) return <YoutubeRenderer data={cData} />;
 
     // 3. Spotify & Media
-    if (type === "spotify" || type === "media" || type === "spotify_playlist") return <SpotifyRenderer data={cData} />;
+    if (
+      type.includes("spotify") ||
+      type.includes("media") ||
+      type.includes("music") ||
+      type === "now_playing" ||
+      type === "playback"
+    ) {
+      return <SpotifyRenderer data={cData} />;
+    }
 
     // 4. Finance Suite
     if (type === "bill_split" || type === "bill_split_card") return <BillSplitRenderer data={cData} />;
@@ -2374,140 +2452,225 @@ const styles = StyleSheet.create({
   },
 
   // ── Spotify Specific Styles ──
-  spotifyTrackRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  spotifyAlbumArtBox: {
-    width: 60,
-    height: 60,
-    borderRadius: 12,
-    backgroundColor: "#1C1C1C",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.10)",
+  spotifyVinylShowcase: {
     alignItems: "center",
     justifyContent: "center",
+    paddingVertical: 10,
+  },
+  spotifyVinylStage: {
+    width: 220,
+    height: 140,
     position: "relative",
-  },
-  spotifyVinylCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    borderWidth: 2,
-    borderColor: "rgba(255, 255, 255, 0.2)",
     alignItems: "center",
     justifyContent: "center",
   },
-  spotifyVinylHole: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: "#161616",
+  spotifyVinylDisc: {
+    position: "absolute",
+    right: 15,
+    width: 130,
+    height: 130,
+    borderRadius: 65,
+    backgroundColor: "#0d0d0d",
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.3)",
+    borderColor: "rgba(255, 255, 255, 0.14)",
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 4,
+  },
+  spotifyVinylRing: {
+    position: "absolute",
+    borderRadius: 9999,
+    borderWidth: 1,
+  },
+  ring1: { inset: 5, borderColor: "rgba(255, 255, 255, 0.08)" },
+  ring2: { inset: 12, borderColor: "rgba(255, 255, 255, 0.04)" },
+  ring3: { inset: 20, borderColor: "rgba(255, 255, 255, 0.08)" },
+  ring4: { inset: 28, borderColor: "rgba(255, 255, 255, 0.04)" },
+  spotifyVinylCenterLabel: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    overflow: "hidden",
+    backgroundColor: "#181818",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.20)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  spotifyVinylCenterArt: {
+    width: "100%",
+    height: "100%",
+  },
+  spotifyVinylCenterGlyph: {
+    fontFamily: theme.fonts.mono,
+    fontSize: 16,
+    color: theme.colors.textMuted,
+  },
+  spotifyVinylSpindle: {
+    position: "absolute",
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "#0a0a0a",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.35)",
+  },
+  spotifySleeveJacket: {
+    position: "absolute",
+    left: 15,
+    width: 130,
+    height: 130,
+    borderRadius: 10,
+    overflow: "hidden",
+    backgroundColor: "#181818",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.14)",
+    elevation: 6,
+  },
+  spotifyAlbumCoverImage: {
+    width: "100%",
+    height: "100%",
+    borderRadius: 9,
+  },
+  spotifyFallbackJacket: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#141414",
+    padding: 8,
+  },
+  spotifyFallbackGlyph: {
+    fontSize: 28,
+    color: theme.colors.textMuted,
+    marginBottom: 4,
+  },
+  spotifyFallbackText: {
+    fontFamily: theme.fonts.mono,
+    fontSize: 9,
+    letterSpacing: 1,
+    color: theme.colors.textMuted,
   },
   pulseEqBars: {
     position: "absolute",
-    bottom: 5,
-    right: 5,
+    bottom: 6,
+    right: 6,
     flexDirection: "row",
     alignItems: "flex-end",
     gap: 2,
-    backgroundColor: "rgba(0,0,0,0.6)",
-    paddingHorizontal: 3,
-    paddingVertical: 2,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    paddingHorizontal: 4,
+    paddingVertical: 3,
     borderRadius: 3,
   },
   eqBar: {
-    width: 2,
+    width: 2.5,
     backgroundColor: theme.colors.emerald,
     borderRadius: 1,
   },
-  eqBar1: { height: 8 },
-  eqBar2: { height: 12 },
-  eqBar3: { height: 6 },
-  spotifyMetaCol: {
-    flex: 1,
-    gap: 2,
+  eqBar1: { height: 9 },
+  eqBar2: { height: 14 },
+  eqBar3: { height: 7 },
+  spotifyCenteredMeta: {
+    alignItems: "center",
+    gap: 3,
+    paddingVertical: 4,
   },
   spotifyStatusBadge: {
-    alignSelf: "flex-start",
     backgroundColor: "rgba(16, 185, 129, 0.10)",
     borderWidth: 1,
     borderColor: "rgba(16, 185, 129, 0.25)",
-    paddingHorizontal: 6,
-    paddingVertical: 1,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
     borderRadius: 4,
     marginBottom: 2,
   },
   spotifyStatusText: {
     fontFamily: theme.fonts.mono,
-    fontSize: 8,
+    fontSize: 8.5,
     color: theme.colors.emerald,
     fontWeight: "700",
-    letterSpacing: 0.5,
+    letterSpacing: 0.6,
   },
-  spotifyTrackTitle: {
+  spotifyLargeTrackTitle: {
     fontFamily: theme.fonts.sans,
-    fontSize: 15,
+    fontSize: 17,
     fontWeight: "700",
     color: theme.colors.boneWhite,
+    textAlign: "center",
   },
-  spotifyArtistText: {
+  spotifyMediumArtist: {
     fontFamily: theme.fonts.sans,
-    fontSize: 12,
+    fontSize: 13.5,
+    fontWeight: "500",
     color: theme.colors.textSecondary,
+    textAlign: "center",
   },
-  spotifyAlbumText: {
+  spotifyMonoAlbum: {
     fontFamily: theme.fonts.mono,
-    fontSize: 10,
+    fontSize: 10.5,
     color: theme.colors.textMuted,
+    textAlign: "center",
+    marginTop: 2,
+  },
+  devicePill: {
+    backgroundColor: "rgba(255, 255, 255, 0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  devicePillText: {
+    fontFamily: theme.fonts.mono,
+    fontSize: 8.5,
+    color: theme.colors.textMuted,
+    letterSpacing: 0.5,
   },
   spotifyControlsRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingTop: 8,
+    paddingTop: 10,
     borderTopWidth: 1,
-    borderTopColor: "rgba(255, 255, 255, 0.04)",
+    borderTopColor: "rgba(255, 255, 255, 0.05)",
+    marginTop: 4,
   },
   spotifyControlGroup: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    backgroundColor: "#1C1C1C",
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 10,
+    gap: 12,
+    backgroundColor: "#161616",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.06)",
+    borderColor: "rgba(255, 255, 255, 0.08)",
   },
   spotifyCtrlBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
   },
   spotifyCtrlBtnActive: {
-    backgroundColor: "rgba(255, 255, 255, 0.12)",
+    backgroundColor: "rgba(255, 255, 255, 0.10)",
+    borderRadius: 6,
   },
   spotifyCtrlGlyph: {
     fontFamily: theme.fonts.mono,
-    fontSize: 12,
+    fontSize: 13,
     color: theme.colors.textMuted,
   },
   spotifyCtrlGlyphActive: {
     fontFamily: theme.fonts.mono,
-    fontSize: 12,
+    fontSize: 13,
     color: theme.colors.boneWhite,
   },
   spotifyOpenBtn: {
     paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingVertical: 7,
     borderRadius: 6,
-    backgroundColor: "rgba(16, 185, 129, 0.12)",
+    backgroundColor: "rgba(16, 185, 129, 0.10)",
     borderWidth: 1,
-    borderColor: "rgba(16, 185, 129, 0.28)",
+    borderColor: "rgba(16, 185, 129, 0.25)",
   },
   spotifyOpenText: {
     fontFamily: theme.fonts.mono,
@@ -2516,10 +2679,46 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 0.6,
   },
-  spotifyAlbumCoverImage: {
-    width: "100%",
-    height: "100%",
-    borderRadius: 11,
+  paramGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  paramChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    backgroundColor: "#181818",
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.07)",
+    minWidth: "47%",
+    flex: 1,
+  },
+  paramChipKey: {
+    fontFamily: theme.fonts.mono,
+    fontSize: 8.5,
+    letterSpacing: 0.8,
+    color: theme.colors.textMuted,
+    marginBottom: 2,
+  },
+  paramChipVal: {
+    fontFamily: theme.fonts.sans,
+    fontSize: 12,
+    fontWeight: "600",
+    color: theme.colors.boneWhite,
+  },
+  executiveNarrativeWell: {
+    backgroundColor: "#181818",
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+  },
+  executiveNarrativeText: {
+    fontFamily: theme.fonts.sans,
+    fontSize: 13.5,
+    lineHeight: 20,
+    color: theme.colors.boneWhite,
   },
 
   // ── YouTube Video HUD Styles ──

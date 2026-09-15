@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   ScrollView,
   Image,
+  AppState,
 } from "react-native";
 import { theme } from "../styles/theme";
 import { workstationStore } from "../services/workstation-store";
@@ -39,7 +40,7 @@ export const ZenView: React.FC = () => {
   const [tasks, setTasks] = useState<ApiTask[]>([]);
   const [activeTask, setActiveTask] = useState<string>("Executive Focus Sprint");
 
-  // Sync with workstationStore
+  // Sync with workstationStore and AppState for sleep/wake drift immunity
   useEffect(() => {
     workstationStore.fetchNowPlaying();
     const unsub = workstationStore.subscribe(() => {
@@ -49,8 +50,22 @@ export const ZenView: React.FC = () => {
       setSoundscape(workstationStore.zenTimer.soundscape);
       setTrack(workstationStore.nowPlayingTrack);
     });
+
+    const appStateSub = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        workstationStore.recalculateZenTimer();
+        if (workstationStore.zenTimer.isRunning && workstationStore.zenTimer.endsAt) {
+          const rem = Math.max(0, Math.round((workstationStore.zenTimer.endsAt - Date.now()) / 1000));
+          setSecondsRemaining(rem);
+        }
+      }
+    });
+
     fetchTasks();
-    return () => unsub();
+    return () => {
+      unsub();
+      appStateSub.remove();
+    };
   }, []);
 
   // Poll Spotify track when in spotify mode
@@ -64,22 +79,30 @@ export const ZenView: React.FC = () => {
     }
   }, [soundscape]);
 
-  // Local tick while isRunning is true
+  // Epoch-anchored tick while isRunning is true
   useEffect(() => {
     let interval: any = null;
-    if (isRunning && secondsRemaining > 0) {
+    if (isRunning) {
       interval = setInterval(() => {
-        setSecondsRemaining((prev) => {
-          if (prev <= 1) {
+        if (workstationStore.zenTimer.endsAt) {
+          const rem = Math.max(0, Math.round((workstationStore.zenTimer.endsAt - Date.now()) / 1000));
+          setSecondsRemaining(rem);
+          if (rem <= 0) {
             workstationStore.sendZenTimerAction("tick", { seconds_remaining: 0 });
-            return 25 * 60;
           }
-          return prev - 1;
-        });
+        } else {
+          setSecondsRemaining((prev) => {
+            if (prev <= 1) {
+              workstationStore.sendZenTimerAction("tick", { seconds_remaining: 0 });
+              return 0;
+            }
+            return prev - 1;
+          });
+        }
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [isRunning, secondsRemaining]);
+  }, [isRunning]);
 
   const fetchTasks = async () => {
     try {

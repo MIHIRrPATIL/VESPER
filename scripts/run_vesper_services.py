@@ -531,6 +531,86 @@ class ServiceSupervisor:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 1.5 AMBIENT SOUNDSCAPE ENGINE (NATIVE HOST LOOPING FOR ZEN MODE)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AmbientSoundscapeManager:
+    """Manages host-level seamless looping ambient nature soundscapes during Zen Mode."""
+
+    def __init__(self, audio_dir: Path) -> None:
+        self.audio_dir = audio_dir
+        self._current_soundscape: str = "off"
+        self._process: Optional[subprocess.Popen] = None
+        self._volume: int = 65
+
+    @property
+    def current_soundscape(self) -> str:
+        return self._current_soundscape
+
+    def set_soundscape(self, soundscape_type: str, volume: Optional[int] = None) -> None:
+        soundscape = (soundscape_type or "off").lower().strip()
+        if volume is not None:
+            self._volume = max(0, min(100, volume))
+
+        if soundscape == self._current_soundscape and self._process and self._process.poll() is None:
+            return
+
+        self.stop()
+        self._current_soundscape = soundscape
+
+        if soundscape in ("off", "spotify", "none", ""):
+            return
+
+        file_map = {
+            "ocean": self.audio_dir / "ocean.mp3",
+            "rain": self.audio_dir / "rain.mp3",
+            "fireplace": self.audio_dir / "fireplace.mp3",
+        }
+        audio_file = file_map.get(soundscape)
+        if not audio_file or not audio_file.exists():
+            logger.warning(f"[AmbientSoundscape] Unknown or missing soundscape file for: {soundscape} ({audio_file})")
+            return
+
+        mpv_bin = shutil.which("mpv")
+        if not mpv_bin:
+            logger.warning("[AmbientSoundscape] 'mpv' binary not found on system PATH for ambient looping.")
+            return
+
+        cmd = [
+            mpv_bin,
+            "--no-video",
+            "--loop=inf",
+            "--really-quiet",
+            f"--volume={self._volume}",
+            "--title=vesper-ambient",
+            str(audio_file),
+        ]
+        try:
+            self._process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            logger.info(f"[AmbientSoundscape] Engaged loop '{soundscape}' via mpv (PID={self._process.pid}, vol={self._volume}%)")
+        except Exception as e:
+            logger.error(f"[AmbientSoundscape] Failed to launch soundscape loop: {e}")
+
+    def stop(self) -> None:
+        if self._process:
+            try:
+                self._process.terminate()
+                self._process.wait(timeout=1.5)
+            except Exception:
+                try:
+                    self._process.kill()
+                except Exception:
+                    pass
+            self._process = None
+        self._current_soundscape = "off"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 2. TERMINAL DESKTOP HUD & REPL CLIENT
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -543,6 +623,7 @@ class TerminalDesktopHUD:
         self.websocket: Optional[Any] = None
         self.session_id: Optional[str] = None
         self.is_running = True
+        self._ambient_manager = AmbientSoundscapeManager(PROJECT_ROOT / "desktop" / "public" / "audio")
         self._bg_tasks: List[asyncio.Task] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._receive_task: Optional[asyncio.Task] = None
@@ -718,6 +799,8 @@ class TerminalDesktopHUD:
     async def _receive_loop(self) -> None:
         """Asynchronously listens for server broadcasts and renders them to the console."""
         while self.is_running and self.is_connected:
+            if not self.websocket:
+                break
             try:
                 raw_msg = await self.websocket.recv()
                 data = json.loads(raw_msg)
@@ -829,7 +912,7 @@ class TerminalDesktopHUD:
         p = envelope.payload
 
         if envelope.type == EventType.WORKSTATION_COMMAND_REQ:
-            req_uuid = envelope.uuid or p.get("request_uuid")
+            req_uuid: str = str(envelope.uuid or p.get("request_uuid") or uuid.uuid4())
             cmd = p.get("command", "")
             params = p.get("params", {})
             res_payload = await self._execute_workstation_command(cmd, params)
@@ -910,7 +993,24 @@ class TerminalDesktopHUD:
 
         elif envelope.type == EventType.ZEN_MODE_STATE:
             zen = p.get("zen_mode", False)
-            console.print(f"\n[dim magenta][ZEN MODE] {'ACTIVATED' if zen else 'DEACTIVATED'}[/dim magenta]")
+            soundscape = p.get("soundscape") or p.get("timer", {}).get("soundscape", "ocean")
+            console.print(f"\n[dim magenta][ZEN MODE] {'ACTIVATED' if zen else 'DEACTIVATED'} (soundscape={soundscape})[/dim magenta]")
+            if zen:
+                self._ambient_manager.set_soundscape(soundscape)
+            else:
+                self._ambient_manager.stop()
+            sys.stdout.write("vesper> ")
+            sys.stdout.flush()
+
+        elif envelope.type == EventType.ZEN_TIMER_UPDATE:
+            action = p.get("action", "")
+            if action == "soundscape":
+                soundscape = p.get("soundscape") or p.get("timer", {}).get("soundscape", "off")
+                console.print(f"\n[dim magenta][ZEN SOUNDSCAPE] Switched to: {soundscape.upper()}[/dim magenta]")
+                self._ambient_manager.set_soundscape(soundscape)
+            elif action in ("reset", "pause") and p.get("is_running") is False and not p.get("soundscape"):
+                # If explicitly stopped
+                pass
             sys.stdout.write("vesper> ")
             sys.stdout.flush()
 
@@ -1142,6 +1242,15 @@ class TerminalDesktopHUD:
             body_text = speech or notif.get("text", "")
 
             # ── Telephony & Call Ducking Interceptor ─────────────────────────
+            is_backlog = bool(
+                p.get("is_backlog")
+                or p.get("is_offline_replay")
+                or notif.get("is_backlog")
+                or notif.get("is_offline_replay")
+            )
+            post_time = float(notif.get("post_time") or p.get("post_time") or 0.0)
+            is_stale_notification = post_time > 0 and (time.time() - post_time) > 8.0
+
             is_call = bool(p.get("is_call") or notif.get("is_call") or envelope.type == EventType.CALL_STATE)
             call_phase = p.get("call_phase") or notif.get("call_phase") or p.get("state") or p.get("phase")
 
@@ -1152,7 +1261,7 @@ class TerminalDesktopHUD:
                 if detected_phase:
                     call_phase = detected_phase
 
-            if is_call:
+            if is_call and not is_backlog and not is_stale_notification:
                 phase = (call_phase or "INCOMING").upper()
                 if phase in ("INCOMING", "RINGING", "ACTIVE", "OFFHOOK"):
                     if self._call_duck_state is None:
@@ -1620,6 +1729,8 @@ class TerminalDesktopHUD:
         self.stop_gestures()
         self.stop_sentry()
         self.stop_wakeword()
+        if hasattr(self, "_ambient_manager"):
+            self._ambient_manager.stop()
         if self._current_tts_proc:
             try:
                 self._current_tts_proc.terminate()

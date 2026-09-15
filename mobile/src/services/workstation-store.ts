@@ -14,6 +14,7 @@ import {
 } from '../types/vesper';
 import { gatewayClient } from './gateway';
 import { Channel, EventType, ServerEnvelope } from '../types/events';
+import { AppState } from 'react-native';
 
 export type WorkstationView =
   | 'workstation'
@@ -143,6 +144,7 @@ class WorkstationStore {
   public isWakeWordArmed: boolean = true;
   private wasWakeWordArmedBeforeTemporaryPTT: boolean | null = null;
   public isCameraActive: boolean = false;
+  public isGesturesActive: boolean = true;
   public masterVolume: number = 70;
 
   // Overlays & Telemetry
@@ -175,6 +177,7 @@ class WorkstationStore {
     completedSprints: 0,
     soundscape: 'ocean',
     musicSource: 'ambient',
+    endsAt: null as number | null,
   };
 
   private listeners: Set<StoreListener> = new Set();
@@ -183,6 +186,26 @@ class WorkstationStore {
   constructor() {
     this.initDefaultMessages();
     this.bindGateway();
+
+    if (typeof AppState !== 'undefined') {
+      AppState.addEventListener('change', (nextAppState) => {
+        if (nextAppState === 'active') {
+          this.recalculateZenTimer();
+        }
+      });
+    }
+  }
+
+  public recalculateZenTimer(): void {
+    if (this.zenTimer.isRunning && this.zenTimer.endsAt) {
+      const remaining = Math.max(0, Math.round((this.zenTimer.endsAt - Date.now()) / 1000));
+      this.zenTimer.secondsRemaining = remaining;
+      if (remaining <= 0) {
+        this.zenTimer.isRunning = false;
+        this.zenTimer.endsAt = null;
+      }
+      this.notify();
+    }
   }
 
   public subscribe(listener: StoreListener): () => void {
@@ -407,20 +430,31 @@ class WorkstationStore {
         if (isZen) {
           this.activeView = 'zen';
           if (payload?.timer) {
+            const endsAt = typeof payload.timer.ends_at === 'number' ? payload.timer.ends_at : null;
+            const isRunning = Boolean(payload.timer.is_running);
+            const secondsRemaining = endsAt && isRunning
+              ? Math.max(0, Math.round((endsAt - Date.now()) / 1000))
+              : typeof payload.timer.seconds_remaining === 'number'
+              ? payload.timer.seconds_remaining
+              : 25 * 60;
+
             this.zenTimer = {
-              isRunning: Boolean(payload.timer.is_running),
-              secondsRemaining: typeof payload.timer.seconds_remaining === 'number' ? payload.timer.seconds_remaining : 25 * 60,
+              isRunning,
+              secondsRemaining,
               sprintMinutes: typeof payload.timer.sprint_minutes === 'number' ? payload.timer.sprint_minutes : 25,
               completedSprints: typeof payload.timer.completed_sprints === 'number' ? payload.timer.completed_sprints : 0,
               soundscape: payload.timer.soundscape || 'ocean',
               musicSource: payload.timer.music_source || 'ambient',
+              endsAt: isRunning ? endsAt : null,
             };
           } else {
             this.zenTimer.isRunning = true;
             this.zenTimer.secondsRemaining = this.zenTimer.sprintMinutes * 60;
+            this.zenTimer.endsAt = Date.now() + this.zenTimer.secondsRemaining * 1000;
           }
         } else {
           this.zenTimer.isRunning = false;
+          this.zenTimer.endsAt = null;
           if (this.activeView === 'zen') {
             this.activeView = 'workstation';
           }
@@ -451,13 +485,22 @@ class WorkstationStore {
             musicSource: timer.music_source || this.zenTimer.musicSource,
           };
         } else {
+          const isRunning = typeof timer.is_running === 'boolean' ? timer.is_running : this.zenTimer.isRunning;
+          const endsAt = typeof timer.ends_at === 'number' ? timer.ends_at : (isRunning && this.zenTimer.endsAt ? this.zenTimer.endsAt : null);
+          const secondsRemaining = endsAt && isRunning
+            ? Math.max(0, Math.round((endsAt - Date.now()) / 1000))
+            : typeof timer.seconds_remaining === 'number'
+            ? timer.seconds_remaining
+            : this.zenTimer.secondsRemaining;
+
           this.zenTimer = {
-            isRunning: typeof timer.is_running === 'boolean' ? timer.is_running : this.zenTimer.isRunning,
-            secondsRemaining: typeof timer.seconds_remaining === 'number' ? timer.seconds_remaining : this.zenTimer.secondsRemaining,
+            isRunning,
+            secondsRemaining,
             sprintMinutes: typeof timer.sprint_minutes === 'number' ? timer.sprint_minutes : this.zenTimer.sprintMinutes,
             completedSprints: typeof timer.completed_sprints === 'number' ? timer.completed_sprints : this.zenTimer.completedSprints,
             soundscape: timer.soundscape || this.zenTimer.soundscape,
             musicSource: timer.music_source || this.zenTimer.musicSource,
+            endsAt: isRunning ? endsAt : null,
           };
         }
         this.notify();
@@ -537,7 +580,14 @@ class WorkstationStore {
         );
         this.notify();
       }
+    } else if (type === 'GESTURE_TOGGLE') {
+      const paused = payload?.tracking_paused ?? (payload?.status === 'PAUSED');
+      this.isGesturesActive = !paused;
+      this.notify();
     } else if (type === 'GESTURE_EVENT') {
+      if (payload?.tracking_paused !== undefined) {
+        this.isGesturesActive = !payload.tracking_paused;
+      }
       const gestureToken = payload?.gesture || 'GESTURE';
       this.messages = [
         ...this.messages,
@@ -645,21 +695,28 @@ class WorkstationStore {
   ) {
     if (action === 'start') {
       this.zenTimer.isRunning = true;
+      this.zenTimer.endsAt = Date.now() + this.zenTimer.secondsRemaining * 1000;
+      payload.ends_at = this.zenTimer.endsAt;
     } else if (action === 'pause') {
       this.zenTimer.isRunning = false;
+      this.zenTimer.endsAt = null;
     } else if (action === 'reset') {
       this.zenTimer.isRunning = false;
+      this.zenTimer.endsAt = null;
       this.zenTimer.secondsRemaining = this.zenTimer.sprintMinutes * 60;
     } else if (action === 'preset') {
       this.zenTimer.sprintMinutes = payload.minutes || 25;
       this.zenTimer.secondsRemaining = this.zenTimer.sprintMinutes * 60;
+      this.zenTimer.endsAt = Date.now() + this.zenTimer.secondsRemaining * 1000;
       this.zenTimer.isRunning = true;
+      payload.ends_at = this.zenTimer.endsAt;
     } else if (action === 'soundscape') {
       this.zenTimer.soundscape = payload.soundscape || 'ocean';
       this.zenTimer.musicSource = payload.music_source || (payload.soundscape === 'spotify' ? 'spotify' : 'ambient');
       payload = {
         is_running: this.zenTimer.isRunning,
         seconds_remaining: this.zenTimer.secondsRemaining,
+        ends_at: this.zenTimer.endsAt,
         ...payload,
       };
       if (this.zenTimer.soundscape === 'spotify') {
@@ -674,6 +731,13 @@ class WorkstationStore {
     const next = !this.isCameraActive;
     this.isCameraActive = next;
     gatewayClient.sendCameraToggle(next);
+    this.notify();
+  }
+
+  public toggleGestures() {
+    const next = !this.isGesturesActive;
+    this.isGesturesActive = next;
+    gatewayClient.sendGesturesToggle(next);
     this.notify();
   }
 

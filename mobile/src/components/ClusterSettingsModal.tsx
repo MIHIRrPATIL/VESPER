@@ -19,6 +19,7 @@ import { AlfredService } from "../../modules/alfred-service";
 import { AgentState } from "../types/vesper";
 import { offlineStore } from "../services/offline-store";
 import { SubnetDiscoveryService, DiscoveredGateway } from "../services/discovery";
+import { workstationStore } from "../services/workstation-store";
 import * as Battery from "expo-battery";
 import * as Network from "expo-network";
 
@@ -47,6 +48,7 @@ export const ClusterSettingsModal: React.FC<ClusterSettingsModalProps> = ({
   const [hasPermission, setHasPermission] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [sweepStatus, setSweepStatus] = useState<string | null>(null);
+  const [isGesturesActive, setIsGesturesActive] = useState(workstationStore.isGesturesActive);
 
   // Telemetry
   const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
@@ -78,7 +80,13 @@ export const ClusterSettingsModal: React.FC<ClusterSettingsModalProps> = ({
       setStatus(newStatus);
       setGatewayUrl(gatewayClient.getGatewayUrl());
     });
-    return () => unsub();
+    const unsubStore = workstationStore.subscribe(() => {
+      setIsGesturesActive(workstationStore.isGesturesActive);
+    });
+    return () => {
+      unsub();
+      unsubStore();
+    };
   }, []);
 
   const refreshVitals = async () => {
@@ -319,6 +327,51 @@ export const ClusterSettingsModal: React.FC<ClusterSettingsModalProps> = ({
                 >
                   <Text style={[styles.pillBtnText, (agentState === "LISTENING" || agentState === "THINKING") && styles.pillBtnTextActive]}>
                     {agentState === "LISTENING" ? "INTERRUPT" : "TALK"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Touchless Gestures Control */}
+            <View style={styles.card}>
+              <View style={styles.cardHeaderRow}>
+                <Text style={styles.cardSectionTitle}>TOUCHLESS GESTURES</Text>
+                <View style={styles.statusBadge}>
+                  <View
+                    style={[
+                      styles.statusDot,
+                      {
+                        backgroundColor: isGesturesActive
+                          ? theme.colors.emerald
+                          : theme.colors.textMuted,
+                      },
+                    ]}
+                  />
+                  <Text style={styles.statusBadgeText}>
+                    {isGesturesActive ? "ARMED" : "MUTED"}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.actionRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.actionTitle}>Touchless Air Controls</Text>
+                  <Text style={styles.actionSubtext}>
+                    {isGesturesActive
+                      ? "Vision sentry active. Hold Rock On (horns) 1.0s or tap to pause."
+                      : "Gesture recognition paused. Hold Rock On 1.0s or tap to resume."}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.pillBtn, isGesturesActive && styles.pillBtnActive]}
+                  onPress={() => workstationStore.toggleGestures()}
+                >
+                  <Text
+                    style={[
+                      styles.pillBtnText,
+                      isGesturesActive && styles.pillBtnTextActive,
+                    ]}
+                  >
+                    {isGesturesActive ? "PAUSE" : "RESUME"}
                   </Text>
                 </TouchableOpacity>
               </View>

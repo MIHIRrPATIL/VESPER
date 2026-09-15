@@ -1,5 +1,5 @@
 import React from 'react';
-import { Mic, Eye, Moon, Volume2, VolumeX, Square } from 'lucide-react';
+import { Mic, Eye, Moon, Volume2, VolumeX, Square, Hand } from 'lucide-react';
 import { Dock, DockIcon, DockItem, DockLabel } from './ui/dock';
 import { cn } from '../lib/utils';
 
@@ -12,6 +12,8 @@ interface LeftNavDockProps {
   onToggleWakeWord: () => void;
   isCameraActive: boolean;
   onToggleCamera: () => void;
+  isGesturesActive?: boolean;
+  onToggleGestures?: () => void;
   isProcessing?: boolean;
   onInterrupt?: () => void;
 }
@@ -25,6 +27,8 @@ export const LeftNavDock: React.FC<LeftNavDockProps> = ({
   onToggleWakeWord,
   isCameraActive,
   onToggleCamera,
+  isGesturesActive = true,
+  onToggleGestures,
   isProcessing = false,
   onInterrupt,
 }) => {
@@ -112,6 +116,25 @@ export const LeftNavDock: React.FC<LeftNavDockProps> = ({
             <Eye size={20} strokeWidth={2} />
           </DockIcon>
         </DockItem>
+
+        {/* Touchless Gestures Control */}
+        {onToggleGestures && (
+          <DockItem 
+            onClick={onToggleGestures} 
+            ariaLabel={isGesturesActive ? 'Gestures: Active' : 'Gestures: Muted'}
+            className={cn(
+              'rounded-[18px] p-2 transition-colors cursor-pointer border',
+              isGesturesActive 
+                ? 'bg-white/[0.12] text-white border-white/20' 
+                : 'bg-white/[0.04] text-[#E8E3DA]/60 border-transparent hover:border-white/10 hover:text-[#E8E3DA] hover:bg-white/[0.08]'
+            )}
+          >
+            <DockLabel>{isGesturesActive ? 'Gestures: Active' : 'Gestures: Muted'}</DockLabel>
+            <DockIcon>
+              <Hand size={20} strokeWidth={2} />
+            </DockIcon>
+          </DockItem>
+        )}
       </Dock>
     </aside>
   );

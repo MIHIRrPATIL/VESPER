@@ -21,6 +21,7 @@ export type EventType =
   | 'AGENT_SPEAKING'
   | 'AGENT_IDLE'
   | 'GESTURE_EVENT'
+  | 'GESTURE_TOGGLE'
   | 'NOTIFICATION_RELAY'
   | 'NOTIFICATION_DIGEST'
   | 'CALL_STATE'
@@ -102,6 +103,7 @@ export interface ConversationMessage {
 export interface MobileNotification {
   id: string;
   appName: string;
+  packageName?: string;
   title: string;
   body: string;
   timestamp: number;
@@ -110,6 +112,9 @@ export interface MobileNotification {
   isOngoing?: boolean;
   isUpdate?: boolean;
   read: boolean;
+  category?: 'URGENT' | 'DIRECT' | 'FINANCIAL' | 'PROMO' | 'SYSTEM' | 'GENERAL' | string;
+  isPromo?: boolean;
+  otpCode?: string;
 }
 
 // ── Proactive Agent Toast Types ─────────────────────────────────────────────

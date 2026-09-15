@@ -18,6 +18,7 @@ class ZenStore {
   private _sprintMinutes = 25;
   private _secondsRemaining = 25 * 60;
   private _isRunning = false;
+  private _endsAt: number | null = null;
   private _completedSprints = 0;
   private _soundscapeEnabled = false;
   private _activeTask: ZenTaskItem | null = null;
@@ -28,9 +29,21 @@ class ZenStore {
   private _listeners: Set<ZenStoreListener> = new Set();
   private _suppressBroadcast = false;
 
+  constructor() {
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', () => {
+        this.recalculate();
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) this.recalculate();
+      });
+    }
+  }
+
   get sprintMinutes() { return this._sprintMinutes; }
   get secondsRemaining() { return this._secondsRemaining; }
   get isRunning() { return this._isRunning; }
+  get endsAt() { return this._endsAt; }
   get completedSprints() { return this._completedSprints; }
   get soundscapeEnabled() { return this._soundscapeEnabled; }
   get activeTask() { return this._activeTask; }
@@ -52,27 +65,63 @@ class ZenStore {
     });
   }
 
-  start(broadcast = true) {
-    if (this._isRunning) return;
-    this._isRunning = true;
-
-    if (this._timerId) clearInterval(this._timerId);
-    this._timerId = setInterval(() => {
-      if (this._secondsRemaining <= 1) {
-        this._secondsRemaining = 0;
+  public recalculate(): void {
+    if (!this._isRunning) return;
+    if (this._endsAt) {
+      const remaining = Math.max(0, Math.round((this._endsAt - Date.now()) / 1000));
+      this._secondsRemaining = remaining;
+      if (remaining <= 0) {
         this.pause(true);
         this._completedSprints += 1;
         this._sessionHeldCount = notificationStore.heldNotificationsCount;
         this._showDebrief = true;
-        this._notify();
-      } else {
-        this._secondsRemaining -= 1;
-        this._notify();
       }
+      this._notify();
+    }
+  }
+
+  start(broadcast = true) {
+    if (this._isRunning) return;
+    this._isRunning = true;
+    if (!this._endsAt) {
+      this._endsAt = Date.now() + this._secondsRemaining * 1000;
+    }
+
+    if (this._timerId) clearInterval(this._timerId);
+    this._timerId = setInterval(() => {
+      if (this._endsAt) {
+        const remaining = Math.max(0, Math.round((this._endsAt - Date.now()) / 1000));
+        this._secondsRemaining = remaining;
+        if (remaining <= 0) {
+          this._secondsRemaining = 0;
+          this.pause(true);
+          this._completedSprints += 1;
+          this._sessionHeldCount = notificationStore.heldNotificationsCount;
+          this._showDebrief = true;
+          this._notify();
+          return;
+        }
+      } else {
+        if (this._secondsRemaining <= 1) {
+          this._secondsRemaining = 0;
+          this.pause(true);
+          this._completedSprints += 1;
+          this._sessionHeldCount = notificationStore.heldNotificationsCount;
+          this._showDebrief = true;
+          this._notify();
+          return;
+        } else {
+          this._secondsRemaining -= 1;
+        }
+      }
+      this._notify();
     }, 1000);
 
     if (broadcast && !this._suppressBroadcast) {
-      gateway.sendZenTimerUpdate('start', { seconds_remaining: this._secondsRemaining });
+      gateway.sendZenTimerUpdate('start', {
+        seconds_remaining: this._secondsRemaining,
+        ends_at: this._endsAt,
+      });
     }
 
     this._notify();
@@ -80,6 +129,7 @@ class ZenStore {
 
   pause(broadcast = true) {
     this._isRunning = false;
+    this._endsAt = null;
     if (this._timerId) {
       clearInterval(this._timerId);
       this._timerId = null;
@@ -102,6 +152,7 @@ class ZenStore {
 
   reset(broadcast = true) {
     this.pause(false);
+    this._endsAt = null;
     this._secondsRemaining = this._sprintMinutes * 60;
 
     if (broadcast && !this._suppressBroadcast) {
@@ -114,10 +165,15 @@ class ZenStore {
   setPreset(minutes: number, broadcast = true) {
     this._sprintMinutes = minutes;
     this._secondsRemaining = minutes * 60;
+    this._endsAt = Date.now() + minutes * 60 * 1000;
     this.start(broadcast);
 
     if (broadcast && !this._suppressBroadcast) {
-      gateway.sendZenTimerUpdate('preset', { minutes, seconds_remaining: this._secondsRemaining });
+      gateway.sendZenTimerUpdate('preset', {
+        minutes,
+        seconds_remaining: this._secondsRemaining,
+        ends_at: this._endsAt,
+      });
     }
 
     this._notify();
@@ -125,7 +181,13 @@ class ZenStore {
 
   addMinutes(mins: number) {
     this._secondsRemaining += mins * 60;
-    gateway.sendZenTimerUpdate('tick', { seconds_remaining: this._secondsRemaining });
+    if (this._endsAt) {
+      this._endsAt += mins * 60 * 1000;
+    }
+    gateway.sendZenTimerUpdate('tick', {
+      seconds_remaining: this._secondsRemaining,
+      ends_at: this._endsAt,
+    });
     this._notify();
   }
 
@@ -165,9 +227,16 @@ class ZenStore {
         return;
       }
 
-      if (typeof timerData.seconds_remaining === 'number') {
+      if (typeof timerData.ends_at === 'number' || timerData.ends_at === null) {
+        this._endsAt = timerData.ends_at;
+      }
+
+      if (this._endsAt && (action === 'start' || timerData.is_running === true)) {
+        this._secondsRemaining = Math.max(0, Math.round((this._endsAt - Date.now()) / 1000));
+      } else if (typeof timerData.seconds_remaining === 'number') {
         this._secondsRemaining = timerData.seconds_remaining;
       }
+
       if (typeof timerData.sprint_minutes === 'number') {
         this._sprintMinutes = timerData.sprint_minutes;
       }
@@ -201,10 +270,15 @@ class ZenStore {
   onZenModeStateChange(zenActive: boolean, timerData?: any) {
     if (zenActive) {
       this._showDebrief = false;
-      if (timerData?.seconds_remaining) {
+      if (timerData?.ends_at) {
+        this._endsAt = timerData.ends_at;
+        this._secondsRemaining = Math.max(0, Math.round((timerData.ends_at - Date.now()) / 1000));
+      } else if (timerData?.seconds_remaining) {
         this._secondsRemaining = timerData.seconds_remaining;
+        this._endsAt = Date.now() + this._secondsRemaining * 1000;
       } else {
         this._secondsRemaining = this._sprintMinutes * 60;
+        this._endsAt = Date.now() + this._secondsRemaining * 1000;
       }
       // Auto-start timer on Zen mode entry
       this.start(false);
@@ -214,6 +288,7 @@ class ZenStore {
       ambientAudio.setSoundscape(targetSoundscape);
     } else {
       this.pause(false);
+      this._endsAt = null;
       ambientAudio.setSoundscape('off');
       const held = notificationStore.heldNotificationsCount;
       if (held > 0 || this._completedSprints > 0) {

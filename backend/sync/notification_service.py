@@ -40,6 +40,9 @@ class MobileNotification(BaseModel):
     is_in_place_update: bool = False
     is_call: bool = False
     call_phase: Optional[str] = None  # "INCOMING" | "ENDED" | "ONGOING"
+    category: str = "GENERAL"  # "URGENT" | "DIRECT" | "FINANCIAL" | "PROMO" | "SYSTEM" | "GENERAL"
+    is_promo: bool = False
+    otp_code: Optional[str] = None
     raw_payload: Dict[str, Any] = Field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -112,8 +115,12 @@ class NotificationService:
             "call from", "calling...", "is calling", "ringing",
             "incoming audio call", "whatsapp call", "slack call", "telegram call"
         ]
-        if is_telephony_pkg or any(ik in combined for ik in incoming_keywords):
+        if any(ik in combined for ik in incoming_keywords):
             return True, "INCOMING"
+
+        ongoing_keywords = ["ongoing call", "call in progress", "active call", "on call"]
+        if any(ok in combined for ok in ongoing_keywords):
+            return True, "ACTIVE"
 
         return False, None
 
@@ -171,6 +178,83 @@ class NotificationService:
 
         # 4. Low (Everything else: marketing, battery warnings, background sync)
         return NotificationPriority.LOW
+
+    @staticmethod
+    def detect_category(package_name: str, title: str, text: str) -> tuple[str, bool, Optional[str]]:
+        """Categorizes notification into (category, is_promo, otp_code).
+        Categories: URGENT, DIRECT, FINANCIAL, PROMO, SYSTEM, GENERAL.
+        """
+        import re
+        pkg = (package_name or "").lower()
+        t = (title or "").strip()
+        body = (text or "").strip()
+        combined = f"{t} {body}".lower()
+
+        # 1. Check for OTP / Security verification code
+        otp_code: Optional[str] = None
+        cleaned_no_amounts = re.sub(r"(?:rs\.?|inr|₹|\$)\s*[\d,]+(?:\.\d+)?", "", combined, flags=re.I)
+        otp_match = re.search(r"\b(?:otp|secret code|verification code|security code)\b.*?\b(\d{4,8})\b", cleaned_no_amounts, re.IGNORECASE)
+        if not otp_match:
+            otp_match = re.search(r"\b(?:code|pin|verification)\b[^\w\d]*(?:is\s+)?(\d{4,8})\b", cleaned_no_amounts, re.IGNORECASE)
+        if not otp_match:
+            otp_match = re.search(r"\b(\d{4,8})\b.*?\b(?:is your (?:otp|verification|secret code)|for your account)\b", cleaned_no_amounts, re.IGNORECASE)
+        if otp_match:
+            otp_code = otp_match.group(1)
+
+        if otp_code:
+            return "URGENT", False, otp_code
+
+        # 2. Urgent (Calls, Outages, Fraud, Security)
+        urgent_keywords = [
+            "incoming call", "missed call", "emergency", "incident", "pagerduty",
+            "server down", "card blocked", "fraud alert", "account locked", "unauthorized", "sos"
+        ]
+        if any(kw in combined for kw in urgent_keywords):
+            return "URGENT", False, None
+
+        # 3. Check for Promotional / Marketing
+        promo_tokens = [
+            "offer", "discount", "coupon", "promo", "flat ", "save extra", "sale",
+            "shop now", "order now", "buy now", "cashback offer", "free delivery",
+            "win up to", "congratulations", "voucher", "points will expire", "credits will expire",
+            "hurry", "limited period deal", "apply now for loan", "exclusive deal", "special price"
+        ]
+        is_ad_header = bool(re.match(r"^(?:AD|DM|TM|QP|XY|BA|BW)-", t, re.IGNORECASE))
+        has_promo_link = bool(re.search(r"\b(?:1kx\.in|bit\.ly|tinyurl|myntr\.it|fkrt\.it)/", combined))
+        has_promo_pct = bool(re.search(r"\b\d+%\s*(?:off|discount|cashback)\b", combined))
+
+        if (is_ad_header or has_promo_link or has_promo_pct or any(pt in combined for pt in promo_tokens)) and not any(
+            bk in combined for bk in ["debited", "credited", "spent", "received", "autopay", "auto-debit", "sip", "emi", "salary"]
+        ):
+            return "PROMO", True, None
+
+        # 4. Financial / Transactions (Debits, Credits, Autopay, SIP, UPI, Bank SMS)
+        financial_keywords = [
+            "debited", "credited", "spent", "paid", "sent", "transferred", "txn of",
+            "purchase of", "deducted", "autopay", "auto-debit", "auto debit", "sip",
+            "emi", "withdrawn", "payment of", "received", "refund", "salary",
+            "cashback credited", "deposited", "standing instruction", "upi ref", "vpa",
+            "balance alert", "bank alert", "a/c balance"
+        ]
+        is_financial_pkg = any(b in pkg for b in ["bank", "hdfc", "sbi", "icici", "axis", "kotak", "paytm", "phonepe", "gpay", "cred"])
+        if any(fk in combined for fk in financial_keywords) or is_financial_pkg:
+            return "FINANCIAL", False, None
+
+        # 5. Direct Personal Messaging & Telephony
+        direct_packages = [
+            "com.whatsapp", "org.telegram.messenger", "com.slack",
+            "com.discord", "com.google.android.apps.messaging",
+            "com.facebook.orca", "im.vector.app", "com.samsung.android.messaging",
+            "com.android.mms", "com.android.messaging", "org.thoughtcrime.securesms"
+        ]
+        if any(dp in pkg for dp in direct_packages) or any(app in combined for app in ["whatsapp", "telegram", "slack", "discord", "signal"]):
+            return "DIRECT", False, None
+
+        # 6. System / Tools
+        if any(sp in pkg for sp in ["android", "system", "download", "battery", "settings", "bluetooth"]):
+            return "SYSTEM", False, None
+
+        return "GENERAL", False, None
 
     def ingest_notification(
         self,
@@ -268,6 +352,9 @@ class NotificationService:
             if existing.text == text and not allow_duplicate:
                 return None
 
+            # Detect category, promotional status, and OTP
+            cat, is_pr, otp_c = self.detect_category(pkg, title, text)
+
             # UPDATE IN PLACE (OS Notification Shade behavior)
             existing.text = text
             existing.subtext = subtext
@@ -275,6 +362,11 @@ class NotificationService:
             existing.is_in_place_update = True
             existing.is_call = is_call
             existing.call_phase = call_phase
+            existing.category = cat
+            existing.is_promo = is_pr
+            existing.otp_code = otp_c
+            if otp_c:
+                existing.priority = NotificationPriority.URGENT
             existing.raw_payload = payload
 
             # Move to top of active list
@@ -299,6 +391,8 @@ class NotificationService:
             return existing
 
         # 10. Brand New Notification: Classify Priority & Register
+        cat, is_pr, otp_c = self.detect_category(pkg, title, text)
+
         explicit_prio = payload.get("priority")
         if explicit_prio and explicit_prio.upper() in (
             NotificationPriority.URGENT,
@@ -307,6 +401,8 @@ class NotificationService:
             NotificationPriority.LOW,
         ):
             prio = explicit_prio.upper()
+        elif otp_c:
+            prio = NotificationPriority.URGENT
         else:
             prio = self.classify_priority(pkg, title, text)
 
@@ -324,6 +420,9 @@ class NotificationService:
             is_in_place_update=False,
             is_call=is_call,
             call_phase=call_phase,
+            category=cat,
+            is_promo=is_pr,
+            otp_code=otp_c,
             raw_payload=payload,
         )
 
@@ -463,8 +562,37 @@ class NotificationService:
             "com.sec.android.app.sbrowser": "Samsung Internet",
             "in.swiggy.android": "Swiggy",
             "com.application.zomato": "Zomato",
+            "com.google.android.apps.messaging": "Messages",
+            "com.samsung.android.messaging": "Messages",
+            "com.android.mms": "Messages",
+            "com.android.messaging": "Messages",
+            "org.thoughtcrime.securesms": "Signal",
+            "com.google.android.apps.nbu.paisa.user": "Google Pay",
+            "com.phonepe.app": "PhonePe",
+            "net.one97.paytm": "Paytm",
+            "com.dreamplug.androidapp": "CRED",
+            "com.snapwork.hdfc": "HDFC Bank",
+            "com.csam.icici.bank.imobile": "ICICI Bank",
+            "com.sbi.lotusintouch": "SBI Yono",
+            "com.axis.mobile": "Axis Bank",
+            "com.msf.kbank.mobile": "Kotak Bank",
+            "com.google.android.dialer": "Phone",
+            "com.samsung.android.incallui": "Phone",
+            "com.android.dialer": "Phone",
         }
-        return mapping.get(package_name.lower(), package_name.split(".")[-1].capitalize())
+        low = package_name.lower()
+        if low in mapping:
+            return mapping[low]
+        # Check partial keywords
+        if "bank" in low or "hdfc" in low or "icici" in low or "sbi" in low or "axis" in low or "kotak" in low:
+            return "Banking"
+        if "whatsapp" in low:
+            return "WhatsApp"
+        if "telegram" in low:
+            return "Telegram"
+        if "slack" in low:
+            return "Slack"
+        return package_name.split(".")[-1].capitalize()
 
 
 notification_service = NotificationService.get_instance()

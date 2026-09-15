@@ -477,4 +477,95 @@ async def test_planner_routes_notification_query_to_search():
     assert "Tia Shah" in step["params"].get("sender", "")
 
 
+@pytest.mark.asyncio
+async def test_otp_extraction_and_speech(notif_service: NotificationService):
+    """Verifies that incoming OTP notifications are classified as URGENT, extract OTP code, and stage TTS action with spaced digits."""
+    from backend.agent.proactive.notification_evaluator import notification_evaluator
+
+    notif = notif_service.ingest_notification(
+        payload={
+            "package_name": "com.google.android.apps.messaging",
+            "title": "VK-HDFCBK",
+            "text": "Your OTP for transaction of Rs 2,500 at Flipkart is 839201. Valid for 10 mins. Do not share.",
+        },
+        source_device_id="mobile_dev_1",
+    )
+    assert notif is not None
+    assert notif.priority == "URGENT"
+    assert notif.otp_code == "839201"
+    assert notif.category == "URGENT"
+
+    eval_res = await notification_evaluator.evaluate(notif)
+    assert eval_res.handled is True
+    assert eval_res.staged_action is not None
+    staged = eval_res.staged_action
+    assert staged.domain == "security"
+    assert staged.action == "display_otp"
+    assert staged.params["code"] == "839201"
+    assert "8 3 9 2 0 1" in staged.speech_prompt
+    assert "HDFC Bank" in staged.speech_prompt
+
+
+@pytest.mark.asyncio
+async def test_financial_ledger_advisory_staging(notif_service: NotificationService):
+    """Verifies that debits, autopay, and SIP messages stage proactive ledger actions."""
+    from backend.agent.proactive.notification_evaluator import notification_evaluator
+
+    # 1. SIP Mutual Fund investment
+    notif_sip = notif_service.ingest_notification(
+        payload={
+            "package_name": "com.phonepe.app",
+            "title": "PhonePe",
+            "text": "SIP installment of Rs 5,000 for Nippon India Growth Fund deducted from your account.",
+        },
+        source_device_id="mobile_dev_1",
+        allow_duplicate=True,
+    )
+    assert notif_sip is not None
+    assert notif_sip.category == "FINANCIAL"
+    res_sip = await notification_evaluator.evaluate(notif_sip)
+    assert res_sip.handled is True
+    assert res_sip.staged_action is not None
+    assert res_sip.staged_action.domain == "finance"
+    assert res_sip.staged_action.action == "log_transaction"
+    assert res_sip.staged_action.params["amount"] == 5000.0
+    assert res_sip.staged_action.params["category"] == "Investment"
+
+    # 2. Autopay subscription
+    notif_auto = notif_service.ingest_notification(
+        payload={
+            "package_name": "net.one97.paytm",
+            "title": "Paytm",
+            "text": "Autopay payment of Rs 1,499 for Netflix was successful.",
+        },
+        source_device_id="mobile_dev_1",
+        allow_duplicate=True,
+    )
+    assert notif_auto is not None
+    assert notif_auto.category == "FINANCIAL"
+    res_auto = await notification_evaluator.evaluate(notif_auto)
+    assert res_auto.handled is True
+    assert res_auto.staged_action is not None
+    assert res_auto.staged_action.params["amount"] == 1499.0
+
+    # 3. Credit / Refund
+    notif_cred = notif_service.ingest_notification(
+        payload={
+            "package_name": "com.snapwork.hdfc",
+            "title": "HDFC Bank",
+            "text": "INR 350.00 credited to account from Swiggy Refund.",
+        },
+        source_device_id="mobile_dev_1",
+        allow_duplicate=True,
+    )
+    assert notif_cred is not None
+    assert notif_cred.category == "FINANCIAL"
+    res_cred = await notification_evaluator.evaluate(notif_cred)
+    assert res_cred.handled is True
+    assert res_cred.staged_action is not None
+    assert res_cred.staged_action.params["type"] == "income"
+    assert res_cred.staged_action.params["amount"] == 350.0
+
+
+
 

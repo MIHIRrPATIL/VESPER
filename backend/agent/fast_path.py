@@ -67,32 +67,30 @@ def _fast_store_user_name(name_raw: str) -> tuple[dict, str, dict]:
     cleaned = name_raw.strip().title()
     _CACHED_USER_PROFILE["name"] = cleaned
     try:
-        from backend.data.repositories.memory import ShodhMemoryRepository
-        from backend.data.models import MemoryCreate
-        import asyncio
+        import logging
+        import threading
+        logger = logging.getLogger("vesper.agent.fast_path")
 
-        async def _persist():
+        def _persist_sync():
             try:
+                from backend.data.repositories.memory import ShodhMemoryRepository
+                from backend.data.models import MemoryCreate
                 repo = ShodhMemoryRepository()
-                await asyncio.to_thread(
-                    repo.store_fact,
+                repo.store_fact(
                     MemoryCreate(
                         statement=f"The user's name is {cleaned}",
                         category="personal",
                         confidence=1.0,
                         metadata={"active": True, "source": "fast_path"},
-                    ),
+                    )
                 )
-            except Exception:
-                pass
+                logger.info(f"[FastPath] Stored user name into Supabase: {cleaned}")
+            except Exception as err:
+                logger.error(f"[FastPath] Failed to store user name in Supabase: {err}", exc_info=True)
 
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_persist())
-        except RuntimeError:
-            pass
-    except Exception:
-        pass
+        threading.Thread(target=_persist_sync, daemon=True).start()
+    except Exception as e:
+        logger.error(f"[FastPath] Error initiating user name persistence: {e}")
 
     speech = f"Very good, sir. I have committed to memory that your name is {cleaned}."
     card = {
@@ -136,30 +134,26 @@ def _fast_store_generic_memory(fact: str) -> tuple[dict, str, dict]:
     try:
         from backend.data.repositories.memory import ShodhMemoryRepository
         from backend.data.models import MemoryCreate
-        import asyncio
+        import threading
 
-        async def _persist():
+        def _persist_sync():
             try:
                 repo = ShodhMemoryRepository()
-                await asyncio.to_thread(
-                    repo.store_fact,
+                repo.store_fact(
                     MemoryCreate(
                         statement=clean_fact,
                         category="preference",
                         confidence=1.0,
                         metadata={"active": True, "source": "fast_path"},
-                    ),
+                    )
                 )
-            except Exception:
-                pass
+                logger.info(f"[FastPath] Stored generic memory into Supabase: {clean_fact}")
+            except Exception as err:
+                logger.error(f"[FastPath] Failed to store generic memory in Supabase: {err}", exc_info=True)
 
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_persist())
-        except RuntimeError:
-            pass
-    except Exception:
-        pass
+        threading.Thread(target=_persist_sync, daemon=True).start()
+    except Exception as e:
+        logger.error(f"[FastPath] Error initiating generic memory persistence: {e}")
 
     speech = f"I have committed that to memory: {clean_fact}, sir."
     card = {"type": "memory_card", "action": "stored", "statement": clean_fact}

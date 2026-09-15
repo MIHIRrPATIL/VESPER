@@ -83,14 +83,10 @@ export const MOCK_TOOLS_REGISTRY: MockToolDefinition[] = [
     hudType: 'task',
     cardTitle: 'ACTIVE TASKS & EXECUTIVE AGENDA',
     mockArgs: { status: 'pending', sort: 'deadline' },
-    mockResult: { count: 3, source: 'Supabase + Google Tasks' },
+    mockResult: { count: 0, source: 'Supabase + Google Tasks' },
     hudData: {
-      title: 'Today’s High-Priority Deliverables',
-      tasks: [
-        { id: 't1', title: 'Finalize Jetson MIPI CSI zero-copy pipeline', done: false, priority: 'urgent', deadline: '17:00' },
-        { id: 't2', title: 'Review Google Calendar sync cron logs', done: true, priority: 'high', deadline: '12:00' },
-        { id: 't3', title: 'Audit Supabase ledger balance triggers', done: false, priority: 'normal', deadline: 'Tomorrow' },
-      ],
+      title: 'High-Priority Deliverables',
+      tasks: [],
     },
   },
   {
@@ -103,14 +99,11 @@ export const MOCK_TOOLS_REGISTRY: MockToolDefinition[] = [
     hudType: 'calendar',
     cardTitle: 'GOOGLE CALENDAR & APPOINTMENTS',
     mockArgs: { time_min: 'now', time_max: 'end_of_day' },
-    mockResult: { event_count: 2, sync_status: 'ok' },
+    mockResult: { event_count: 0, sync_status: 'ok' },
     hudData: {
       title: 'Google Calendar Agenda',
-      date: 'Thursday, September 10',
-      events: [
-        { id: 'ev_1', title: 'VESPER Cognitive Mesh Architecture Review', time: '15:00 - 16:00', location: 'Google Meet', attendees: 4 },
-        { id: 'ev_2', title: 'Edge Inference Latency Benchmark', time: '17:30 - 18:15', location: 'Lab Workstation', attendees: 2 },
-      ],
+      date: 'Today',
+      events: [],
     },
   },
 
@@ -124,30 +117,13 @@ export const MOCK_TOOLS_REGISTRY: MockToolDefinition[] = [
     icon: CreditCard,
     hudType: 'transaction',
     cardTitle: 'FINANCIAL LEDGER & TRANSACTIONS',
-    mockArgs: { account_id: 'primary_hdfc', include_recent: true },
-    mockResult: { current_balance: 428450.00, currency: 'INR' },
+    mockArgs: { account_id: 'primary', include_recent: true },
+    mockResult: { current_balance: 0.0, currency: 'INR' },
     hudData: {
-      account: 'HDFC Premium Imperia **8492',
-      total_balance: '₹4,28,450.00',
+      account: 'Primary Accounts',
+      total_balance: '₹0.00',
       currency: 'INR',
-      transactions: [
-        {
-          id: 'tx_01',
-          description: 'NVIDIA Developer Store (Jetson Orin)',
-          amount: '-₹48,900.00',
-          type: 'debit',
-          date: 'Today, 14:15',
-          category: 'Hardware R&D',
-        },
-        {
-          id: 'tx_02',
-          description: 'Stripe Payout (SaaS Licensing)',
-          amount: '+₹1,85,000.00',
-          type: 'credit',
-          date: 'Yesterday, 09:30',
-          category: 'Revenue',
-        },
-      ],
+      transactions: [],
     },
   },
 

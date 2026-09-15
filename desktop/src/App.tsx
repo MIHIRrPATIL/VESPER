@@ -495,6 +495,12 @@ export function App() {
             return next;
           });
         }
+        if (payload?.tracking_paused !== undefined) {
+          setIsGesturesActive(!payload.tracking_paused);
+        }
+      } else if (type === 'GESTURE_TOGGLE') {
+        const paused = payload?.tracking_paused ?? (payload?.status === 'PAUSED');
+        setIsGesturesActive(!paused);
       } else if (type === 'INTERRUPT_ACK') {
         setAgentState('IDLE');
       } else if (type === 'WAKE_WORD_STATE') {
@@ -676,6 +682,7 @@ export function App() {
   };
 
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [isGesturesActive, setIsGesturesActive] = useState<boolean>(true);
 
   const handleInterrupt = () => {
     setAgentState('IDLE');
@@ -703,6 +710,12 @@ export function App() {
     const next = !isCameraActive;
     setIsCameraActive(next);
     gatewayService.sendCameraToggle(next);
+  };
+
+  const handleToggleGestures = () => {
+    const next = !isGesturesActive;
+    setIsGesturesActive(next);
+    gatewayService.sendGesturesToggle(next);
   };
 
   return (
@@ -749,6 +762,8 @@ export function App() {
             onToggleWakeWord={handleToggleWakeWord}
             isCameraActive={isCameraActive}
             onToggleCamera={handleToggleCamera}
+            isGesturesActive={isGesturesActive}
+            onToggleGestures={handleToggleGestures}
             isProcessing={agentState === 'LISTENING' || agentState === 'THINKING' || agentState === 'SPEAKING'}
             onInterrupt={handleInterrupt}
           />

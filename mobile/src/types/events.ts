@@ -147,5 +147,7 @@ export interface MobileNotificationPayload {
   post_time?: number;
   device_id?: string;
   device_name?: string;
+  is_backlog?: boolean;
+  is_offline_replay?: boolean;
 }
 

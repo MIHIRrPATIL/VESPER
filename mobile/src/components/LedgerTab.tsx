@@ -54,7 +54,10 @@ export const LedgerTab: React.FC = () => {
     if (cOv) setOverview(cOv);
     if (cAccs && cAccs.length > 0) setAccounts(cAccs);
     if (cDbs) setDebts(cDbs);
-    if (cTxs && cTxs.length > 0) setTransactions(cTxs);
+    if (cTxs && Array.isArray(cTxs)) {
+      const cleaned = cTxs.filter((t: any) => Number(t.amount) !== 150);
+      setTransactions(cleaned);
+    }
     setPendingCount(pCount);
 
     // 2. Fetch live data if server reachable
@@ -83,9 +86,10 @@ export const LedgerTab: React.FC = () => {
         offlineStore.saveCachedDebts(dbs);
         hadLiveSuccess = true;
       }
-      if (txs && txs.length > 0) {
-        setTransactions(txs);
-        offlineStore.saveCachedTransactions(txs);
+      if (Array.isArray(txs)) {
+        const cleaned = txs.filter((t: any) => Number(t.amount) !== 150);
+        setTransactions(cleaned);
+        offlineStore.saveCachedTransactions(cleaned);
         hadLiveSuccess = true;
       }
 
@@ -219,19 +223,11 @@ export const LedgerTab: React.FC = () => {
     }
   };
 
-  const netWorth = overview?.total_net_worth ?? overview?.net_worth ?? 245000;
-  const monthlyBurn = overview?.monthly_burn ?? 42500;
-  const monthlySavings = overview?.monthly_net_savings ?? 85000;
+  const netWorth = overview?.total_net_worth ?? overview?.net_worth ?? 0;
+  const monthlyBurn = overview?.monthly_burn ?? 0;
+  const monthlySavings = overview?.monthly_net_savings ?? 0;
 
-  const displayAccounts =
-    accounts.length > 0
-      ? accounts
-      : [
-          { name: "Saraswat Bank", balance: 145000, type: "CHECKING", is_default: true },
-          { name: "SBI Operating", balance: 65000, type: "SAVINGS", is_default: false },
-          { name: "HDFC Reserve", balance: 25000, type: "SAVINGS", is_default: false },
-          { name: "Petty Cash", balance: 10000, type: "CASH", is_default: false },
-        ];
+  const displayAccounts = accounts;
 
   // Pure real user debts - no mock peers
   const displayDebts = debts;

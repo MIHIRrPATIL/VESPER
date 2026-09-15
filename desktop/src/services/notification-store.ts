@@ -242,14 +242,18 @@ class NotificationStore {
         this._addMobileNotification({
           id: envelope.uuid || crypto.randomUUID(),
           appName: notif.app_name || payload.app_name || 'Unknown',
+          packageName: notif.package_name || payload.package_name,
           title: notif.title || payload.title || '',
           body: notif.text || notif.body || payload.text || '',
-          timestamp: Date.now(),
+          timestamp: notif.timestamp ? (notif.timestamp > 1e11 ? notif.timestamp : notif.timestamp * 1000) : Date.now(),
           urgency: this._mapUrgency(notif.priority),
           deviceName: payload.device_name,
           isOngoing: payload.is_ongoing || false,
           isUpdate: payload.is_update || false,
           read: false,
+          category: notif.category || payload.category,
+          isPromo: Boolean(notif.is_promo ?? payload.is_promo),
+          otpCode: notif.otp_code || payload.otp_code,
         });
       }
       return;

@@ -153,7 +153,7 @@ export const CockpitView: React.FC = () => {
   const topTask = pendingTasks[0] || null;
   const nextEvent = calendarEvents[0] || null;
 
-  const totalLiquidMoney = financeOverview?.total_net_worth ?? 245000;
+  const totalLiquidMoney = financeOverview?.total_net_worth ?? 0;
 
   const debtsOwedToUser = (financeDebts || [])
     .filter((d: any) => !d.settled && d.direction === "owed")

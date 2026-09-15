@@ -57,16 +57,11 @@ const TOOLS_REGISTRY: ToolDefinition[] = [
     cardTitle: "FINANCIAL LEDGER & CAPITAL",
     mockArgs: { currency: "INR", include_peer_debts: true },
     mockData: {
-      net_worth: 245000,
-      monthly_burn: 42500,
-      accounts: [
-        { name: "Saraswat Bank", balance: 145000 },
-        { name: "SBI Operating", balance: 65000 },
-        { name: "HDFC Reserve", balance: 25000 },
-        { name: "Petty Cash", balance: 10000 },
-      ],
-      debts_owed_to_user: 12400,
-      debts_user_owes: 3200,
+      net_worth: 0,
+      monthly_burn: 0,
+      accounts: [],
+      debts_owed_to_user: 0,
+      debts_user_owes: 0,
     },
   },
   {
@@ -79,11 +74,7 @@ const TOOLS_REGISTRY: ToolDefinition[] = [
     cardTitle: "ACTIVE TASKS & EXECUTIVE AGENDA",
     mockArgs: { status: "pending", sort: "deadline" },
     mockData: {
-      tasks: [
-        { id: "t1", title: "Verify Jetson Orin zero-copy DMA", priority: "urgent", done: false },
-        { id: "t2", title: "Review Supabase ledger balance triggers", priority: "high", done: true },
-        { id: "t3", title: "Audit Google Calendar cron sync logs", priority: "normal", done: false },
-      ],
+      tasks: [],
     },
   },
   {

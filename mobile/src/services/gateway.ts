@@ -469,7 +469,11 @@ class GatewayClient {
     await this.saveOfflineQueue();
 
     for (const notif of queueToFlush) {
-      this.sendNotificationRelay(notif);
+      this.sendNotificationRelay({
+        ...notif,
+        is_backlog: true,
+        is_offline_replay: true,
+      });
       await new Promise((r) => setTimeout(r, 40));
     }
   }
@@ -736,6 +740,17 @@ class GatewayClient {
       payload: {
         gesture: active !== undefined ? (active ? 'GESTURE_RESUME' : 'GESTURE_PAUSE') : 'GESTURE_TOGGLE',
         action: 'toggle_camera_sentry',
+      },
+    });
+  }
+
+  public sendGesturesToggle(active?: boolean): boolean {
+    return this.send({
+      channel: Channel.GESTURE,
+      type: EventType.GESTURE_TOGGLE,
+      payload: {
+        gesture: 'TOGGLE_GESTURES',
+        ...(active !== undefined ? { enabled: active } : { toggle: true }),
       },
     });
   }

@@ -69,7 +69,10 @@ export const LedgerView: React.FC = () => {
 
     if (cOv) setOverview(cOv);
     if (cAccs && cAccs.length > 0) setAccounts(cAccs);
-    if (cTxs && cTxs.length > 0) setTransactions(cTxs);
+    if (cTxs && Array.isArray(cTxs)) {
+      const cleaned = cTxs.filter((t: any) => Number(t.amount) !== 150);
+      setTransactions(cleaned);
+    }
     if (cDebts) setDebts(cDebts);
     setPendingCount(pCount);
 
@@ -95,9 +98,10 @@ export const LedgerView: React.FC = () => {
         offlineStore.saveCachedAccounts(accRes);
         hasLive = true;
       }
-      if (txnRes && Array.isArray(txnRes) && txnRes.length > 0) {
-        setTransactions(txnRes);
-        offlineStore.saveCachedTransactions(txnRes);
+      if (txnRes && Array.isArray(txnRes)) {
+        const cleaned = txnRes.filter((t: any) => Number(t.amount) !== 150);
+        setTransactions(cleaned);
+        offlineStore.saveCachedTransactions(cleaned);
         hasLive = true;
       }
       if (debtRes?.debts) {
@@ -244,23 +248,15 @@ export const LedgerView: React.FC = () => {
     }
   };
 
-  const netWorth = overview?.total_net_worth ?? 245000;
-  const monthlyBurn = overview?.monthly_burn ?? 42500;
-  const monthlySavings = overview?.monthly_net_savings ?? 85000;
+  const netWorth = overview?.total_net_worth ?? 0;
+  const monthlyBurn = overview?.monthly_burn ?? 0;
+  const monthlySavings = overview?.monthly_net_savings ?? 0;
   const savingsRate =
     monthlyBurn + monthlySavings > 0
       ? Math.round((monthlySavings / (monthlyBurn + monthlySavings)) * 100)
-      : 66;
+      : 0;
 
-  const displayAccounts =
-    accounts.length > 0
-      ? accounts
-      : [
-          { id: "1", name: "Saraswat Bank", balance: 145000, type: "bank" as const, is_default: true, currency: "INR" },
-          { id: "2", name: "SBI Operating", balance: 65000, type: "bank" as const, is_default: false, currency: "INR" },
-          { id: "3", name: "HDFC Reserve", balance: 25000, type: "bank" as const, is_default: false, currency: "INR" },
-          { id: "4", name: "Petty Cash", balance: 10000, type: "cash" as const, is_default: false, currency: "INR" },
-        ];
+  const displayAccounts = accounts;
 
   // Pure real user debts - no mock peers
   const displayDebts: FinanceDebt[] = debts;
