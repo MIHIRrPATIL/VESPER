@@ -23,7 +23,10 @@ from backend.vision.display_sentry import (
     BlazeFaceDetector,
     DisplaySentryService,
     is_display_on,
+    load_display_state,
     restart_caelestia_services,
+    restore_display_state,
+    save_display_state,
     turn_display_off,
     turn_display_on,
 )
@@ -262,4 +265,51 @@ async def test_display_sentry_activity_prevents_absence_lock():
     await asyncio.sleep(0.02)
     sentry.notify_user_activity()
     assert sentry._last_user_activity > old_time
+
+
+def test_save_and_restore_display_state(tmp_path):
+    """Verifies that save_display_state captures active monitors and restore_display_state retrieves them."""
+    mock_monitors = json.dumps([
+        {
+            "name": "eDP-1",
+            "id": 0,
+            "activeWorkspace": {"id": 2, "name": "2"},
+            "focused": True,
+            "dpmsStatus": True,
+            "disabled": False,
+        }
+    ])
+    mock_active_ws = json.dumps({"id": 2, "name": "2", "monitor": "eDP-1"})
+    mock_active_win = json.dumps({"address": "0x12345", "title": "Editor", "class": "ide"})
+
+    def mock_run_cmd(cmd, *args, **kwargs):
+        if cmd == ["hyprctl", "monitors", "-j"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=mock_monitors)
+        if cmd == ["hyprctl", "activeworkspace", "-j"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=mock_active_ws)
+        if cmd == ["hyprctl", "activewindow", "-j"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=mock_active_win)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
+
+    with patch("subprocess.run", side_effect=mock_run_cmd), \
+         patch("shutil.which", return_value="/usr/bin/hyprctl"), \
+         patch("backend.vision.display_sentry.is_caelestia_shell_healthy", return_value=True):
+        saved = save_display_state()
+        assert len(saved["monitors"]) == 1
+        assert saved["monitors"][0]["name"] == "eDP-1"
+        assert saved["monitors"][0]["activeWorkspace"]["id"] == 2
+        assert saved["active_workspace"]["id"] == 2
+        assert saved["active_window"]["address"] == "0x12345"
+        assert saved["caelestia_healthy"] is True
+
+        # Now test restore
+        with patch("subprocess.run") as mock_restore_run:
+            mock_restore_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="")
+            res = restore_display_state(saved)
+            assert res is True
+            called = [c[0][0] for c in mock_restore_run.call_args_list]
+            assert ["hyprctl", "dispatch", "focusmonitor", "eDP-1"] in called
+            assert ["hyprctl", "dispatch", "workspace", "2"] in called
+            assert ["hyprctl", "dispatch", "focuswindow", "address:0x12345"] in called
+
 

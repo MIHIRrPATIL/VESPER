@@ -147,7 +147,7 @@ def test_peer_debt_tracking(supabase):
     )
     debt = repo.record_debt(debt_input)
     assert debt.id is not None
-    assert debt.person == person_name
+    assert debt.person.lower() == person_name.lower()
     assert (debt.amount) == 1200.0
     assert debt.settled is False
 

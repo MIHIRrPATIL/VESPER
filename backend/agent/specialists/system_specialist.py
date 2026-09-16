@@ -392,18 +392,12 @@ class SystemSpecialist(BaseSpecialist):
                 return turn_display_on(recover_caelestia=True)
             except Exception as e:
                 logger.warning(f"[System:dpms] turn_display_on error: {e}")
-
-        hyprctl = shutil.which("hyprctl")
-        if hyprctl:
+        elif state == "off":
             try:
-                # If turning off, give slight 0.8s lead time so audio/card dispatch starts cleanly
-                if state == "off":
-                    subprocess.Popen(["bash", "-c", "sleep 0.8 && hyprctl dispatch dpms off"])
-                else:
-                    subprocess.run([hyprctl, "dispatch", "dpms", state], capture_output=True, text=True, timeout=2.0)
-                return True
+                from backend.vision.display_sentry import turn_display_off
+                return turn_display_off(lock=False)
             except Exception as e:
-                logger.warning(f"[System:dpms] hyprctl error: {e}")
+                logger.warning(f"[System:dpms] turn_display_off error: {e}")
 
         wlopm = shutil.which("wlopm")
         if wlopm:

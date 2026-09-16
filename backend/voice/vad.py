@@ -45,9 +45,9 @@ class UtteranceSegmenter:
         self,
         sample_rate: int = 16000,
         frame_duration_ms: int = 30,
-        vad_mode: int = 2,
-        silence_threshold_ms: int = 400,
-        min_speech_duration_ms: int = 250,
+        vad_mode: int = 3,
+        silence_threshold_ms: int = 600,
+        min_speech_duration_ms: int = 500,
     ) -> None:
         self.sample_rate = sample_rate
         self.frame_duration_ms = frame_duration_ms

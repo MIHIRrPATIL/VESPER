@@ -130,6 +130,8 @@ def _fast_recall_profile() -> tuple[dict, str, dict]:
 
 def _fast_store_generic_memory(fact: str) -> tuple[dict, str, dict]:
     """Commits a generic fact statement into memory immediately with background persistence (<1ms)."""
+    import logging
+    logger = logging.getLogger("vesper.agent.fast_path")
     clean_fact = fact.strip().strip(".,!?:;\"'")
     try:
         from backend.data.repositories.memory import ShodhMemoryRepository

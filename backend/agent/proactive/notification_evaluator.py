@@ -348,6 +348,7 @@ class NotificationEvaluator:
             tx_type = "income"
         else:
             tx_label = "debit"
+            category = "General Expense"
             tx_type = "expense"
 
         # 4. Extract merchant / payee / counterparty
