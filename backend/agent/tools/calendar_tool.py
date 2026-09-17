@@ -20,6 +20,7 @@ logger = logging.getLogger("vesper.agent.tools.calendar")
 
 CREDENTIALS_PATH = Path(__file__).resolve().parent.parent.parent / "credentials" / "google_calendar_credentials.json"
 TOKEN_PATH = Path(__file__).resolve().parent.parent.parent / "credentials" / "google_calendar_token.json"
+GMAIL_TOKEN_PATH = Path(__file__).resolve().parent.parent.parent / "credentials" / "gmail_token.json"
 
 
 class GoogleCalendarTool:
@@ -29,6 +30,15 @@ class GoogleCalendarTool:
         self.client_id = GOOGLE_CALENDAR_CLIENT_ID
         self.client_secret = GOOGLE_CALENDAR_CLIENT_SECRET
         self.credentials_file = CREDENTIALS_PATH
+
+    @property
+    def token_path(self) -> Optional[Path]:
+        """Returns the active OAuth token path (Calendar or shared Gmail token)."""
+        if TOKEN_PATH.exists():
+            return TOKEN_PATH
+        if GMAIL_TOKEN_PATH.exists():
+            return GMAIL_TOKEN_PATH
+        return None
 
     def is_configured(self) -> bool:
         """Returns True if Google Calendar credentials are present."""
@@ -44,19 +54,10 @@ class GoogleCalendarTool:
         if not self.is_configured():
             return []
 
-        # Return mock / active sample if user has not yet completed interactive browser OAuth
-        if not TOKEN_PATH.exists():
-            now = datetime.datetime.now()
-            return [
-                {
-                    "summary": "Team Sync & Architectural Review",
-                    "start": (now + datetime.timedelta(hours=2)).strftime("%I:%M %p"),
-                    "end": (now + datetime.timedelta(hours=3)).strftime("%I:%M %p"),
-                    "location": "Google Meet",
-                    "status": "confirmed",
-                    "source": "sandbox",
-                }
-            ]
+        active_token = self.token_path
+        if not active_token:
+            logger.info("[GoogleCalendarTool] Calendar token not found; live account not connected.")
+            return []
 
         # Standard Google API execution when token is present
         def _fetch_events_sync() -> List[Dict[str, Any]]:
@@ -65,10 +66,10 @@ class GoogleCalendarTool:
                 from google.auth.transport.requests import Request
                 from googleapiclient.discovery import build
 
-                creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+                creds = Credentials.from_authorized_user_file(str(active_token))
                 if creds and creds.expired and creds.refresh_token:
                     creds.refresh(Request())
-                    with open(TOKEN_PATH, "w") as token:
+                    with open(active_token, "w") as token:
                         token.write(creds.to_json())
 
                 service: Any = build("calendar", "v3", credentials=creds)
@@ -122,14 +123,11 @@ class GoogleCalendarTool:
         """Schedules a new event on Google Calendar."""
         start_dt, end_dt = self._parse_event_time(start_time_str, end_time_str)
 
-        if not TOKEN_PATH.exists():
+        active_token = self.token_path
+        if not active_token:
             return {
-                "id": f"event_mock_{int(datetime.datetime.now().timestamp())}",
-                "summary": summary,
-                "start": start_dt.strftime("%I:%M %p"),
-                "end": end_dt.strftime("%I:%M %p"),
-                "status": "confirmed_mock",
-                "html_link": "https://calendar.google.com",
+                "status": "error",
+                "error": "Google Calendar live account not connected. Please authenticate via scripts/auth_google.py.",
             }
 
         def _create_event_sync() -> Dict[str, Any]:
@@ -138,10 +136,10 @@ class GoogleCalendarTool:
                 from google.auth.transport.requests import Request
                 from googleapiclient.discovery import build
 
-                creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+                creds = Credentials.from_authorized_user_file(str(active_token))
                 if creds and creds.expired and creds.refresh_token:
                     creds.refresh(Request())
-                    with open(TOKEN_PATH, "w") as token:
+                    with open(active_token, "w") as token:
                         token.write(creds.to_json())
 
                 service: Any = build("calendar", "v3", credentials=creds)
@@ -171,12 +169,8 @@ class GoogleCalendarTool:
             except Exception as e:
                 logger.warning(f"[Calendar] Error creating event via Google Calendar API: {e}")
                 return {
-                    "id": f"event_fallback_{int(datetime.datetime.now().timestamp())}",
-                    "summary": summary,
-                    "start": start_dt.strftime("%I:%M %p"),
-                    "end": end_dt.strftime("%I:%M %p"),
-                    "status": "fallback_local",
-                    "error": str(e),
+                    "status": "error",
+                    "error": f"Failed to create Google Calendar event: {e}",
                 }
 
         import asyncio
@@ -193,8 +187,9 @@ class GoogleCalendarTool:
         end_date: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Updates an existing Google Calendar event via PATCH."""
-        if not TOKEN_PATH.exists() or not event_id:
-            return {"id": event_id, "status": "mock_updated", "summary": summary}
+        active_token = self.token_path
+        if not active_token or not event_id:
+            return {"id": event_id, "status": "error", "error": "Google Calendar token not found or missing event_id."}
 
         def _update_sync() -> Dict[str, Any]:
             try:
@@ -202,10 +197,10 @@ class GoogleCalendarTool:
                 from google.auth.transport.requests import Request
                 from googleapiclient.discovery import build
 
-                creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+                creds = Credentials.from_authorized_user_file(str(active_token))
                 if creds and creds.expired and creds.refresh_token:
                     creds.refresh(Request())
-                    with open(TOKEN_PATH, "w") as token:
+                    with open(active_token, "w") as token:
                         token.write(creds.to_json())
 
                 service: Any = build("calendar", "v3", credentials=creds)
@@ -324,12 +319,11 @@ class GoogleCalendarTool:
                 return up_res
             logger.info(f"[Calendar] Event '{calendar_event_id}' could not be updated ({up_res.get('error')}); creating new event.")
 
-        if not TOKEN_PATH.exists():
-            mock_id = f"event_mock_{task_id}_{int(now.timestamp())}"
+        active_token = self.token_path
+        if not active_token:
             return {
-                "id": mock_id,
-                "summary": event_summary,
-                "status": "mock_created",
+                "status": "error",
+                "error": "Google Calendar live account not connected. Please authenticate via scripts/auth_google.py.",
             }
 
         def _insert_sync() -> Dict[str, Any]:
@@ -338,10 +332,10 @@ class GoogleCalendarTool:
                 from google.auth.transport.requests import Request
                 from googleapiclient.discovery import build
 
-                creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+                creds = Credentials.from_authorized_user_file(str(active_token))
                 if creds and creds.expired and creds.refresh_token:
                     creds.refresh(Request())
-                    with open(TOKEN_PATH, "w") as token:
+                    with open(active_token, "w") as token:
                         token.write(creds.to_json())
 
                 service: Any = build("calendar", "v3", credentials=creds)
@@ -372,10 +366,8 @@ class GoogleCalendarTool:
             except Exception as e:
                 logger.warning(f"[Calendar] Error creating event for {item_label} '{clean_title}': {e}")
                 return {
-                    "id": f"event_fallback_{task_id}",
-                    "summary": event_summary,
-                    "status": "fallback_error",
-                    "error": str(e),
+                    "status": "error",
+                    "error": f"Google Calendar event creation failed: {e}",
                 }
 
         import asyncio
@@ -383,7 +375,10 @@ class GoogleCalendarTool:
 
     async def delete_event(self, event_id: str) -> bool:
         """Deletes an event from Google Calendar by ID."""
-        if not TOKEN_PATH.exists() or not event_id:
+        active_token = self.token_path
+        if not active_token or not event_id:
+            return False
+        if event_id.startswith("event_mock_") or event_id.startswith("event_fallback_") or event_id.startswith("gcal_ev_"):
             return True
 
         def _delete_sync() -> bool:
@@ -392,10 +387,10 @@ class GoogleCalendarTool:
                 from google.auth.transport.requests import Request
                 from googleapiclient.discovery import build
 
-                creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+                creds = Credentials.from_authorized_user_file(str(active_token))
                 if creds and creds.expired and creds.refresh_token:
                     creds.refresh(Request())
-                    with open(TOKEN_PATH, "w") as token:
+                    with open(active_token, "w") as token:
                         token.write(creds.to_json())
 
                 service: Any = build("calendar", "v3", credentials=creds)

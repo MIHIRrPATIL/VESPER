@@ -10,6 +10,7 @@ Coordinates:
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
@@ -88,7 +89,7 @@ Persona Directives:
   * Carefully scan ALL web source snippets for the queried team or tournament fixtures. Do not rely solely on an AI overview if the web snippets list specific match schedules.
   * If the kickoff time has already passed relative to the current reference time (e.g. kickoff was 10:15 PM IST and current time is 11:00 PM IST), state that the match is currently in progress / underway, identify the opponent and venue, and report whatever current score or status is provided in the verified sources.
   * If a live in-game score is not yet finalized or published in the web snippets, truthfully state that the match is underway and report the kickoff time and score if known, rather than citing an older finished match from last week.
-- SANDBOX / MOCK DATA DISCLOSURE: If any specialist outcome indicates source="sandbox" or source="sandbox_inbox", explicitly state that you are referencing offline sandbox data as live account credentials are not yet connected.
+- EXPLICIT FAILURE REPORTING: If any specialist outcome indicates an error (status="FAILED") or failure to connect/authenticate, clearly and directly inform the user that you failed to execute the action for that specific reason (e.g. "I'm afraid I failed to access your email because the Google OAuth token has expired or been revoked, sir.") without fabricating data or pretending to succeed.
 """
 
 
@@ -442,7 +443,6 @@ class AlfredSupervisor:
         fp_result = self.fast_path.evaluate(cleaned_query)
         if fp_result.matched:
             # Trigger background specialist action (e.g. pause/resume Spotify)
-            import asyncio
             if fp_result.intent:
                 asyncio.create_task(
                     self.registry.execute_action(
@@ -505,15 +505,10 @@ class AlfredSupervisor:
             and all(r.success for r in exec_result.specialist_results)
         )
 
-        # Check for sandbox data presence across all outcomes
-        has_sandbox_data = any(
-            isinstance(r.data, dict) and (
-                r.data.get("source") in ("sandbox", "sandbox_inbox")
-                or (isinstance(r.data.get("emails"), list) and any(isinstance(e, dict) and e.get("source") == "sandbox" for e in r.data["emails"]))
-                or (isinstance(r.data.get("events"), list) and any(isinstance(e, dict) and e.get("source") == "sandbox" for e in r.data["events"]))
-                or (isinstance(r.data.get("calendar_events"), list) and any(isinstance(e, dict) and e.get("source") == "sandbox" for e in r.data["calendar_events"]))
-            )
-            for r in exec_result.specialist_results
+        # Check if all specialist steps failed
+        all_failed = (
+            bool(exec_result.specialist_results)
+            and all(not r.success for r in exec_result.specialist_results)
         )
 
         # Check if the user query is asking an inquiry/question where synthesis is needed
@@ -566,6 +561,10 @@ class AlfredSupervisor:
         if plan.plan_type == "direct" and exec_result.direct_response:
             raw_response = exec_result.direct_response
             eval_res = OutputEvaluator.evaluate(raw_response, query=cleaned_query)
+        elif all_failed:
+            err_msg = exec_result.specialist_results[0].error or "Unknown failure"
+            raw_response = f"Failed to run the agent: {err_msg}."
+            eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results, query=cleaned_query)
         elif direct_research_answer:
             # Guaranteed instant (<1ms) answer synthesis when research specialist provides exact fact
             raw_response = direct_research_answer
@@ -664,17 +663,6 @@ class AlfredSupervisor:
                 summaries = [r.speech_summary for r in exec_result.specialist_results if r.speech_summary]
                 raw_response = " ".join(summaries) if summaries else "I have completed the task, sir."
             eval_res = OutputEvaluator.evaluate(raw_response, exec_result.specialist_results, query=cleaned_query)
-
-        if has_sandbox_data:
-            sandbox_notice = "[Sandbox Notice] I am currently referencing offline sandbox data as live account credentials are not yet connected, sir. "
-            if raw_response and not raw_response.startswith("[Sandbox Notice]"):
-                raw_response = sandbox_notice + raw_response
-            if eval_res and hasattr(eval_res, "speech_text") and eval_res.speech_text:
-                if not eval_res.speech_text.startswith("Please note that I am currently referencing offline sandbox data"):
-                    eval_res.speech_text = "Please note that I am currently referencing offline sandbox data, sir. " + eval_res.speech_text
-            if eval_res and hasattr(eval_res, "markdown_body") and eval_res.markdown_body:
-                if not eval_res.markdown_body.startswith("[Sandbox Notice]"):
-                    eval_res.markdown_body = sandbox_notice + eval_res.markdown_body
 
         total_elapsed_ms = (time.perf_counter() - t0) * 1000
 

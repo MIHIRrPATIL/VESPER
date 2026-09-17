@@ -559,7 +559,7 @@ class TaskSpecialist(BaseSpecialist):
                         title=task_obj.title,
                         deadline=task_obj.deadline,
                         done=task_obj.done,
-                        priority=task_obj.priority.value if hasattr(task_obj.priority, "value") else str(task_obj.priority),
+                        priority=task_obj.priority.value if hasattr(task_obj.priority, "value") else task_obj.priority,
                         is_reminder=False,
                     )
                     if cal_res.get("id"):
@@ -741,8 +741,6 @@ class TaskSpecialist(BaseSpecialist):
 
                 t_min, t_max = self._resolve_filter_range(date_val=date_filter, start_val=start_filter, end_val=end_filter)
                 events = await self._fetch_calendar_events(max_results=max_res, time_min=t_min, time_max=t_max)
-                is_sandbox = any(e.get("source") == "sandbox" for e in events)
-
                 formatted_events = [
                     {
                         "id": e.get("id"),
@@ -761,8 +759,6 @@ class TaskSpecialist(BaseSpecialist):
                     speech = self._format_event_list_speech(formatted_events)
 
                 res_data: dict[str, Any] = {"events": formatted_events, "count": len(formatted_events)}
-                if is_sandbox:
-                    res_data["source"] = "sandbox"
 
                 return SpecialistResult(
                     success=True,
@@ -792,7 +788,7 @@ class TaskSpecialist(BaseSpecialist):
                             title=target.title,
                             deadline=target.deadline,
                             done=True,
-                            priority=target.priority.value if hasattr(target.priority, "value") else str(target.priority),
+                            priority=target.priority.value if hasattr(target.priority, "value") else target.priority,
                             is_reminder=(target.metadata.get("item_type") == "reminder" if target.metadata else False),
                             calendar_event_id=cal_id,
                         )
@@ -869,28 +865,32 @@ class TaskSpecialist(BaseSpecialist):
                     for ev in cal_events:
                         ev_summary = str(ev.get("summary", "")).lower()
                         if title_query in ev_summary or ev_summary in title_query:
-                            await self.calendar.delete_event(ev.get("id"))
-                            return SpecialistResult(
-                                success=True,
-                                action=action,
-                                data={"calendar_id": ev.get("id"), "title": ev.get("summary")},
-                                speech_summary=f"Removed '{ev.get('summary')}' from your calendar, sir.",
-                                card_payload={"type": "task_deleted", "title": ev.get("summary")},
-                            )
+                            ev_id = ev.get("id")
+                            if ev_id:
+                                await self.calendar.delete_event(str(ev_id))
+                                return SpecialistResult(
+                                    success=True,
+                                    action=action,
+                                    data={"calendar_id": str(ev_id), "title": ev.get("summary")},
+                                    speech_summary=f"Removed '{ev.get('summary')}' from your calendar, sir.",
+                                    card_payload={"type": "task_deleted", "title": ev.get("summary")},
+                                )
                     m_time = re.search(r"(\d{1,2})", title_query)
                     if m_time:
                         hour_val = int(m_time.group(1))
                         for ev in cal_events:
                             ev_start = str(ev.get("start", "")).lower()
                             if f"{hour_val}:" in ev_start or f"{hour_val} " in ev_start:
-                                await self.calendar.delete_event(ev.get("id"))
-                                return SpecialistResult(
-                                    success=True,
-                                    action=action,
-                                    data={"calendar_id": ev.get("id"), "title": ev.get("summary")},
-                                    speech_summary=f"Removed '{ev.get('summary')}' from your calendar, sir.",
-                                    card_payload={"type": "task_deleted", "title": ev.get("summary")},
-                                )
+                                ev_id = ev.get("id")
+                                if ev_id:
+                                    await self.calendar.delete_event(str(ev_id))
+                                    return SpecialistResult(
+                                        success=True,
+                                        action=action,
+                                        data={"calendar_id": str(ev_id), "title": ev.get("summary")},
+                                        speech_summary=f"Removed '{ev.get('summary')}' from your calendar, sir.",
+                                        card_payload={"type": "task_deleted", "title": ev.get("summary")},
+                                    )
 
                 return SpecialistResult(success=False, action=action, error="No matching task found to delete.")
 
@@ -990,7 +990,7 @@ class TaskSpecialist(BaseSpecialist):
                             title=updated_title,
                             deadline=deadline_to_sync,
                             done=target.done,
-                            priority=target.priority.value if hasattr(target.priority, "value") else str(target.priority),
+                            priority=target.priority.value if hasattr(target.priority, "value") else target.priority,
                             is_reminder=(target.metadata.get("item_type") == "reminder" if target.metadata else False),
                             calendar_event_id=cal_id,
                         )
@@ -1039,21 +1039,22 @@ class TaskSpecialist(BaseSpecialist):
 
                     if matched_event:
                         ev_id = matched_event.get("id")
-                        updated_title = new_title or matched_event.get("summary", "Event")
-                        await self.calendar.update_event(
-                            event_id=ev_id,
-                            summary=updated_title,
-                            start_time_str=new_time if new_time else None,
-                        )
-                        time_display = self._format_spoken_datetime(matched_event.get("start"))
-                        speech = f"I have updated the calendar event to '{updated_title}' ({time_display}), sir."
-                        return SpecialistResult(
-                            success=True,
-                            action="update_task",
-                            data={"event_id": ev_id, "title": updated_title},
-                            speech_summary=speech,
-                            card_payload={"type": "calendar_event_updated", "id": ev_id, "title": updated_title},
-                        )
+                        if ev_id:
+                            updated_title = new_title or matched_event.get("summary", "Event")
+                            await self.calendar.update_event(
+                                event_id=str(ev_id),
+                                summary=updated_title,
+                                start_time_str=new_time if new_time else None,
+                            )
+                            time_display = self._format_spoken_datetime(matched_event.get("start"))
+                            speech = f"I have updated the calendar event to '{updated_title}' ({time_display}), sir."
+                            return SpecialistResult(
+                                success=True,
+                                action="update_task",
+                                data={"event_id": str(ev_id), "title": updated_title},
+                                speech_summary=speech,
+                                card_payload={"type": "calendar_event_updated", "id": str(ev_id), "title": updated_title},
+                            )
 
                 return SpecialistResult(
                     success=False,
@@ -1111,7 +1112,6 @@ class TaskSpecialist(BaseSpecialist):
                 all_pending = self.repo.list(include_completed=False, limit=50)
                 # Fetch events specifically within target date window
                 events = await self._fetch_calendar_events(max_results=10, time_min=t_min, time_max=t_max)
-                is_sandbox = any(e.get("source") == "sandbox" for e in events)
 
                 reminders = [t for t in all_pending if (t.metadata and t.metadata.get("item_type") == "reminder")]
                 pure_tasks = [t for t in all_pending if not (t.metadata and t.metadata.get("item_type") in ("reminder", "event"))]
@@ -1185,8 +1185,6 @@ class TaskSpecialist(BaseSpecialist):
                     "overdue_count": len(overdue_tasks),
                     "backlog_count": len(backlog_tasks),
                 }
-                if is_sandbox:
-                    agenda_data["source"] = "sandbox"
 
                 return SpecialistResult(
                     success=True,

@@ -44,7 +44,9 @@ def _lock_windows() -> None:
     """Locks user session on Windows."""
     try:
         import ctypes
-        ctypes.windll.user32.LockWorkStation()
+        windll = getattr(ctypes, "windll", None)
+        if windll is not None:
+            windll.user32.LockWorkStation()
     except Exception as e:
         logger.warning(f"[DisplaySentry] Could not lock Windows workstation: {e}")
 
@@ -53,10 +55,12 @@ def _turn_display_off_windows() -> None:
     """Powers off monitors on Windows using SendMessage SC_MONITORPOWER."""
     try:
         import ctypes
-        HWND_BROADCAST = 0xFFFF
-        WM_SYSCOMMAND = 0x0112
-        SC_MONITORPOWER = 0xF170
-        ctypes.windll.user32.PostMessageA(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)
+        windll = getattr(ctypes, "windll", None)
+        if windll is not None:
+            HWND_BROADCAST = 0xFFFF
+            WM_SYSCOMMAND = 0x0112
+            SC_MONITORPOWER = 0xF170
+            windll.user32.PostMessageA(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)
     except Exception as e:
         logger.warning(f"[DisplaySentry] Could not power off Windows display via SendMessage: {e}")
         try:
@@ -70,15 +74,17 @@ def _turn_display_on_windows() -> None:
     """Wakes monitors on Windows by posting input events and SC_MONITORPOWER -1."""
     try:
         import ctypes
-        MOUSEEVENTF_MOVE = 0x0001
-        ctypes.windll.user32.mouse_event(MOUSEEVENTF_MOVE, 0, 1, 0, 0)
-        time.sleep(0.05)
-        ctypes.windll.user32.mouse_event(MOUSEEVENTF_MOVE, 0, -1, 0, 0)
+        windll = getattr(ctypes, "windll", None)
+        if windll is not None:
+            MOUSEEVENTF_MOVE = 0x0001
+            windll.user32.mouse_event(MOUSEEVENTF_MOVE, 0, 1, 0, 0)
+            time.sleep(0.05)
+            windll.user32.mouse_event(MOUSEEVENTF_MOVE, 0, -1, 0, 0)
 
-        HWND_BROADCAST = 0xFFFF
-        WM_SYSCOMMAND = 0x0112
-        SC_MONITORPOWER = 0xF170
-        ctypes.windll.user32.PostMessageA(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, -1)
+            HWND_BROADCAST = 0xFFFF
+            WM_SYSCOMMAND = 0x0112
+            SC_MONITORPOWER = 0xF170
+            windll.user32.PostMessageA(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, -1)
     except Exception as e:
         logger.warning(f"[DisplaySentry] Could not wake Windows display: {e}")
 
@@ -87,10 +93,13 @@ def _is_display_on_windows() -> bool:
     """Checks if desktop is accessible on Windows."""
     try:
         import ctypes
-        hdesktop = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0001)
-        if hdesktop == 0:
-            return False
-        ctypes.windll.user32.CloseDesktop(hdesktop)
+        windll = getattr(ctypes, "windll", None)
+        if windll is not None:
+            hdesktop = windll.user32.OpenInputDesktop(0, False, 0x0001)
+            if hdesktop == 0:
+                return False
+            windll.user32.CloseDesktop(hdesktop)
+            return True
         return True
     except Exception:
         return True

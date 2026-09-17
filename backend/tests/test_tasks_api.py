@@ -39,26 +39,31 @@ async def test_get_tasks_categorization():
 async def test_create_and_toggle_task():
     transport = ASGITransport(app=gateway_app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        # 1. Create a task
-        create_res = await client.post(
-            "/api/tasks",
-            json={
-                "title": "Automated Unit Test Task",
-                "priority": "high",
-                "tag": "TEST",
-            },
-        )
-        assert create_res.status_code == 200
-        created = create_res.json()["task"]
-        task_id = created["id"]
-        assert created["title"] == "Automated Unit Test Task"
-        assert created["done"] is False
+        task_id = None
+        try:
+            # 1. Create a task
+            create_res = await client.post(
+                "/api/tasks",
+                json={
+                    "title": "Automated Unit Test Task",
+                    "priority": "high",
+                    "tag": "TEST",
+                },
+            )
+            assert create_res.status_code == 200
+            created = create_res.json()["task"]
+            task_id = created["id"]
+            assert created["title"] == "Automated Unit Test Task"
+            assert created["done"] is False
 
-        # 2. Toggle the task to completed
-        toggle_res = await client.patch(
-            f"/api/tasks/{task_id}/toggle",
-            json={"done": True},
-        )
-        assert toggle_res.status_code == 200
-        updated = toggle_res.json()["task"]
-        assert updated["done"] is True
+            # 2. Toggle the task to completed
+            toggle_res = await client.patch(
+                f"/api/tasks/{task_id}/toggle",
+                json={"done": True},
+            )
+            assert toggle_res.status_code == 200
+            updated = toggle_res.json()["task"]
+            assert updated["done"] is True
+        finally:
+            if task_id:
+                await client.delete(f"/api/tasks/{task_id}")

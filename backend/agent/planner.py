@@ -1784,6 +1784,17 @@ class SwarmPlanner:
             results.append(res)
             step_outputs[f"step_{idx}"] = res.data or res.speech_summary
 
+            # Halt sequential execution immediately if step failed
+            if not res.success:
+                logger.warning(f"[Planner] Step {idx} ('{agent_name}:{action}') failed: {res.error}. Halting execution.")
+                exec_ms = (time.perf_counter() - t0) * 1000
+                return ExecutionResult(
+                    plan_type="sequential",
+                    specialist_results=results,
+                    execution_latency_ms=exec_ms,
+                    provider_used=plan.provider_used,
+                )
+
             # ── Confidence Gate: Vision/OCR → Research chains only ──────
             # If this step is a vision/OCR action and the NEXT step is a research step,
             # check the OCR confidence before blindly passing the result downstream.

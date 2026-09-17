@@ -50,58 +50,72 @@ def test_create_and_delete_transaction(client):
     acc = accounts[0]
     initial_balance = acc["balance"]
 
-    # 2. Add an expense
-    txn_res = client.post(
-        "/api/finance/transactions",
-        json={
-            "amount": 25.0,
-            "type": "expense",
-            "category": "Test Category",
-            "description": "Pytest transaction",
-            "account_id": acc["id"],
-        },
-    )
-    assert txn_res.status_code == 201
-    txn = txn_res.json()
-    assert txn["amount"] == 25.0
+    txn_id = None
+    try:
+        # 2. Add an expense
+        txn_res = client.post(
+            "/api/finance/transactions",
+            json={
+                "amount": 25.0,
+                "type": "expense",
+                "category": "Test Category",
+                "description": "Pytest transaction",
+                "account_id": acc["id"],
+            },
+        )
+        assert txn_res.status_code == 201
+        txn = txn_res.json()
+        txn_id = txn.get("id")
+        assert txn["amount"] == 25.0
 
-    # 3. Check updated balance
-    acc_after = client.get(f"/api/finance/accounts/{acc['id']}").json()
-    assert acc_after["balance"] == initial_balance - 25.0
+        # 3. Check updated balance
+        acc_after = client.get(f"/api/finance/accounts/{acc['id']}").json()
+        assert acc_after["balance"] == initial_balance - 25.0
 
-    # 4. Delete the transaction (restores balance)
-    del_res = client.delete(f"/api/finance/transactions/{txn['id']}")
-    assert del_res.status_code == 200
+        # 4. Delete the transaction (restores balance)
+        del_res = client.delete(f"/api/finance/transactions/{txn_id}")
+        assert del_res.status_code == 200
+        txn_id = None
 
-    # 5. Check restored balance
-    acc_restored = client.get(f"/api/finance/accounts/{acc['id']}").json()
-    assert acc_restored["balance"] == initial_balance
+        # 5. Check restored balance
+        acc_restored = client.get(f"/api/finance/accounts/{acc['id']}").json()
+        assert acc_restored["balance"] == initial_balance
+    finally:
+        if txn_id:
+            client.delete(f"/api/finance/transactions/{txn_id}")
 
 
 def test_recurring_transactions_crud(client):
     """Verifies creating, listing, and deleting a recurring schedule."""
-    # Create recurring rule
-    create_res = client.post(
-        "/api/finance/recurring",
-        json={
-            "name": "Pytest Spotify",
-            "amount": 119.0,
-            "type": "expense",
-            "frequency": "monthly",
-            "category": "Entertainment",
-        },
-    )
-    assert create_res.status_code == 201
-    rule = create_res.json()
-    assert rule["name"] == "Pytest Spotify"
-    assert rule["amount"] == 119.0
+    rule_id = None
+    try:
+        # Create recurring rule
+        create_res = client.post(
+            "/api/finance/recurring",
+            json={
+                "name": "Pytest Spotify",
+                "amount": 119.0,
+                "type": "expense",
+                "frequency": "monthly",
+                "category": "Entertainment",
+            },
+        )
+        assert create_res.status_code == 201
+        rule = create_res.json()
+        rule_id = rule.get("id")
+        assert rule["name"] == "Pytest Spotify"
+        assert rule["amount"] == 119.0
 
-    # List
-    list_res = client.get("/api/finance/recurring")
-    assert list_res.status_code == 200
-    rules = list_res.json()
-    assert any(r["id"] == rule["id"] for r in rules)
+        # List
+        list_res = client.get("/api/finance/recurring")
+        assert list_res.status_code == 200
+        rules = list_res.json()
+        assert any(r["id"] == rule_id for r in rules)
 
-    # Delete
-    del_res = client.delete(f"/api/finance/recurring/{rule['id']}")
-    assert del_res.status_code == 200
+        # Delete
+        del_res = client.delete(f"/api/finance/recurring/{rule_id}")
+        assert del_res.status_code == 200
+        rule_id = None
+    finally:
+        if rule_id:
+            client.delete(f"/api/finance/recurring/{rule_id}")

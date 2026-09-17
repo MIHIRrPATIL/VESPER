@@ -1078,7 +1078,7 @@ async def test_weather_forecast_prefilter_and_location():
     planner = SwarmPlanner()
     plan, _ = await planner.create_plan(
         "How's the weather going to be tomorrow in Mumbai?",
-        registry={"weather": True},
+        registry=SpecialistRegistry(),
     )
     assert plan.provider_used == "prefilter"
     assert len(plan.steps) == 1

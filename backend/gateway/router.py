@@ -814,7 +814,7 @@ class MessageRouter:
         elif gesture in ("ROCK_ON", "GESTURE_LOCK", "TOGGLE_GESTURES", "GESTURE_TOGGLE") or gesture.startswith("GESTURE_TOGGLE"):
             # Toggle gesture tracking pause/lock via Rock On deliberate hold or explicit toggle
             cur_paused = getattr(self, "_gestures_paused", False)
-            enabled_arg = payload.get("enabled")
+            enabled_arg = envelope.payload.get("enabled") if isinstance(envelope.payload, dict) else None
             if enabled_arg is not None:
                 new_paused = not bool(enabled_arg)
             elif ":PAUSED" in gesture:

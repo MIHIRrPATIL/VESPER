@@ -239,6 +239,7 @@ class EmailSpecialist(BaseSpecialist):
         self._sandbox_threads = {k: list(v) for k, v in DEFAULT_MOCK_THREADS.items()}
         self._sandbox_outbox: List[Dict[str, Any]] = []
         self._last_search_results: List[Dict[str, Any]] = []
+        self._last_auth_error: Optional[str] = None
 
     @staticmethod
     def _clean_html_to_text(text: str) -> str:
@@ -414,6 +415,7 @@ class EmailSpecialist(BaseSpecialist):
             return None
         token_file = GMAIL_TOKEN_PATH if GMAIL_TOKEN_PATH.exists() else CALENDAR_TOKEN_PATH
         if not token_file.exists():
+            self._last_auth_error = "Gmail credentials not found. Please run 'python scripts/auth_gmail.py' to authenticate."
             return None
 
         try:
@@ -429,18 +431,26 @@ class EmailSpecialist(BaseSpecialist):
                         tf.write(creds.to_json())
                 except Exception as ref_err:
                     logger.warning(f"[EmailSpecialist] Token refresh failed: {ref_err}")
+                    self._last_auth_error = f"Google OAuth token expired or revoked ({ref_err}). Please run 'python scripts/auth_gmail.py' to re-authenticate."
+                    return None
 
             if creds and creds.valid:
                 # Check if scopes allow gmail
                 scopes = creds.scopes or []
                 if not any("gmail" in str(s).lower() for s in scopes):
-                    logger.debug("[EmailSpecialist] Token lacks gmail scopes, using sandbox.")
+                    logger.debug("[EmailSpecialist] Token lacks gmail scopes.")
+                    self._last_auth_error = "Google OAuth token lacks Gmail scopes. Please run 'python scripts/auth_gmail.py' to authorize email access."
                     return None
                 service = build("gmail", "v1", credentials=creds)
+                self._last_auth_error = None
                 return service
+            else:
+                self._last_auth_error = "Google OAuth credentials are invalid or expired. Please run 'python scripts/auth_gmail.py'."
+                return None
         except Exception as e:
-            logger.debug(f"[EmailSpecialist] Live Gmail client init skipped ({e}), using resilient sandbox.")
-        return None
+            logger.debug(f"[EmailSpecialist] Live Gmail client init skipped ({e}).")
+            self._last_auth_error = f"Failed to initialize Gmail client: {e}"
+            return None
 
     async def execute(
         self, action: str, params: Dict[str, Any], context: Optional[Dict[str, Any]] = None
@@ -491,6 +501,16 @@ class EmailSpecialist(BaseSpecialist):
     async def list_unread_emails(self, max_results: int = 5) -> SpecialistResult:
         """Fetches unread emails from Gmail or sandbox inbox."""
         service = self._get_gmail_service()
+        if not service and not self.sandbox_mode:
+            err = self._last_auth_error or "Gmail credentials not configured or authorization expired."
+            return SpecialistResult(
+                success=False,
+                action="list_unread_emails",
+                error=err,
+                speech_summary=f"I failed to check your emails, sir: {err}",
+                card_payload={"type": "error_card", "title": "Gmail Error", "error": err},
+            )
+
         if service:
             try:
                 res = service.users().messages().list(
@@ -527,7 +547,15 @@ class EmailSpecialist(BaseSpecialist):
                     card_payload={"type": "email_list_card", "emails": items, "title": "Unread Inbox"},
                 )
             except Exception as live_err:
-                logger.warning(f"[EmailSpecialist] Live Gmail query failed ({live_err}), falling back to sandbox.")
+                logger.warning(f"[EmailSpecialist] Live Gmail query failed: {live_err}")
+                if not self.sandbox_mode:
+                    return SpecialistResult(
+                        success=False,
+                        action="list_unread_emails",
+                        error=f"Live Gmail query failed: {live_err}",
+                        speech_summary=f"I failed to check your emails, sir: {live_err}",
+                        card_payload={"type": "error_card", "title": "Gmail Error", "error": str(live_err)},
+                    )
 
         # Fallback to sandbox inbox
         unread = [m for m in self._sandbox_inbox if bool(m.get("unread"))][:max_results]
@@ -649,6 +677,16 @@ class EmailSpecialist(BaseSpecialist):
             return await self.list_unread_emails(max_results)
 
         service = self._get_gmail_service()
+        if not service and not self.sandbox_mode:
+            err = self._last_auth_error or "Gmail credentials not configured or authorization expired."
+            return SpecialistResult(
+                success=False,
+                action="search_emails",
+                error=err,
+                speech_summary=f"I failed to search your emails, sir: {err}",
+                card_payload={"type": "error_card", "title": "Gmail Error", "error": err},
+            )
+
         if service:
             try:
                 candidates = self.build_smart_gmail_queries(query)
@@ -733,7 +771,15 @@ class EmailSpecialist(BaseSpecialist):
                     card_payload={"type": "email_list_card", "emails": items, "title": f"Search: {query}"},
                 )
             except Exception as live_err:
-                logger.warning(f"[EmailSpecialist] Gmail search failed ({live_err}), filtering sandbox.")
+                logger.warning(f"[EmailSpecialist] Gmail search failed: {live_err}")
+                if not self.sandbox_mode:
+                    return SpecialistResult(
+                        success=False,
+                        action="search_emails",
+                        error=f"Live Gmail search failed: {live_err}",
+                        speech_summary=f"I failed to search your emails, sir: {live_err}",
+                        card_payload={"type": "error_card", "title": "Gmail Error", "error": str(live_err)},
+                    )
 
         # Sandbox search with entity normalization
         from backend.agent.normalizer import extract_bank_and_intent, normalize_entities
@@ -822,6 +868,16 @@ class EmailSpecialist(BaseSpecialist):
                 email_id = resolved_id
 
         service = self._get_gmail_service()
+        if not service and not self.sandbox_mode:
+            err = self._last_auth_error or "Gmail credentials not configured or authorization expired."
+            return SpecialistResult(
+                success=False,
+                action="read_email",
+                error=err,
+                speech_summary=f"I failed to read the email, sir: {err}",
+                card_payload={"type": "error_card", "title": "Gmail Error", "error": err},
+            )
+
         if service:
             try:
                 detail = service.users().messages().get(
@@ -860,7 +916,15 @@ class EmailSpecialist(BaseSpecialist):
                     card_payload={"type": "email_card", "email": email_obj},
                 )
             except Exception as live_err:
-                logger.warning(f"[EmailSpecialist] Read email {email_id} failed ({live_err}), checking sandbox.")
+                logger.warning(f"[EmailSpecialist] Read email {email_id} failed: {live_err}")
+                if not self.sandbox_mode:
+                    return SpecialistResult(
+                        success=False,
+                        action="read_email",
+                        error=f"Live Gmail read failed: {live_err}",
+                        speech_summary=f"I failed to read the email, sir: {live_err}",
+                        card_payload={"type": "error_card", "title": "Gmail Error", "error": str(live_err)},
+                    )
 
         # Sandbox retrieval
         target = None
@@ -903,8 +967,8 @@ class EmailSpecialist(BaseSpecialist):
         target["source"] = "sandbox"
         if not target.get("thread_id"):
             target["thread_id"] = "thread_general"
-        clean_snippet = self._clean_html_to_text(target.get("snippet", ""))
-        clean_body = self._clean_html_to_text(target.get("body", ""))
+        clean_snippet = self._clean_html_to_text(str(target.get("snippet", "") or ""))
+        clean_body = self._clean_html_to_text(str(target.get("body", "") or ""))
         excerpt = clean_snippet or ((clean_body[:160] + "...") if len(clean_body) > 160 else clean_body)
         speech = f"Email from {target.get('sender_name', target['sender'])} regarding '{target['subject']}': {excerpt}"
         return SpecialistResult(
@@ -923,6 +987,16 @@ class EmailSpecialist(BaseSpecialist):
     ) -> SpecialistResult:
         """Retrieves and reconstructs the complete chronological email thread."""
         service = self._get_gmail_service()
+        if not service and not self.sandbox_mode:
+            err = self._last_auth_error or "Gmail credentials not configured or authorization expired."
+            return SpecialistResult(
+                success=False,
+                action="read_thread",
+                error=err,
+                speech_summary=f"I failed to read the email thread, sir: {err}",
+                card_payload={"type": "error_card", "title": "Gmail Error", "error": err},
+            )
+
         tid = thread_id or email_id
 
         if service and not tid and query:
@@ -966,7 +1040,7 @@ class EmailSpecialist(BaseSpecialist):
                     latest = msgs[-1]
                     speech = (
                         f"The email thread on '{subject}' contains {len(msgs)} messages between {', '.join(participants)}. "
-                        f"The latest response is from {latest.get('sender_name')}: '{latest.get('snippet')[:140]}...'"
+                        f"The latest response is from {latest.get('sender_name')}: '{str(latest.get('snippet') or '')[:140]}...'"
                     )
                     return SpecialistResult(
                         success=True,
@@ -985,7 +1059,15 @@ class EmailSpecialist(BaseSpecialist):
                         card_payload={"type": "email_thread_card", "thread_id": tid, "subject": subject, "messages": msgs},
                     )
             except Exception as live_err:
-                logger.warning(f"[EmailSpecialist] Gmail thread {tid} fetch failed ({live_err}), checking sandbox.")
+                logger.warning(f"[EmailSpecialist] Gmail thread {tid} fetch failed: {live_err}")
+                if not self.sandbox_mode:
+                    return SpecialistResult(
+                        success=False,
+                        action="read_thread",
+                        error=f"Live Gmail thread fetch failed: {live_err}",
+                        speech_summary=f"I failed to read the email thread, sir: {live_err}",
+                        card_payload={"type": "error_card", "title": "Gmail Error", "error": str(live_err)},
+                    )
 
         # Sandbox retrieval
         matched_thread_key = None
@@ -1098,6 +1180,16 @@ class EmailSpecialist(BaseSpecialist):
             )
 
         service = self._get_gmail_service()
+        if not service and not self.sandbox_mode:
+            err = self._last_auth_error or "Gmail credentials not configured or authorization expired."
+            return SpecialistResult(
+                success=False,
+                action="send_email",
+                error=err,
+                speech_summary=f"I failed to dispatch the email, sir: {err}",
+                card_payload={"type": "email_error_card", "error": err, "to": clean_to},
+            )
+
         if service:
             try:
                 msg = MIMEText(body)
@@ -1114,7 +1206,15 @@ class EmailSpecialist(BaseSpecialist):
                     card_payload={"type": "email_sent_card", "to": clean_to, "subject": subject},
                 )
             except Exception as live_err:
-                logger.warning(f"[EmailSpecialist] Gmail send failed: {live_err}, storing in verified outbox.")
+                logger.warning(f"[EmailSpecialist] Gmail send failed: {live_err}")
+                if not self.sandbox_mode:
+                    return SpecialistResult(
+                        success=False,
+                        action="send_email",
+                        error=f"Live Gmail send failed: {live_err}",
+                        speech_summary=f"I failed to send the email, sir: {live_err}",
+                        card_payload={"type": "email_error_card", "error": str(live_err), "to": clean_to},
+                    )
 
         sent_item = {
             "to": clean_to,

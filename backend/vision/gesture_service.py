@@ -823,7 +823,7 @@ class GestureWorker:
         middle_folded = dist_2d(middle_tip, wrist) < dist_2d(middle_pip, wrist) * 1.10
         ring_folded = dist_2d(ring_tip, wrist) < dist_2d(ring_pip, wrist) * 1.10
 
-        return bool(index_ext and pinky_ext and middle_folded and ring_folded)
+        return index_ext and pinky_ext and middle_folded and ring_folded
 
     @staticmethod
     def _detect_finger_gun(hand_lms: Any) -> Tuple[str, float]:
@@ -1169,6 +1169,7 @@ class GestureWorker:
                         self._toggle_gesture_fired = False
 
             # ── 2. Landmark-based detections ──────────────────────────────
+            hand_lms = None
             if result.hand_landmarks and len(result.hand_landmarks) > 0:
                 hand_lms = result.hand_landmarks[0]
                 wrist = hand_lms[0]
