@@ -53,7 +53,7 @@ export class SubnetDiscoveryService {
     }
 
     // 2. Known workstation hosts and emulator aliases
-    const commonHosts = ["192.168.0.107", "192.168.0.202", "127.0.0.1", "localhost"];
+    const commonHosts = ["192.168.0.200", "172.20.10.2", "192.168.0.107", "192.168.0.202", "127.0.0.1", "localhost"];
     if (Platform.OS === "android") {
       commonHosts.push("10.0.2.2");
     }
@@ -68,7 +68,7 @@ export class SubnetDiscoveryService {
         const parts = localIp.split(".");
         if (parts.length === 4) {
           const prefix = `${parts[0]}.${parts[1]}.${parts[2]}`;
-          for (const suf of [1, 107, 202, 2, 10, 50, 100]) {
+          for (const suf of [1, 200, 107, 202, 2, 10, 50, 100]) {
             const ip = `${prefix}.${suf}`;
             if (!fastCandidates.includes(ip) && ip !== localIp) {
               fastCandidates.push(ip);

@@ -143,6 +143,7 @@ class WorkstationStore {
   public zenMode: boolean = false;
   public isWakeWordArmed: boolean = true;
   private wasWakeWordArmedBeforeTemporaryPTT: boolean | null = null;
+  private listeningWatchdogTimer: any = null;
   public isCameraActive: boolean = false;
   public isGesturesActive: boolean = true;
   public masterVolume: number = 70;
@@ -274,13 +275,17 @@ class WorkstationStore {
     const { type, payload } = envelope;
 
     if (type === 'WAKE_WORD_DETECTED') {
+      this.armListeningWatchdog();
       this.agentState = 'LISTENING';
+      const isFollowup = payload?.trigger === 'followup_continuation';
       this.messages = [
         ...this.messages,
         {
           id: envelope.uuid || Math.random().toString(36),
           sender: 'system',
-          text: `Vocal Wake Word Perceived: "${payload?.wake_word || 'Hey Alfred'}"`,
+          text: isFollowup
+            ? 'Alfred is listening for your response...'
+            : `Vocal Wake Word Perceived: "${payload?.wake_word || 'Hey Alfred'}"`,
           timestamp: Date.now(),
           intent: 'WAKE_WORD',
           isSingleton: true,
@@ -290,6 +295,7 @@ class WorkstationStore {
       ];
       this.notify();
     } else if (type === 'VOICE_COMMAND') {
+      this.clearListeningWatchdog();
       if (payload?.command) {
         this.activeHeadline = payload.command;
         const targetView = resolveDeterministicView(payload.command);
@@ -413,9 +419,11 @@ class WorkstationStore {
 
       this.notify();
     } else if (type === 'AGENT_SPEAKING') {
+      this.clearListeningWatchdog();
       this.agentState = 'SPEAKING';
       this.notify();
     } else if (type === 'AGENT_IDLE') {
+      this.clearListeningWatchdog();
       this.agentState = 'IDLE';
       this.checkAndRevertTemporaryPTT();
       if (this.wasHudAutoOpenedByAgent) {
@@ -662,12 +670,31 @@ class WorkstationStore {
     }
   }
 
+  private armListeningWatchdog(): void {
+    this.clearListeningWatchdog();
+    this.listeningWatchdogTimer = setTimeout(() => {
+      if (this.agentState === 'LISTENING') {
+        console.warn('[VOICE] Mobile listening watchdog fired (8s). Auto-reverting to IDLE.');
+        this.agentState = 'IDLE';
+        this.notify();
+      }
+    }, 8000);
+  }
+
+  private clearListeningWatchdog(): void {
+    if (this.listeningWatchdogTimer) {
+      clearTimeout(this.listeningWatchdogTimer);
+      this.listeningWatchdogTimer = null;
+    }
+  }
+
   public simulateWakeWord() {
     if (!this.isWakeWordArmed) {
       this.wasWakeWordArmedBeforeTemporaryPTT = false;
       this.isWakeWordArmed = true;
       gatewayClient.sendWakeWordToggle(true);
     }
+    this.armListeningWatchdog();
     this.agentState = 'LISTENING';
     gatewayClient.sendWakeWord('hey alfred', 0.98, 'push_to_talk');
     this.notify();

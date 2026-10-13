@@ -168,6 +168,40 @@ class DeviceProbe:
         """Checks if a graphical display server (X11 / Wayland) is accessible."""
         display = os.getenv("DISPLAY", "")
         wayland = os.getenv("WAYLAND_DISPLAY", "")
+
+        # If running inside a systemd user service or subprocess without inherited display env vars,
+        # actively probe the filesystem for live Wayland / X11 runtime sockets.
+        if not display and not wayland:
+            xdg = os.getenv("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+            if os.path.exists(xdg):
+                if not os.getenv("XDG_RUNTIME_DIR"):
+                    os.environ["XDG_RUNTIME_DIR"] = xdg
+
+                # Check for active Wayland socket (e.g. /run/user/1000/wayland-1)
+                w_socks = sorted([
+                    s for s in glob.glob(f"{xdg}/wayland-*")
+                    if not s.endswith(".lock")
+                ])
+                if w_socks:
+                    wayland = os.path.basename(w_socks[0])
+                    os.environ["WAYLAND_DISPLAY"] = wayland
+
+                # Check for Hyprland instance signature
+                if not os.getenv("HYPRLAND_INSTANCE_SIGNATURE"):
+                    hypr_dirs = sorted(glob.glob(f"{xdg}/hypr/*"))
+                    if hypr_dirs:
+                        os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = os.path.basename(hypr_dirs[0])
+
+            # Check for X11 sockets in /tmp/.X11-unix/
+            if not display and os.path.exists("/tmp/.X11-unix"):
+                x_socks = sorted([
+                    s for s in glob.glob("/tmp/.X11-unix/X*")
+                    if not s.endswith("_") and os.path.basename(s)[1:].isdigit()
+                ])
+                if x_socks:
+                    display = f":{os.path.basename(x_socks[0])[1:]}"
+                    os.environ["DISPLAY"] = display
+
         has_display = bool(display or wayland)
         is_headless = not has_display
         return has_display, is_headless

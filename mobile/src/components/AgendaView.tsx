@@ -31,6 +31,7 @@ export const AgendaView: React.FC = () => {
 
   // New Deliverable Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [itemType, setItemType] = useState<"task" | "reminder">("task");
   const [newTitle, setNewTitle] = useState("");
   const [newPriority, setNewPriority] = useState<"normal" | "high" | "urgent">("normal");
   const [newDeadline, setNewDeadline] = useState("");
@@ -120,11 +121,12 @@ export const AgendaView: React.FC = () => {
   const handleCreateTask = async () => {
     if (!newTitle.trim()) return;
 
+    const isReminder = itemType === "reminder";
     const payload = {
       title: newTitle.trim(),
       priority: newPriority,
       deadline: newDeadline.trim() || null,
-      metadata: { source: "mobile_agenda" },
+      metadata: { source: "mobile_agenda", item_type: isReminder ? "reminder" : "task" },
     };
 
     const optimisticTask: ApiTask = {
@@ -149,7 +151,7 @@ export const AgendaView: React.FC = () => {
       });
       if (res.ok) {
         const created = await res.json();
-        optimisticTask.id = created.id || optimisticTask.id;
+        optimisticTask.id = created.task?.id || created.id || optimisticTask.id;
         await offlineStore.saveCachedTasks(updatedTasks);
       } else {
         throw new Error(`HTTP ${res.status}`);
@@ -161,6 +163,7 @@ export const AgendaView: React.FC = () => {
       setNewTitle("");
       setNewDeadline("");
       setNewPriority("normal");
+      setItemType("task");
       setIsModalOpen(false);
     }
   };
@@ -793,6 +796,31 @@ export const AgendaView: React.FC = () => {
                 >
                   <Text style={styles.modalCloseXText}>✕</Text>
                 </TouchableOpacity>
+              </View>
+
+              {/* Item Type Selector */}
+              <Text style={styles.inputFieldLabel}>ITEM TYPE</Text>
+              <View style={styles.prioSelectorRow}>
+                {(["task", "reminder"] as const).map((t) => {
+                  const active = itemType === t;
+                  return (
+                    <TouchableOpacity
+                      key={t}
+                      style={[styles.prioSelectorBtn, active && styles.prioSelectorBtnActive]}
+                      onPress={() => setItemType(t)}
+                      activeOpacity={0.8}
+                    >
+                      <Text
+                        style={[
+                          styles.prioSelectorText,
+                          active && styles.prioSelectorTextActive,
+                        ]}
+                      >
+                        {t === "reminder" ? "REMINDER" : "TASK"}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
               </View>
 
               {/* Priority Selector */}

@@ -48,8 +48,49 @@ if (Platform.OS === 'android') {
           return;
         }
 
+        const isMaskedText = (val: string): boolean => {
+          const v = (val || '').toLowerCase().trim();
+          return (
+            v === 'content hidden' ||
+            v === 'hidden content' ||
+            v === 'sensitive content' ||
+            v === '1 new message' ||
+            v === 'new message' ||
+            v === 'hidden message' ||
+            /^[*•\s]{3,}$/.test(v)
+          );
+        };
+
         const title = (parsed.title || parsed.titleBig || '').trim();
-        const text = (parsed.text || parsed.bigText || parsed.subText || '').trim();
+
+        // Deep extra inspection: Prioritize unmasked bigText and textLines over masked EXTRA_TEXT
+        let rawText = '';
+        if (parsed.bigText && typeof parsed.bigText === 'string' && !isMaskedText(parsed.bigText)) {
+          rawText = parsed.bigText.trim();
+        } else if (Array.isArray(parsed.groupedMessages) && parsed.groupedMessages.length > 0) {
+          const lines = parsed.groupedMessages
+            .map((m: any) => (typeof m === 'string' ? m : m?.text || ''))
+            .filter((l: string) => l && !isMaskedText(l));
+          if (lines.length > 0) {
+            rawText = lines.join(' \u2022 ').trim();
+          }
+        }
+
+        if (!rawText && parsed.text && typeof parsed.text === 'string' && !isMaskedText(parsed.text)) {
+          rawText = parsed.text.trim();
+        }
+        if (!rawText && parsed.subText && typeof parsed.subText === 'string' && !isMaskedText(parsed.subText)) {
+          rawText = parsed.subText.trim();
+        }
+        if (!rawText && parsed.extraInfoText && typeof parsed.extraInfoText === 'string' && !isMaskedText(parsed.extraInfoText)) {
+          rawText = parsed.extraInfoText.trim();
+        }
+        if (!rawText) {
+          rawText = (parsed.text || parsed.bigText || parsed.subText || '').trim();
+        }
+
+        const text = rawText;
+        const isMasked = isMaskedText(text);
 
         // 2. Ignore empty / blank notifications
         if (!title && !text) {
@@ -109,22 +150,46 @@ if (Platform.OS === 'android') {
           lowerText.includes('finished') ||
           lowerTitle.includes('download complete');
 
-        if (existing) {
-          // Throttling byte-by-byte download updates to at most once every 10 seconds
-          if (isProgress && !isComplete && now - existing.time < 10000) {
-            existing.text = text;
-            return;
-          }
+        const isFinancial =
+          /\b(debited|credited|spent|paid|sent|transferred|txn|balance|withdrawn|refund|deposit|upi|emi|bank|salary)\b/i.test(`${title} ${text}`) ||
+          /\b(bank|hdfc|sbi|icici|axis|kotak|paytm|phonepe|gpay|cred)\b/i.test(pkg);
+        const isOtp =
+          /\b(otp|verification code|security code|auth code|secret code)\b/i.test(`${title} ${text}`);
 
-          // Suppress identical alert text within 30 seconds
-          if (existing.text === text && now - existing.time < 30000) {
-            return;
+        if (existing) {
+          // If previous notification was masked (e.g. screen was locked) and this one is unmasked (screen unlocked), ALWAYS process!
+          const wasMasked = existing.text && isMaskedText(existing.text);
+          if (wasMasked && !isMasked) {
+            console.log(`[NativeListener] Screen unlocked / de-masking update received for ${pkg}: "${text}"`);
+          } else {
+            // Throttling byte-by-byte download updates to at most once every 10 seconds
+            if (isProgress && !isComplete && now - existing.time < 10000) {
+              existing.text = text;
+              return;
+            }
+
+            // Suppress identical alert text within 30 seconds (do not suppress distinct financial transactions)
+            if (existing.text === text && now - existing.time < 30000) {
+              return;
+            }
           }
         }
 
         recentNotifs.set(notifKey, { text, time: now });
 
-        console.log('[NativeListener] Intercepted live OS notification:', parsed.app, title);
+        console.log('[NativeListener] Intercepted live OS notification:', parsed.app, title, isMasked ? '(MASKED)' : '');
+
+        let priority: 'URGENT' | 'HIGH' | 'MEDIUM' | 'LOW' = 'MEDIUM';
+        if (isTelephony || isOtp) {
+          priority = 'URGENT';
+        } else if (isFinancial) {
+          priority = 'HIGH';
+        }
+
+        let category = 'GENERAL';
+        if (isOtp) category = 'URGENT';
+        else if (isFinancial) category = 'FINANCIAL';
+        else if (isTelephony) category = 'DIRECT';
 
         const payload = {
           package_name: parsed.app || 'com.unknown.app',
@@ -132,6 +197,9 @@ if (Platform.OS === 'android') {
           title: title || 'Notification',
           text: text,
           subtext: parsed.subText,
+          priority: priority,
+          category: category,
+          is_masked: isMasked,
           post_time: now / 1000.0,
         };
 

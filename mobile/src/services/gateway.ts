@@ -71,9 +71,9 @@ function resolveDeviceName(): string {
 
 class GatewayClient {
   private ws: WebSocket | null = null;
-  private gatewayUrl: string = Platform.OS === "web" ? "ws://127.0.0.1:8000/ws" : "ws://192.168.0.202:8000/ws";
+  private gatewayUrl: string = Platform.OS === "web" ? "ws://127.0.0.1:8000/ws" : "ws://192.168.0.200:8000/ws";
   private status: ConnectionStatus = "disconnected";
-  private clientId: string = `mobile_${Platform.OS}_${Math.random().toString(36).substring(2, 9)}`;
+  private clientId: string = `mobile_${Platform.OS}_client`;
   private deviceName: string = resolveDeviceName();
 
   private reconnectAttempts = 0;
@@ -172,6 +172,17 @@ class GatewayClient {
   private async initDeviceInfo() {
     try {
       this.deviceName = resolveDeviceName();
+
+      try {
+        let savedClientId = await AsyncStorage.getItem("vesper_mobile_client_id");
+        if (!savedClientId) {
+          savedClientId = `mobile_${Platform.OS}_${Math.random().toString(36).substring(2, 9)}`;
+          await AsyncStorage.setItem("vesper_mobile_client_id", savedClientId);
+        }
+        this.clientId = savedClientId;
+      } catch (cidErr) {
+        console.warn("[GatewayClient] Error reading persistent client ID:", cidErr);
+      }
 
       const savedUrl = await AsyncStorage.getItem("vesper_gateway_url");
       let subnetMismatched = false;
@@ -539,7 +550,7 @@ class GatewayClient {
     console.log(`[GatewayClient] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts})...`);
 
     this.reconnectTimer = setTimeout(() => {
-      if (this.reconnectAttempts >= 2 && !this.isAutoDiscovering) {
+      if (this.reconnectAttempts >= 1 && !this.isAutoDiscovering) {
         this.autoDiscoverInitialGateway().then((newUrl) => {
           if (!newUrl) {
             this.connect();
@@ -648,10 +659,54 @@ class GatewayClient {
   }
 
   private enqueueOfflineNotification(payload: MobileNotificationPayload) {
-    const existingIdx = this.offlineQueue.findIndex(
-      (item) => item.package_name === payload.package_name && item.title === payload.title
-    );
+    const isMaskedText = (val?: string): boolean => {
+      const v = (val || "").toLowerCase().trim();
+      return (
+        v === "content hidden" ||
+        v === "hidden content" ||
+        v === "sensitive content" ||
+        v === "1 new message" ||
+        v === "new message" ||
+        v === "hidden message" ||
+        /^[*•\s]{3,}$/.test(v)
+      );
+    };
+
+    const isImportant =
+      payload.priority === "URGENT" ||
+      payload.priority === "HIGH" ||
+      payload.category === "FINANCIAL" ||
+      payload.category === "URGENT" ||
+      /\b(debited|credited|spent|paid|sent|transferred|txn|otp|code|bank|salary|balance)\b/i.test(
+        `${payload.title} ${payload.text}`
+      );
+
+    // Look for existing item
+    const existingIdx = this.offlineQueue.findIndex((item) => {
+      if (item.package_name !== payload.package_name) return false;
+      // If financial or OTP, only match if text matches or if existing was masked
+      if (isImportant) {
+        return (
+          item.title === payload.title &&
+          (item.text === payload.text || item.is_masked || isMaskedText(item.text))
+        );
+      }
+      return item.title === payload.title;
+    });
+
     if (existingIdx >= 0) {
+      const existing = this.offlineQueue[existingIdx];
+      // In-place de-masking when user unlocks screen
+      if ((existing.is_masked || isMaskedText(existing.text)) && !isMaskedText(payload.text)) {
+        console.log(`[GatewayClient] Offline Stack: De-masked alert "${payload.title}" on unlock: "${payload.text}"`);
+        existing.text = payload.text;
+        existing.subtext = payload.subtext || existing.subtext;
+        existing.is_masked = false;
+        existing.post_time = payload.post_time || Date.now() / 1000.0;
+        this.saveOfflineQueue();
+        return;
+      }
+      // Update existing item
       this.offlineQueue[existingIdx].text = payload.text;
       this.offlineQueue[existingIdx].subtext = payload.subtext;
       this.offlineQueue[existingIdx].post_time = payload.post_time || Date.now() / 1000.0;
@@ -659,16 +714,27 @@ class GatewayClient {
       return;
     }
 
-    if (this.offlineQueue.length >= 25) {
-      this.offlineQueue.shift();
+    // Capacity limit: up to 500 stacked notifications
+    const MAX_STACK = 500;
+    if (this.offlineQueue.length >= MAX_STACK) {
+      // Prioritize dropping ephemeral / low-priority items first
+      const dropIdx = this.offlineQueue.findIndex(
+        (it) => it.priority === "LOW" || it.priority === "MEDIUM" || (!it.priority && it.category !== "FINANCIAL")
+      );
+      if (dropIdx >= 0) {
+        this.offlineQueue.splice(dropIdx, 1);
+      } else {
+        this.offlineQueue.shift();
+      }
     }
 
-    console.log(`[GatewayClient] Offline: Enqueueing alert "${payload.title}" for auto-sync on reconnect.`);
+    console.log(`[GatewayClient] Offline: Enqueueing alert "${payload.title}" (${isImportant ? "IMPORTANT" : "STANDARD"}) for auto-sync on reconnect.`);
     this.offlineQueue.push({
       ...payload,
       device_id: this.clientId,
       device_name: this.deviceName,
       post_time: payload.post_time || Date.now() / 1000.0,
+      is_masked: Boolean(payload.is_masked || isMaskedText(payload.text)),
     });
     this.saveOfflineQueue();
   }

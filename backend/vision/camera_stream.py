@@ -365,6 +365,10 @@ class ScreenCapture:
         """
         caps = DeviceProbe.get_capabilities()
         if caps.is_headless or not caps.has_display:
+            # Re-probe in case graphical desktop session initialized after background service boot
+            caps = DeviceProbe.get_capabilities(force_refresh=True)
+
+        if caps.is_headless or not caps.has_display:
             return FrameCaptureResult(
                 success=False,
                 source="screen",

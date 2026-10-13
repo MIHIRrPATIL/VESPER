@@ -50,13 +50,34 @@ function timeAgo(ts?: number): string {
 // ── 1. Weather Card Renderer ────────────────────────────────────────────────
 const WeatherRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) => {
   const city = data.city || data.location || "Current Location";
-  const tempVal = data.temperature ?? data.temp ?? data.temperature_c;
+  let tempVal = data.temperature ?? data.temp ?? data.temperature_c;
+  let condition = data.condition || data.description || data.summary;
+  let humidity = data.humidity ?? data.humidity_pct;
+  let wind = data.wind_speed || data.wind || (data.wind_speed_kmh !== undefined ? `${data.wind_speed_kmh} km/h` : undefined);
+  let feelsLike = data.feels_like ?? data.feels_like_c;
+  let uv = data.uv_index;
+  let rainProb = data.precip_probability_pct ?? data.precipitation_probability ?? data.rain_probability;
+  const forecast = Array.isArray(data.forecast) ? data.forecast : (Array.isArray(data.days) ? data.days : []);
+
+  // Fallback regex parsing if text response was passed
+  if (tempVal === undefined && (data.response || data.markdown_body || data.speech_summary)) {
+    const txt = String(data.speech_summary || data.response || data.markdown_body);
+    const mTemp = txt.match(/(\d+(?:\.\d+)?)\s*°?C/i);
+    if (mTemp) tempVal = parseFloat(mTemp[1]);
+    const mFeels = txt.match(/feels\s+like\s+(\d+(?:\.\d+)?)\s*°?C/i);
+    if (mFeels) feelsLike = parseFloat(mFeels[1]);
+    const mHum = txt.match(/humidity\s+(\d+)%/i);
+    if (mHum) humidity = parseInt(mHum[1], 10);
+    const mWind = txt.match(/wind\s+(?:speed\s+)?(\d+(?:\.\d+)?\s*km\/h)/i);
+    if (mWind) wind = mWind[1];
+    const mRain = txt.match(/(\d+)%\s+chance\s+of\s+precipitation/i);
+    if (mRain) rainProb = parseInt(mRain[1], 10);
+    const mUv = txt.match(/UV\s+index\s+(?:is\s+)?(?:elevated\s+at\s+)?(\d+(?:\.\d+)?)/i);
+    if (mUv) uv = parseFloat(mUv[1]);
+  }
+
   const temp = tempVal !== undefined ? `${tempVal}°` : "--";
-  const condition = data.condition || data.summary || "Atmosphere Nominal";
-  const humidity = data.humidity ?? data.humidity_pct;
-  const wind = data.wind_speed || data.wind || (data.wind_speed_kmh !== undefined ? `${data.wind_speed_kmh} km/h` : undefined);
-  const feelsLike = data.feels_like ?? data.feels_like_c;
-  const forecast = Array.isArray(data.forecast) ? data.forecast : [];
+  const displayCondition = condition || (forecast.length > 0 ? `${forecast.length}-Day Forecast` : "Atmosphere Nominal");
 
   return (
     <View style={styles.cardDetailCol}>
@@ -64,7 +85,7 @@ const WeatherRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) => {
       <View style={styles.weatherHeroBlock}>
         <View style={styles.weatherLeftCol}>
           <Text style={styles.weatherLocationText}>{city.toUpperCase()}</Text>
-          <Text style={styles.weatherConditionText}>{condition}</Text>
+          <Text style={styles.weatherConditionText}>{displayCondition}</Text>
         </View>
         <Text style={styles.weatherGiantTemp}>{temp}</Text>
       </View>
@@ -85,8 +106,20 @@ const WeatherRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) => {
         )}
         {wind !== undefined && (
           <View style={styles.metricWell}>
-            <Text style={styles.metricWellLabel}>WIND SENTRY</Text>
+            <Text style={styles.metricWellLabel}>WIND</Text>
             <Text style={styles.metricWellValue}>{String(wind)}</Text>
+          </View>
+        )}
+        {rainProb !== undefined && (
+          <View style={styles.metricWell}>
+            <Text style={styles.metricWellLabel}>PRECIP CHANCE</Text>
+            <Text style={styles.metricWellValue}>{rainProb}%</Text>
+          </View>
+        )}
+        {uv !== undefined && (
+          <View style={styles.metricWell}>
+            <Text style={styles.metricWellLabel}>UV INDEX</Text>
+            <Text style={styles.metricWellValue}>{uv}</Text>
           </View>
         )}
       </View>
@@ -1119,19 +1152,25 @@ const EmailThreadRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) 
 // ── 12. Email Draft & Sent Card Renderer ────────────────────────────────────
 const EmailDraftRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) => {
   const draft = data.draft || data;
-  const to = draft.to || "recipient@domain.com";
-  const subject = draft.subject || "(No Subject)";
-  const body = draft.body || draft.message || "";
-  const isSent = data.type === "email_sent_card" || draft.status === "SENT";
+  const to = draft.to || data.to || "recipient@domain.com";
+  const subject = draft.subject || data.subject || "(No Subject)";
+  const body = draft.body || data.body || draft.message || data.message || draft.snippet || "";
+  const isSent = data.type === "email_sent_card" || data.status === "sent" || draft.status === "sent" || draft.status === "SENT" || draft.status === "dispatched_sandbox";
+  const warning = data.warning;
 
   return (
     <View style={styles.cardDetailCol}>
       <View style={styles.tagPillRow}>
         <View style={isSent ? styles.emeraldStatusPill : styles.amberStatusPill}>
           <Text style={isSent ? styles.emeraldStatusText : styles.amberStatusText}>
-            {isSent ? "DISPATCHED VIA SMTP" : "COMPOSED DRAFT"}
+            {isSent ? "DISPATCHED VIA GMAIL" : "COMPOSED DRAFT"}
           </Text>
         </View>
+        {warning === "placeholder_detected" && (
+          <View style={[styles.amberStatusPill, { backgroundColor: "rgba(239, 68, 68, 0.15)", borderColor: "rgba(239, 68, 68, 0.3)" }]}>
+            <Text style={[styles.amberStatusText, { color: "#f87171" }]}>ACTION REQUIRED: DETAILS MISSING</Text>
+          </View>
+        )}
       </View>
 
       <View style={styles.draftMetaBox}>
@@ -1146,7 +1185,7 @@ const EmailDraftRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) =
       </View>
 
       <View style={styles.readingWell}>
-        <Text style={styles.readingWellText}>{body || "(Empty message draft)"}</Text>
+        <Text style={styles.readingWellText}>{body || "(Empty message body)"}</Text>
       </View>
     </View>
   );
@@ -1891,7 +1930,7 @@ export const HudDrawerModal: React.FC<HudDrawerModalProps> = ({
     const cData = card.data || card;
 
     // 1. Weather
-    if (type === "weather") return <WeatherRenderer data={cData} />;
+    if (type === "weather" || type === "weather_card" || type === "weather_forecast_card" || type.includes("weather")) return <WeatherRenderer data={cData} />;
 
     // 2. YouTube & Video
     if (type === "youtube" || type === "video" || type.includes("video")) return <YoutubeRenderer data={cData} />;

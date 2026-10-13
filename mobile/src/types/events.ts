@@ -149,5 +149,7 @@ export interface MobileNotificationPayload {
   device_name?: string;
   is_backlog?: boolean;
   is_offline_replay?: boolean;
+  category?: string;
+  is_masked?: boolean;
 }
 
