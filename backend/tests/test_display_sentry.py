@@ -136,15 +136,15 @@ def test_caelestia_resizer_cleans_duplicates():
 
 
 def test_turn_display_on():
-    """Verifies turn_display_on powers on display and triggers Caelestia recovery."""
+    """Verifies turn_display_on powers on display and triggers post-unlock Caelestia recovery."""
     with patch("subprocess.run") as mock_run, \
-         patch("backend.vision.display_sentry.ensure_caelestia_running") as mock_restart:
+         patch("backend.vision.display_sentry.schedule_post_unlock_caelestia_recovery") as mock_schedule:
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="")
         res = turn_display_on(recover_caelestia=True)
         assert res is True
         called_cmds = [call[0][0] for call in mock_run.call_args_list]
         assert ["hyprctl", "dispatch", "dpms", "on"] in called_cmds
-        mock_restart.assert_called_once()
+        mock_schedule.assert_called_once()
 
 
 
@@ -311,5 +311,61 @@ def test_save_and_restore_display_state(tmp_path):
             assert ["hyprctl", "dispatch", "focusmonitor", "eDP-1"] in called
             assert ["hyprctl", "dispatch", "workspace", "2"] in called
             assert ["hyprctl", "dispatch", "focuswindow", "address:0x12345"] in called
+
+
+def test_clean_stale_quickshell_sockets(tmp_path, monkeypatch):
+    """Verifies that _clean_stale_quickshell_sockets purges dead PIDs, orphaned instance folders and broken links."""
+    import os
+    from backend.vision.display_sentry import _clean_stale_quickshell_sockets
+
+    qs_dir = tmp_path / "quickshell"
+    by_pid = qs_dir / "by-pid"
+    by_id = qs_dir / "by-id"
+    by_shell = qs_dir / "by-shell" / "shell_hash"
+    by_path = qs_dir / "by-path"
+
+    by_pid.mkdir(parents=True)
+    by_id.mkdir(parents=True)
+    by_shell.mkdir(parents=True)
+    by_path.mkdir(parents=True)
+
+    # Alive instance
+    alive_inst = by_id / "alive_inst"
+    alive_inst.mkdir()
+    (alive_inst / "instance.lock").write_text("lock")
+    (by_pid / "99999").symlink_to(alive_inst)
+    (by_shell / "alive_inst").symlink_to(alive_inst)
+    (by_path / "alive_inst").symlink_to(alive_inst)
+
+    # Dead instance
+    dead_inst = by_id / "dead_inst"
+    dead_inst.mkdir()
+    (dead_inst / "instance.lock").write_text("lock")
+    (by_pid / "88888").symlink_to(dead_inst)
+    (by_shell / "dead_inst").symlink_to(dead_inst)
+    (by_path / "dead_inst").symlink_to(dead_inst)
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+
+    def mock_kill(pid, sig):
+        if pid == 99999:
+            return None  # Alive
+        raise ProcessLookupError("No such process")
+
+    monkeypatch.setattr(os, "kill", mock_kill)
+
+    _clean_stale_quickshell_sockets()
+
+    # Alive instance must be preserved
+    assert (by_pid / "99999").exists()
+    assert (by_id / "alive_inst").exists()
+    assert (by_shell / "alive_inst").exists()
+
+    # Dead instance and broken links must be completely removed
+    assert not (by_pid / "88888").exists()
+    assert not (by_id / "dead_inst").exists()
+    assert not (by_shell / "dead_inst").exists()
+    assert not (by_path / "dead_inst").exists()
+
 
 

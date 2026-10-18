@@ -423,17 +423,65 @@ const EmailListCard: React.FC<{ data: Record<string, any> }> = ({ data }) => {
 // ── Single Email Card ───────────────────────────────────────────────────────
 
 const EmailCard: React.FC<{ data: Record<string, any> }> = ({ data }) => {
-  const email = data.email || data;
-  const parsedSender = parseSender(email.sender || email.from);
-  const subject = email.subject || 'Message';
-  const cleanBody = sanitizeText(email.body || email.snippet || email.text || '');
-  const to = email.to || 'Me';
-  const date = email.date;
+  const isDraft = Boolean(
+    data.draft ||
+    data.type === 'email_draft_card' ||
+    data.type === 'email_draft' ||
+    data.status === 'draft' ||
+    data.warning === 'placeholder_detected'
+  );
+  const isSent = Boolean(
+    data.type === 'email_sent_card' ||
+    data.type === 'email_sent' ||
+    data.status === 'sent' ||
+    data.status === 'dispatched_sandbox'
+  );
+
+  const email = data.draft || data.email || data;
+  const to = email.to || data.to || 'Recipient';
+  const subject = email.subject || data.subject || 'No Subject';
+  const cleanBody = sanitizeText(
+    email.body || data.body || email.message || data.message || email.snippet || email.text || ''
+  );
+  const parsedSender = isDraft || isSent
+    ? { initial: 'Y', name: 'You (VESPER Swarm)', email: 'mihirpatil2505@gmail.com' }
+    : parseSender(email.sender || email.from || data.sender || data.from);
+  const date = email.date || email.created_at || email.sent_at;
+  const warning = data.warning;
 
   return (
     <div className="mt-4 pt-4 border-t border-white/[0.08] flex flex-col gap-3 text-left">
+      {/* Draft / Sent status pills */}
+      {(isDraft || isSent) && (
+        <div className="flex items-center gap-2">
+          {isSent ? (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 uppercase tracking-wider">
+              <Check size={11} strokeWidth={2.5} />
+              Dispatched via Gmail
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20 uppercase tracking-wider">
+              <Clock size={11} strokeWidth={2.5} />
+              Composed Draft
+            </span>
+          )}
+
+          {warning === 'placeholder_detected' && (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-red-500/10 text-red-400 border border-red-500/20 uppercase tracking-wider">
+              Action Required: Missing details
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Header */}
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-300 flex items-center justify-center font-mono font-bold text-sm shrink-0">
+        <div className={cn(
+          "w-10 h-10 rounded-xl border flex items-center justify-center font-mono font-bold text-sm shrink-0",
+          isSent ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" :
+          isDraft ? "bg-amber-500/10 border-amber-500/30 text-amber-300" :
+          "bg-blue-500/10 border-blue-500/30 text-blue-300"
+        )}>
           {parsedSender.initial}
         </div>
         <div className="flex-1 min-w-0">
@@ -441,23 +489,36 @@ const EmailCard: React.FC<{ data: Record<string, any> }> = ({ data }) => {
             {subject}
           </h4>
           <div className="flex items-center gap-2 font-mono text-xs text-[#8E8A83] mt-0.5">
-            <span className="text-[#D1CFC0]">{parsedSender.name}</span>
-            {parsedSender.email && <span>&lt;{parsedSender.email}&gt;</span>}
-            {date && <span>• {new Date(date).toLocaleString()}</span>}
+            <span className="text-[#D1CFC0]">{isDraft ? `Draft for ${to}` : isSent ? `Sent to ${to}` : parsedSender.name}</span>
+            {parsedSender.email && !isDraft && !isSent && <span>&lt;{parsedSender.email}&gt;</span>}
+            {date && <span>• {typeof date === 'string' && date.includes('T') ? new Date(date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : String(date)}</span>}
           </div>
         </div>
       </div>
 
+      {/* Warning message if placeholder */}
+      {warning === 'placeholder_detected' && (
+        <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs font-mono text-amber-300">
+          Template placeholders were detected in this draft. Live dispatch was halted to prevent sending incomplete text.
+        </div>
+      )}
+
+      {/* Body text well */}
       <div className="p-3.5 rounded-xl bg-black/40 border border-white/[0.08] text-sm text-[#D1CFC0] leading-relaxed whitespace-pre-wrap">
-        <AnimatedCardText text={cleanBody} />
+        {cleanBody ? (
+          <AnimatedCardText text={cleanBody} />
+        ) : (
+          <span className="italic text-[#8E8A83]">(No email body text provided)</span>
+        )}
       </div>
 
+      {/* Footer */}
       <div className="flex items-center justify-between text-[11px] font-mono text-[#8E8A83] pt-2 border-t border-white/[0.06]">
         <span>To: {to}</span>
         <div className="flex items-center gap-3">
           {email.id && <span>Message ID: {email.id}</span>}
           <a
-            href={`https://mail.google.com/mail/u/0/#inbox/${email.id || ''}`}
+            href={email.id ? `https://mail.google.com/mail/u/0/#inbox/${email.id}` : "https://mail.google.com/mail/u/0/#inbox"}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[#E8E3DA] transition-colors no-underline"
@@ -964,25 +1025,51 @@ const SystemStatusCard: React.FC<{ data: Record<string, any> }> = ({ data }) => 
 // ── Weather Card ────────────────────────────────────────────────────────────
 
 const WeatherCard: React.FC<{ data: Record<string, any> }> = ({ data }) => {
-  const temp = data.temperature ?? data.temp ?? data.temperature_c ?? '--';
-  const condition = data.condition || data.description || 'Current Conditions';
-  const humidity = data.humidity ?? data.humidity_pct;
-  const wind = data.wind_speed || data.wind || (data.wind_speed_kmh !== undefined ? `${data.wind_speed_kmh} km/h` : undefined);
-  const location = data.location || data.city;
-  const feelsLike = data.feels_like ?? data.feels_like_c;
+  const d = data.data || data;
+
+  let temp = d.temperature ?? d.temp ?? d.temperature_c;
+  let condition = d.condition || d.description || d.summary;
+  let humidity = d.humidity ?? d.humidity_pct;
+  let wind = d.wind_speed || d.wind || (d.wind_speed_kmh !== undefined ? `${d.wind_speed_kmh} km/h` : undefined);
+  let location = d.location || d.city || d.country;
+  let feelsLike = d.feels_like ?? d.feels_like_c;
+  let uv = d.uv_index;
+  let rainProb = d.precip_probability_pct ?? d.precipitation_probability ?? d.rain_probability;
+  let rainMm = d.precipitation_mm;
+  const forecastDays: any[] = Array.isArray(d.days) ? d.days : Array.isArray(d.forecast) ? d.forecast : [];
+
+  // Fallback regex extraction if text was returned in response string
+  if (temp === undefined && (d.response || d.markdown_body || d.speech_summary)) {
+    const txt = String(d.speech_summary || d.response || d.markdown_body);
+    const mTemp = txt.match(/(\d+(?:\.\d+)?)\s*°?C/i);
+    if (mTemp) temp = parseFloat(mTemp[1]);
+    const mFeels = txt.match(/feels\s+like\s+(\d+(?:\.\d+)?)\s*°?C/i);
+    if (mFeels) feelsLike = parseFloat(mFeels[1]);
+    const mHum = txt.match(/humidity\s+(\d+)%/i);
+    if (mHum) humidity = parseInt(mHum[1], 10);
+    const mWind = txt.match(/wind\s+(?:speed\s+)?(\d+(?:\.\d+)?\s*km\/h)/i);
+    if (mWind) wind = mWind[1];
+    const mRain = txt.match(/(\d+)%\s+chance\s+of\s+precipitation/i);
+    if (mRain) rainProb = parseInt(mRain[1], 10);
+    const mUv = txt.match(/UV\s+index\s+(?:is\s+)?(?:elevated\s+at\s+)?(\d+(?:\.\d+)?)/i);
+    if (mUv) uv = parseFloat(mUv[1]);
+  }
+
+  const displayTemp = temp !== undefined ? temp : '--';
+  const displayCondition = condition || (forecastDays.length > 0 ? `${forecastDays.length}-Day Forecast` : 'Current Conditions');
 
   return (
     <div className="mt-4 pt-4 border-t border-white/[0.08] flex flex-col gap-4 text-left">
       <div className="flex items-baseline justify-between gap-4">
         <div className="flex items-baseline gap-1">
           <span className="font-mono text-5xl sm:text-6xl font-semibold text-[#E8E3DA] tabular-nums tracking-tighter">
-            {temp}
+            {displayTemp}
           </span>
           <span className="font-mono text-3xl text-[#8E8A83]">°</span>
         </div>
         <div className="text-right">
           <span className="block font-sans text-base sm:text-lg font-semibold text-[#E8E3DA] uppercase tracking-wide">
-            {condition}
+            {displayCondition}
           </span>
           {location && (
             <span className="block font-mono text-xs text-[#8E8A83] mt-0.5">
@@ -1029,18 +1116,72 @@ const WeatherCard: React.FC<{ data: Record<string, any> }> = ({ data }) => {
           </div>
         )}
 
-        {data.uv_index !== undefined && (
+        {rainProb !== undefined && (
+          <div className="flex flex-col p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+            <div className="flex items-center gap-1.5 text-[#8E8A83] text-xs font-sans uppercase tracking-wider mb-1">
+              <Droplets size={13} strokeWidth={1.8} />
+              <span>Precip Chance</span>
+            </div>
+            <span className="font-mono text-xl font-medium text-[#E8E3DA] tabular-nums">
+              {rainProb}%
+            </span>
+          </div>
+        )}
+
+        {uv !== undefined && (
           <div className="flex flex-col p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
             <div className="flex items-center gap-1.5 text-[#8E8A83] text-xs font-sans uppercase tracking-wider mb-1">
               <Sun size={13} strokeWidth={1.8} />
               <span>UV Index</span>
             </div>
             <span className="font-mono text-xl font-medium text-[#E8E3DA] tabular-nums">
-              {data.uv_index}
+              {uv}
+            </span>
+          </div>
+        )}
+
+        {rainMm !== undefined && rainMm > 0 && (
+          <div className="flex flex-col p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+            <div className="flex items-center gap-1.5 text-[#8E8A83] text-xs font-sans uppercase tracking-wider mb-1">
+              <Cloud size={13} strokeWidth={1.8} />
+              <span>Precip Total</span>
+            </div>
+            <span className="font-mono text-xl font-medium text-[#E8E3DA] tabular-nums">
+              {rainMm} mm
             </span>
           </div>
         )}
       </div>
+
+      {/* Multi-Day Forecast Strip */}
+      {forecastDays.length > 0 && (
+        <div className="flex flex-col gap-2 pt-2 border-t border-white/[0.06]">
+          <span className="font-mono text-[11px] uppercase tracking-wider text-[#8E8A83]">
+            {forecastDays.length}-Day Atmospheric Outlook
+          </span>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+            {forecastDays.slice(0, 4).map((f: any, idx: number) => (
+              <div key={idx} className="flex flex-col p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.05]">
+                <span className="font-mono text-xs font-semibold text-[#E8E3DA]">
+                  {f.date || f.day || `Day +${idx + 1}`}
+                </span>
+                <span className="text-[11px] text-[#8E8A83] truncate mt-0.5">
+                  {f.condition || 'Nominal'}
+                </span>
+                <div className="flex items-baseline gap-1 mt-1 font-mono text-sm">
+                  <span className="text-[#E8E3DA] font-medium">{f.temp_max_c ?? f.temp ?? '--'}°</span>
+                  {f.temp_min_c !== undefined && <span className="text-[#8E8A83] text-xs">/ {f.temp_min_c}°</span>}
+                </div>
+                {f.precip_probability_pct !== undefined && f.precip_probability_pct > 0 && (
+                  <span className="text-[10px] font-mono text-blue-400 mt-0.5">
+                    {f.precip_probability_pct}% rain
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

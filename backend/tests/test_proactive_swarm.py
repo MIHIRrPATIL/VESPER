@@ -364,3 +364,131 @@ async def test_calendar_sentry_lookahead_and_media():
     assert len(pause_actions) >= 1
     assert pause_actions[0].action == "control_playback"
     assert pause_actions[0].params["command"] == "pause"
+
+
+# ── 9. Ghost Transaction, False-OTP & Deduplication Regression Tests ─────────
+
+@pytest.mark.asyncio
+async def test_youtube_premium_video_not_financial_emi():
+    """Verifies that YouTube titles containing 'Premium' with amounts are NOT parsed as EMI."""
+    notif = MobileNotification(
+        id="notif_yt_01",
+        device_id="dev_pixel8",
+        package_name="com.google.android.youtube",
+        app_name="YouTube",
+        title="I Tested Premium TWS & Smartwatches Under ₹8000 in 2026!",
+        text="Check out the best budget smartwatches and earbuds tested this month.",
+        priority=NotificationPriority.LOW,
+        timestamp=time.time(),
+        device_name="Pixel 8",
+    )
+    res = await notification_evaluator.evaluate(notif)
+    assert res.staged_action is None
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_chat_blocked_from_bank_debit():
+    """Verifies that general messaging apps cannot stage bank ledger transactions."""
+    notif = MobileNotification(
+        id="notif_wa_01",
+        device_id="dev_pixel8",
+        package_name="com.whatsapp",
+        app_name="WhatsApp",
+        title="Hitanshu",
+        text="Paid 300,000 for me to get the car serviced.",
+        priority=NotificationPriority.HIGH,
+        timestamp=time.time(),
+        device_name="Pixel 8",
+    )
+    res = await notification_evaluator.evaluate(notif)
+    # Even if it mentions 'Paid 300,000', it must not stage a bank transaction
+    if res.staged_action:
+        assert res.staged_action.domain != "finance" or res.staged_action.action != "log_transaction"
+
+
+@pytest.mark.asyncio
+async def test_uber_cab_pin_not_otp():
+    """Verifies that Uber / ride-sharing pickup PINs are never extracted as 2FA security OTPs."""
+    notif = MobileNotification(
+        id="notif_uber_01",
+        device_id="dev_pixel8",
+        package_name="com.ubercab",
+        app_name="Uber",
+        title="Uber",
+        text="Your driver is arriving soon. Use PIN 7384 to start your trip.",
+        priority=NotificationPriority.HIGH,
+        timestamp=time.time(),
+        device_name="Pixel 8",
+    )
+    res = await notification_evaluator.evaluate(notif)
+    assert res.staged_action is None
+
+
+@pytest.mark.asyncio
+async def test_gpay_promotional_cashback_filtered():
+    """Verifies that promotional cashback and recharge marketing offers are rejected."""
+    notif = MobileNotification(
+        id="notif_gpay_promo_01",
+        device_id="dev_pixel8",
+        package_name="com.google.android.apps.nbu.paisa.user",
+        app_name="Google Pay",
+        title="Google Pay",
+        text="Earn flat ₹11 cashback on your next mobile recharge today!",
+        priority=NotificationPriority.HIGH,
+        timestamp=time.time(),
+        device_name="Pixel 8",
+    )
+    res = await notification_evaluator.evaluate(notif)
+    assert res.staged_action is None
+
+
+@pytest.mark.asyncio
+async def test_gpay_received_payment_direction_credit():
+    """Verifies that 'X paid you ₹Y' is correctly parsed as income/credit, not debit."""
+    notif = MobileNotification(
+        id="notif_gpay_recv_01",
+        device_id="dev_pixel8",
+        package_name="com.google.android.apps.nbu.paisa.user",
+        app_name="Google Pay",
+        title="Google Pay",
+        text="Ankush paid you ₹20,000.00 via UPI.",
+        priority=NotificationPriority.HIGH,
+        timestamp=time.time(),
+        device_name="Pixel 8",
+    )
+    res = await notification_evaluator.evaluate(notif)
+    assert res.handled is True
+    assert res.staged_action is not None
+    staged = res.staged_action
+    assert staged.domain == "finance"
+    assert staged.action == "log_transaction"
+    assert staged.params["amount"] == 20000.0
+    assert staged.params["transaction_type"] == "income"
+    assert "credit" in staged.verbatim_text.lower() or "income" in staged.verbatim_text.lower()
+    assert "Ankush" in staged.verbatim_text
+
+
+def test_action_queue_duplicate_suppression():
+    """Verifies that staging identical actions in rapid succession suppresses duplicates."""
+    action1 = StagedAction(
+        id="act_dup_01",
+        domain="finance",
+        action="log_transaction",
+        params={"amount": 450.0, "category": "Dining", "transaction_type": "expense"},
+        verbatim_text="Record debit of INR 450.00 for Swiggy to Ledger",
+    )
+    action2 = StagedAction(
+        id="act_dup_02",
+        domain="finance",
+        action="log_transaction",
+        params={"amount": 450.0, "category": "Dining", "transaction_type": "expense"},
+        verbatim_text="Record debit of INR 450.00 for Swiggy to Ledger",
+    )
+
+    staged1 = action_queue.stage_action(action1)
+    staged2 = action_queue.stage_action(action2)
+
+    assert staged1.id == staged2.id == "act_dup_01"
+    active = action_queue.get_active_actions(domain="finance")
+    assert len(active) == 1
+

@@ -354,6 +354,7 @@ class ScreenCapture:
         cls,
         monitor_index: Optional[int] = None,
         monitor_name: Optional[str] = None,
+        target_workspace: Optional[int | str] = None,
     ) -> FrameCaptureResult:
         """Captures a screenshot with automatic Wayland, X11, multi-monitor, and anti-blank routing.
 
@@ -362,6 +363,7 @@ class ScreenCapture:
         - monitor_index=None: Captures the currently active/focused monitor (or primary).
         - monitor_index=1, 2...: Captures the specified 1-indexed monitor.
         - monitor_name="DP-3" | "eDP-1" | "laptop" | "external": Captures the display matching name.
+        - target_workspace: Optional workspace number/name (e.g. 3) to capture and restore under Hyprland.
         """
         caps = DeviceProbe.get_capabilities()
         if caps.is_headless or not caps.has_display:
@@ -441,6 +443,20 @@ class ScreenCapture:
         if is_wayland:
             # 1a. grim (wlroots / Hyprland / Sway)
             if shutil.which("grim"):
+                hypr_prev_ws: Optional[str] = None
+                if target_workspace is not None and shutil.which("hyprctl"):
+                    try:
+                        cur_ws_res = subprocess.run(["hyprctl", "-j", "activeworkspace"], stdout=subprocess.PIPE, text=True, timeout=1.0)
+                        if cur_ws_res.returncode == 0 and cur_ws_res.stdout.strip():
+                            cur_ws_data = json.loads(cur_ws_res.stdout)
+                            cur_ws_id = str(cur_ws_data.get("name") or cur_ws_data.get("id") or "")
+                            if cur_ws_id and str(cur_ws_id) != str(target_workspace):
+                                hypr_prev_ws = cur_ws_id
+                                subprocess.run(["hyprctl", "dispatch", "workspace", str(target_workspace)], timeout=1.0)
+                                time.sleep(0.25)
+                    except Exception as ws_err:
+                        logger.debug(f"[ScreenCapture] Hyprland workspace switch error: {ws_err}")
+
                 try:
                     cmd = ["grim"]
                     if target_idx == 0:
@@ -460,6 +476,12 @@ class ScreenCapture:
                             logger.warning(f"[ScreenCapture] grim captured a blank frame for {target_name}. Trying fallbacks...")
                 except Exception as grim_err:
                     logger.warning(f"[ScreenCapture] grim capture error: {grim_err}")
+                finally:
+                    if hypr_prev_ws is not None and shutil.which("hyprctl"):
+                        try:
+                            subprocess.run(["hyprctl", "dispatch", "workspace", str(hypr_prev_ws)], timeout=1.0)
+                        except Exception:
+                            pass
 
             # 1b. spectacle (KDE Wayland)
             if shutil.which("spectacle"):

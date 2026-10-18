@@ -461,6 +461,20 @@ class MessageRouter:
             await self._handle_wake_word_toggle(session, envelope)
             return
 
+        # 0b. Agent Idle Broadcast Forwarding & Watchdog Cancellation
+        if event_type == EventType.AGENT_IDLE:
+            watchdog_key = f"listening_watchdog_{session.session_id}"
+            self.tasks.cancel(watchdog_key)
+            broadcast_envelope = ServerEnvelope(
+                uuid=envelope.uuid,
+                channel=Channel.VOICE,
+                type=EventType.AGENT_IDLE,
+                payload=envelope.payload or {"state": "IDLE"},
+            )
+            await self.manager.broadcast(broadcast_envelope)
+            logger.debug(f"[VOICE] Forwarded AGENT_IDLE from '{session.client_id}' to cluster.")
+            return
+
         # 1. Wake Word Detected Broadcast
         if event_type == EventType.WAKE_WORD_DETECTED:
             is_explicit_ptt = envelope.payload.get("trigger") == "push_to_talk" or envelope.payload.get("source") != "acoustic_listener"
@@ -484,7 +498,33 @@ class MessageRouter:
                 },
             )
             await self.manager.broadcast(broadcast_envelope)
+
+            # Arm 7.5-second listening watchdog to guarantee AGENT_IDLE is broadcast to all clients
+            # if audio collection times out, silence is captured, or no command follows
+            watchdog_key = f"listening_watchdog_{session.session_id}"
+            self.tasks.cancel(watchdog_key)
+
+            async def _listening_watchdog():
+                try:
+                    await asyncio.sleep(7.5)
+                    logger.info(f"[VOICE] Listening watchdog timed out for session '{session.session_id}'. Broadcasting AGENT_IDLE.")
+                    timeout_envelope = ServerEnvelope(
+                        uuid=envelope.uuid,
+                        channel=Channel.VOICE,
+                        type=EventType.AGENT_IDLE,
+                        payload={"state": "IDLE", "reason": "LISTENING_TIMEOUT"},
+                    )
+                    await self.manager.broadcast(timeout_envelope)
+                except asyncio.CancelledError:
+                    pass
+
+            watchdog_task = asyncio.create_task(_listening_watchdog())
+            self.tasks.register(watchdog_key, watchdog_task, session.session_id)
             return
+
+        # Cancel any active listening watchdog as soon as voice command arrives
+        watchdog_key = f"listening_watchdog_{session.session_id}"
+        self.tasks.cancel(watchdog_key)
 
         command_text = (envelope.payload.get("command") or "").strip()
         if not command_text:
@@ -518,6 +558,7 @@ class MessageRouter:
                 latency_ms = 0.0
                 navigate_to: Optional[str] = None
                 resolved_advisory_ids: list[str] = []
+                followup_required = False
 
                 try:
                     target_url = f"{AGENT_SERVICE_URL}/query"
@@ -558,6 +599,7 @@ class MessageRouter:
                             latency_ms = data.get("latency_ms", 0.0)
                             navigate_to = data.get("navigate_to")
                             resolved_advisory_ids = data.get("resolved_advisory_ids", [])
+                            followup_required = bool(data.get("followup_required", False))
                         else:
                             logger.error(f"[VOICE] Agent returned HTTP {agent_res.status_code}: {agent_res.text}")
                             response_text = "I apologize, sir, but an error occurred within the cognitive swarm."
@@ -600,6 +642,7 @@ class MessageRouter:
                         "fast_path": fast_path,
                         "intent": intent,
                         "navigate_to": navigate_to,
+                        "followup_required": followup_required,
                         "status": "processed",
                         "latency_ms": latency_ms,
                     },

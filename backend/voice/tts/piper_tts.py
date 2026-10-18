@@ -113,6 +113,8 @@ def apply_studio_dsp(audio_int16_bytes: bytes, sample_rate: int = 22050) -> byte
 class PiperTTSProvider(BaseTTSProvider):
     """Local Piper ONNX TTS provider with native Python SDK streaming."""
 
+    _VOICE_CACHE: dict[str, Any] = {}
+
     def __init__(
         self,
         model_path: Optional[str] = None,
@@ -180,7 +182,7 @@ class PiperTTSProvider(BaseTTSProvider):
             if model_file.exists():
                 self.model_path = str(model_file)
                 self.speaker_id = speaker
-                self._voice_instance = None
+                self._voice_instance = PiperTTSProvider._VOICE_CACHE.get(self.model_path)
                 self._voice_name = key
                 return True
         return False
@@ -190,25 +192,30 @@ class PiperTTSProvider(BaseTTSProvider):
         return os.path.exists(self.model_path) or bool(shutil.which(self.piper_binary))
 
     def _get_voice(self) -> Any:
-        """Loads and caches the PiperVoice ONNX instance."""
+        """Loads and caches the PiperVoice ONNX instance in process memory."""
         if self._voice_instance is None:
-            if not os.path.exists(self.model_path):
-                raise FileNotFoundError(f"Piper ONNX model not found at: {self.model_path}")
+            if self.model_path in PiperTTSProvider._VOICE_CACHE:
+                self._voice_instance = PiperTTSProvider._VOICE_CACHE[self.model_path]
+            else:
+                if not os.path.exists(self.model_path):
+                    raise FileNotFoundError(f"Piper ONNX model not found at: {self.model_path}")
 
-            from piper import PiperVoice
+                from piper import PiperVoice
 
-            config_path = f"{self.model_path}.json"
-            if not os.path.exists(config_path):
-                config_path = None
+                config_path = f"{self.model_path}.json"
+                if not os.path.exists(config_path):
+                    config_path = None
 
-            self._voice_instance = PiperVoice.load(
-                self.model_path,
-                config_path=config_path,
-            )
-            logger.info(
-                f"[TTS.Piper] Loaded Piper voice model: {Path(self.model_path).name} "
-                f"(Speaker: {self.speaker_id}, Length Scale: {self.length_scale}, DSP: {self.enable_dsp})"
-            )
+                loaded = PiperVoice.load(
+                    self.model_path,
+                    config_path=config_path,
+                )
+                PiperTTSProvider._VOICE_CACHE[self.model_path] = loaded
+                self._voice_instance = loaded
+                logger.info(
+                    f"[TTS.Piper] Loaded Piper voice model: {Path(self.model_path).name} "
+                    f"(Speaker: {self.speaker_id}, Length Scale: {self.length_scale}, DSP: {self.enable_dsp})"
+                )
         return self._voice_instance
 
     def _extract_emotive_config(self, text: str) -> tuple[str, dict[str, float]]:

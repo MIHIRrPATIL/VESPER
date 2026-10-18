@@ -22,10 +22,12 @@ from groq import AsyncGroq
 from backend.shared.config import (
     AGENT_FAST_MODEL,
     AGENT_PRIMARY_MODEL,
+    GEMINI_API_KEY,
     GROQ_API_KEY,
     GROQ_API_KEYS,
     OPENROUTER_API_KEY,
 )
+
 
 logger = logging.getLogger("vesper.agent.llm")
 
@@ -41,6 +43,7 @@ class LLMClient:
         self,
         groq_key: Optional[str] = None,
         openrouter_key: Optional[str] = None,
+        gemini_key: Optional[str] = None,
         fast_model: str = AGENT_FAST_MODEL,
         primary_model: str = AGENT_PRIMARY_MODEL,
     ) -> None:
@@ -52,6 +55,7 @@ class LLMClient:
         self._key_index: int = 0  # current active key pointer
 
         self.openrouter_key = openrouter_key or OPENROUTER_API_KEY
+        self.gemini_key = gemini_key or GEMINI_API_KEY
         self.fast_model = fast_model
         self.primary_model = primary_model
         self._groq_client: Optional[AsyncGroq] = None
@@ -199,6 +203,51 @@ class LLMClient:
             self.last_provider_used = "openrouter"
             return content, elapsed_ms
 
+    async def _call_gemini(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+        response_format: Optional[Dict[str, str]] = None,
+    ) -> Tuple[str, float]:
+        """Queries Google Gemini 2.0 Flash via OpenAI-compatible endpoint."""
+        t0 = time.perf_counter()
+        if not self.gemini_key:
+            raise ValueError("GEMINI_API_KEY is not configured.")
+
+        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.gemini_key}",
+            "Content-Type": "application/json",
+        }
+        payload: Dict[str, Any] = {
+            "model": "gemini-2.5-flash",
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if response_format:
+            payload["response_format"] = response_format
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            res = await client.post(url, headers=headers, json=payload)
+            if res.status_code != 200:
+                # Fallback to flash-lite if 2.5-flash encounters temporary load spike
+                payload["model"] = "gemini-2.5-flash-lite"
+                res = await client.post(url, headers=headers, json=payload)
+
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            if res.status_code != 200:
+                raise RuntimeError(f"Gemini API error {res.status_code}: {res.text}")
+            data = res.json()
+            choices = data.get("choices", [])
+            content = ""
+            if choices:
+                msg = choices[0].get("message", {})
+                content = msg.get("content") or ""
+            self.last_provider_used = "gemini"
+            return content, elapsed_ms
+
     async def generate_chat(
         self,
         messages: List[Dict[str, str]],
@@ -208,13 +257,19 @@ class LLMClient:
     ) -> Tuple[str, float]:
         """Generates conversational text.
 
-        If prefer_quality is True, queries OpenRouter directly. Otherwise tries Groq LPU first.
+        If prefer_quality is True, queries Gemini 2.0 Flash or OpenRouter. Otherwise tries Groq LPU first.
         """
         if not prefer_quality and self.groq_key:
             try:
                 return await self._call_groq(messages, temperature=temperature, max_tokens=max_tokens)
             except Exception as e:
-                logger.warning(f"[LLM] Groq call failed ({e}), falling back to OpenRouter...")
+                logger.warning(f"[LLM] Groq call failed ({e}), falling back...")
+
+        if self.gemini_key:
+            try:
+                return await self._call_gemini(messages, temperature=temperature, max_tokens=max_tokens)
+            except Exception as e:
+                logger.warning(f"[LLM] Gemini call failed ({e}), falling back to OpenRouter...")
 
         return await self._call_openrouter(messages, temperature=temperature, max_tokens=max_tokens)
 
@@ -249,7 +304,19 @@ class LLMClient:
                     response_format={"type": "json_object"},
                 )
             except Exception as e:
-                logger.warning(f"[LLM] Groq JSON generation failed ({e}), falling back to OpenRouter...")
+                logger.warning(f"[LLM] Groq JSON generation failed ({e}), falling back...")
+
+        # If Groq fails or wasn't available, try Gemini 2.0 Flash
+        if not raw_text and self.gemini_key:
+            try:
+                raw_text, elapsed_ms = await self._call_gemini(
+                    groq_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format={"type": "json_object"},
+                )
+            except Exception as e:
+                logger.warning(f"[LLM] Gemini JSON generation failed ({e}), falling back to OpenRouter...")
 
         if not raw_text:
             raw_text, elapsed_ms = await self._call_openrouter(

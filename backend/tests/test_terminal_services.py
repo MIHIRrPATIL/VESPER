@@ -168,3 +168,122 @@ async def test_hud_instant_gesture_cancel_during_voice_interaction(monkeypatch):
     finally:
         hud.stop_gestures()
 
+
+@pytest.mark.asyncio
+async def test_hud_sends_agent_idle_on_empty_or_short_pcm(monkeypatch):
+    """Verifies that empty or <350ms PCM sends AGENT_IDLE with TIMEOUT_NO_SPEECH."""
+    hud = TerminalDesktopHUD()
+    hud.is_running = True
+    hud.websocket = object()
+    hud._voice_duck_state = {"ducked": True}
+    sent_envelopes = []
+
+    async def mock_send_envelope(channel, event_type, payload):
+        sent_envelopes.append((channel, event_type, payload))
+
+    monkeypatch.setattr(hud, "send_envelope", mock_send_envelope)
+
+    # Short PCM: 100ms (16000 * 2 * 0.10 bytes)
+    short_pcm = b"\x00\x00" * 1600
+    await hud._on_utterance_recorded(short_pcm)
+
+    # Must emit AGENT_IDLE
+    assert len(sent_envelopes) >= 1
+    ch, ev, payload = sent_envelopes[0]
+    assert ch == Channel.VOICE
+    assert ev == EventType.AGENT_IDLE
+    assert payload.get("reason") == "TIMEOUT_NO_SPEECH"
+    assert hud._voice_duck_state is None
+    assert hud._is_handling_voice is False
+
+
+@pytest.mark.asyncio
+async def test_hud_sends_agent_idle_on_suppressed_hallucination(monkeypatch):
+    """Verifies that suppressed ambient hallucinations send AGENT_IDLE with UNRECOGNIZED_SPEECH."""
+    from unittest.mock import AsyncMock
+    from backend.voice.stt import GroqSpeechToText
+
+    hud = TerminalDesktopHUD()
+    hud.is_running = True
+    hud.websocket = object()
+    hud._voice_duck_state = {"ducked": True}
+    sent_envelopes = []
+
+    async def mock_send_envelope(channel, event_type, payload):
+        sent_envelopes.append((channel, event_type, payload))
+
+    monkeypatch.setattr(hud, "send_envelope", mock_send_envelope)
+    # Whisper hallucination on background audio
+    monkeypatch.setattr(GroqSpeechToText, "transcribe_wav", AsyncMock(return_value="[Music] Thank you."))
+
+    pcm = b"\x00\x00" * 16000
+    await hud._on_utterance_recorded(pcm)
+
+    assert len(sent_envelopes) >= 1
+    ch, ev, payload = sent_envelopes[0]
+    assert ch == Channel.VOICE
+    assert ev == EventType.AGENT_IDLE
+    assert payload.get("reason") == "UNRECOGNIZED_SPEECH"
+    assert hud._voice_duck_state is None
+    assert hud._is_handling_voice is False
+
+
+@pytest.mark.asyncio
+async def test_hud_sends_agent_idle_on_voice_watchdog_timeout(monkeypatch):
+    """Verifies that watchdog timeout restores ducked audio and sends AGENT_IDLE."""
+    hud = TerminalDesktopHUD()
+    hud.is_running = True
+    hud.websocket = object()
+    hud._voice_duck_state = {"ducked": True}
+    sent_envelopes = []
+
+    async def mock_send_envelope(channel, event_type, payload):
+        sent_envelopes.append((channel, event_type, payload))
+
+    monkeypatch.setattr(hud, "send_envelope", mock_send_envelope)
+
+    # Run the watchdog timeout coroutine directly (0s timeout for test)
+    await hud._voice_timeout_watchdog(timeout_sec=0)
+
+    assert hud._voice_duck_state is None
+    assert len(sent_envelopes) >= 1
+    ch, ev, payload = sent_envelopes[0]
+    assert ch == Channel.VOICE
+    assert ev == EventType.AGENT_IDLE
+    assert payload.get("reason") == "VOICE_TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_tts_ack_preserves_voice_duck_state(monkeypatch):
+    """Verifies that an acknowledgement TTS (is_ack=True) does not clear _voice_duck_state."""
+    hud = TerminalDesktopHUD()
+    hud.is_running = True
+    hud._voice_duck_state = {"ducked": True}
+
+    class MockTTSMgr:
+        async def stream_speech(self, text):
+            # Yield dummy WAV header bytes
+            yield b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+
+    hud._tts_mgr = MockTTSMgr()
+
+    # Mock subprocess creation so ffplay is not spawned
+    async def mock_create_subprocess_exec(*args, **kwargs):
+        class MockProc:
+            returncode = 0
+            async def communicate(self):
+                return b"", b""
+            def poll(self):
+                return 0
+        return MockProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_create_subprocess_exec)
+
+    # Play ack TTS
+    await hud._play_tts_response("Looking into that for you, sir.", is_ack=True)
+
+    # Voice duck state MUST be preserved so background audio remains ducked for user speech/processing
+    assert hud._voice_duck_state == {"ducked": True}
+
+
+

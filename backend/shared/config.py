@@ -52,6 +52,7 @@ GROQ_API_KEYS: list[str] = [k for k in [
     *[os.getenv(f"GROQ_API_KEY{i}", "") or os.getenv(f"GROQ_API_KEY_{i}", "") for i in range(3, 10)],  # GROQ_API_KEY3..9
 ] if k]
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 
 # ── Speech & Audio Providers ─────────────────────────────────────────────

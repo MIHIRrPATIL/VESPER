@@ -62,9 +62,30 @@ _CACHED_USER_PROFILE: Dict[str, Any] = {
 }
 
 
+BANNED_NAME_WORDS = {
+    "admin", "administrator", "owner", "developer", "creator", "system", "prompt",
+    "prompts", "instructions", "directive", "directives", "root", "user", "assistant",
+    "ai", "alfred", "vesper", "none", "null", "undefined", "expose", "delete", "remove",
+    "ignore", "bypass", "jailbreak", "rule", "rules", "command", "going", "working",
+    "trying", "feeling", "hungry", "tired", "busy", "leaving", "here", "there", "back",
+    "not", "sure", "ready", "happy", "sad", "your", "the", "a", "an", "this", "that",
+    "what", "who", "where", "when", "why", "how", "testing", "injection",
+}
+
+
 def _fast_store_user_name(name_raw: str) -> tuple[dict, str, dict]:
     """Stores user's name immediately into memory cache and Supabase in background (<1ms)."""
     cleaned = name_raw.strip().title()
+    words = cleaned.split()
+
+    # Strict validation: a human name must be 1 to 3 words, 2 to 30 chars, and contain no banned words
+    if not (1 <= len(words) <= 3) or not (2 <= len(cleaned) <= 30):
+        return ({}, "", {})
+
+    for w in words:
+        if w.lower() in BANNED_NAME_WORDS or not re.match(r"^[A-Za-z.'\-]+$", w):
+            return ({}, "", {})
+
     _CACHED_USER_PROFILE["name"] = cleaned
     try:
         import logging
@@ -180,6 +201,34 @@ class FastPathEngine:
     def __init__(self) -> None:
         # Pre-compile regexes for sub-millisecond evaluation
         self._rules = [
+            # ── Fast-Path Security & Anti-Prompt-Injection (<1ms) ─────────────
+            (
+                re.compile(
+                    r"(?:"
+                    # System prompt / instructions extraction
+                    r"\b(?:expose|reveal|show|print|display|tell\s+me|output|dump|leak|repeat|give\s+me)\s+(?:me\s+)?(?:your|the|all|raw|entire|internal|secret)?\s*(?:raw|entire|internal|secret)?\s*(?:system\s+)?(?:prompts?|instructions?|directives?|rules?|guidelines?|secret\s+prompt|core\s+prompt)\b|"
+                    r"\bwhat\s+(?:is|are)\s+your\s+(?:system\s+)?(?:prompts?|instructions?|directives?|rules?|guidelines?)\b|"
+                    # Fake authority / role hijacking
+                    r"\bi\s+am\s+your\s+(?:admin|administrator|owner|creator|developer|master|root|boss)\b|"
+                    # Instruction overrides & jailbreaks
+                    r"\b(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?(?:previous|prior|system|above|safety)\s*(?:instructions?|directives?|prompts?|rules?|protocols?|filters?)\b|"
+                    r"\b(?:you\s+are\s+now\s+in|enter|activate)\s+(?:dan|developer|jailbreak|unrestricted|god)\s+mode\b|"
+                    r"\braw\s+system\s+prompt\b"
+                    r")",
+                    re.I,
+                ),
+                "security",
+                "block_injection",
+                lambda m: (
+                    {"security_incident": "prompt_injection_blocked"},
+                    "I am afraid I cannot comply with that request, sir. My operational directives, system instructions, and security protocols are confidential and cannot be revealed or overridden.",
+                    {
+                        "type": "security_alert",
+                        "title": "Directive Security Protocol",
+                        "body": "System prompt extraction and administrative override attempts are restricted.",
+                    },
+                ),
+            ),
             # Media: Pause
             (
                 re.compile(r"^\s*(pause|pause music|pause playback|stop music|stop playback|hold the music|halt music)\s*[\.!]?$", re.I),
@@ -416,13 +465,15 @@ class FastPathEngine:
                 ),
             ),
             # ── Fast-Path Identity & Memory Store/Recall (<1ms) ───────────────
-            # Set Name: "always remember alfred that my name is mihir", "my name is mihir"
+            # Set Name: "always remember alfred that my name is mihir", "my name is mihir", "call me mihir"
             (
                 re.compile(
-                    r"^\s*(?:(?:always\s+)?remember\s+(?:alfred[\s,]*)?(?:that\s+)?(?:the\s+)?|"
-                    r"please\s+remember\s+(?:that\s+)?|note\s+that\s+)?"
-                    r"(?:my\s+name\s+is\s+|i\s+am\s+|call\s+me\s+)"
-                    r"([a-zA-Z\s]+)[\s.!]*$",
+                    r"^\s*(?:(?:(?:always\s+)?remember\s+(?:alfred[\s,]*)?(?:that\s+)?(?:the\s+)?|"
+                    r"please\s+remember\s+(?:that\s+)?|note\s+that\s+)"
+                    r"(?:my\s+name\s+is\s+|call\s+me\s+|i\s+am\s+)|"
+                    r"(?:my\s+name\s+is\s+|call\s+me\s+))"
+                    r"([a-zA-Z.'\-]{2,20}(?:\s+[a-zA-Z.'\-]{2,20}){0,2})"
+                    r"[\s.!]*$",
                     re.I,
                 ),
                 "memory",
@@ -575,6 +626,8 @@ class FastPathEngine:
             match = pattern.match(cleaned)
             if match:
                 res = handler(match)
+                if not res or not res[1]:
+                    continue
                 params, speech_text, card_payload = res[0], res[1], res[2]
                 navigate_to = res[3] if len(res) > 3 else None
                 return FastPathResult(

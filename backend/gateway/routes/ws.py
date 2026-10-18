@@ -73,6 +73,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         session = manager.register(websocket, hello_payload)
 
         # Emit SERVER_HELLO Acknowledgement
+        import os
+        from backend.shared.config import SUPABASE_KEY, SUPABASE_URL
+
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
         server_hello = ServerEnvelope(
             uuid=hello_envelope.uuid,
             channel=Channel.CONTROL,
@@ -81,6 +86,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 session_id=session.session_id,
                 heartbeat_interval_ms=15000,
                 server_version="2.0.0",
+                gemini_api_key=gemini_key,
+                supabase_url=SUPABASE_URL,
+                supabase_key=SUPABASE_KEY,
             ).model_dump(),
         )
         await manager.send_envelope(session.session_id, server_hello)

@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -164,27 +165,52 @@ def _ensure_hyprland_env() -> None:
 
 
 def _clean_stale_quickshell_sockets() -> None:
-    """Removes stale socket and PID entries from $XDG_RUNTIME_DIR/quickshell/ for dead PIDs."""
+    """Removes stale socket, lock, and PID entries from $XDG_RUNTIME_DIR/quickshell/ for dead instances."""
     try:
         xdg_runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
         qs_dir = xdg_runtime / "quickshell"
         if not qs_dir.exists():
             return
 
+        dead_instance_paths: set = set()
+
         by_pid = qs_dir / "by-pid"
         if by_pid.exists():
-            for pid_entry in by_pid.iterdir():
+            for pid_entry in list(by_pid.iterdir()):
                 try:
                     pid = int(pid_entry.name)
                     os.kill(pid, 0)
                 except (ValueError, ProcessLookupError, PermissionError):
+                    # Process is dead
                     try:
-                        if pid_entry.is_symlink() or pid_entry.is_file():
-                            pid_entry.unlink()
+                        if pid_entry.is_symlink():
+                            target = pid_entry.resolve()
+                            dead_instance_paths.add(target)
+                            pid_entry.unlink(missing_ok=True)
+                        elif pid_entry.is_file():
+                            pid_entry.unlink(missing_ok=True)
                         elif pid_entry.is_dir():
                             shutil.rmtree(pid_entry, ignore_errors=True)
                     except Exception:
                         pass
+
+        # Clean dead instance directories in by-id/
+        by_id = qs_dir / "by-id"
+        if by_id.exists():
+            for inst_dir in list(by_id.iterdir()):
+                if inst_dir in dead_instance_paths or not (inst_dir / "instance.lock").exists():
+                    shutil.rmtree(inst_dir, ignore_errors=True)
+
+        # Clean broken symlinks in by-shell/ and by-path/
+        for sub in ("by-shell", "by-path"):
+            sub_dir = qs_dir / sub
+            if sub_dir.exists():
+                for item in list(sub_dir.rglob("*")):
+                    if item.is_symlink() and not item.exists():
+                        try:
+                            item.unlink(missing_ok=True)
+                        except Exception:
+                            pass
     except Exception as e:
         logger.debug(f"[DisplaySentry] Socket cleanup glitch: {e}")
 
@@ -393,7 +419,7 @@ def restore_display_state(saved_state: Optional[Dict[str, Any]] = None) -> bool:
         monitors = saved_state.get("monitors", [])
         logger.info(f"[DisplaySentry] Restoring saved display state for {len(monitors)} monitor(s)...")
 
-        # 1. Restore each monitor's active workspace
+        # 1. Restore each monitor's active workspace with micro-delays to prevent compositor event flooding
         for m in monitors:
             m_name = m.get("name")
             ws = m.get("activeWorkspace", {})
@@ -406,6 +432,7 @@ def restore_display_state(saved_state: Optional[Dict[str, Any]] = None) -> bool:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+                time.sleep(0.08)
                 subprocess.run(
                     ["hyprctl", "dispatch", "workspace", str(ws_id)],
                     check=False,
@@ -413,6 +440,7 @@ def restore_display_state(saved_state: Optional[Dict[str, Any]] = None) -> bool:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+                time.sleep(0.08)
 
         # 2. Refocus the monitor that was focused before sleep
         focused_mon = next((m.get("name") for m in monitors if m.get("focused")), None)
@@ -424,6 +452,7 @@ def restore_display_state(saved_state: Optional[Dict[str, Any]] = None) -> bool:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            time.sleep(0.08)
 
         # 3. Restore global active workspace if present
         act_ws = saved_state.get("active_workspace")
@@ -435,6 +464,7 @@ def restore_display_state(saved_state: Optional[Dict[str, Any]] = None) -> bool:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            time.sleep(0.08)
 
         # 4. Restore focused active window if present
         act_win = saved_state.get("active_window")
@@ -622,9 +652,29 @@ def ensure_caelestia_running(force_restart: bool = False) -> None:
         qs_restarted = False
         shell_healthy = is_caelestia_shell_healthy()
 
-        if force_restart or not shell_healthy:
+        # Check if the process is alive
+        c = subprocess.run(["pgrep", "-x", "qs"], capture_output=True, text=True, check=False)
+        has_process = bool(c.stdout.strip())
+
+        # If process is running but temporarily reported unhealthy (e.g. monitors still link-training),
+        # try a non-destructive refresh first before killing!
+        if not force_restart and has_process and not shell_healthy:
+            logger.info("[DisplaySentry] Quickshell alive but surfaces settling; trying non-destructive IPC refresh...")
+            subprocess.run(
+                ["caelestia", "shell", "hypr", "refreshDevices"],
+                check=False,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(1.0)
+            if is_caelestia_shell_healthy():
+                logger.info("[DisplaySentry] Caelestia shell confirmed healthy after IPC refresh.")
+                return
+
+        if force_restart or not shell_healthy or not has_process:
             logger.info("[DisplaySentry] Caelestia shell unhealthy or restart requested; cycling shell...")
-            # 2. Clean shutdown of any existing Quickshell and resizer instances
+            # 2. Clean shutdown of any existing Quickshell and resizer instances (SIGTERM first)
             subprocess.run(
                 ["caelestia", "shell", "-k"],
                 check=False,
@@ -633,25 +683,35 @@ def ensure_caelestia_running(force_restart: bool = False) -> None:
                 stderr=subprocess.DEVNULL,
             )
             subprocess.run(
-                ["pkill", "-9", "-f", "caelestia resizer"],
+                ["pkill", "-15", "-f", "caelestia resizer"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["pkill", "-15", "-x", "qs"],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
 
             # Grace period for graceful exit
-            for _ in range(6):
+            for _ in range(8):
                 c = subprocess.run(["pgrep", "-x", "qs"], capture_output=True, text=True, check=False)
                 if not c.stdout.strip():
                     break
-                time.sleep(0.08)
+                time.sleep(0.1)
 
-            # Force kill if still lingering
-            subprocess.run(["pkill", "-9", "-x", "qs"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["pkill", "-9", "-f", "qs -c caelestia"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(0.1)
+            # Force kill only if still lingering after SIGTERM grace period
+            c = subprocess.run(["pgrep", "-x", "qs"], capture_output=True, text=True, check=False)
+            if c.stdout.strip():
+                subprocess.run(["pkill", "-9", "-x", "qs"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["pkill", "-9", "-f", "qs -c caelestia"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(0.1)
 
-            # 3. Clean stale quickshell runtime sockets to prevent duplicate launch failures
+            subprocess.run(["pkill", "-9", "-f", "caelestia resizer"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # 3. Clean stale quickshell runtime sockets and dead instance symlinks
             _clean_stale_quickshell_sockets()
 
             # 4. Launch Caelestia Quickshell cleanly with verified environment
@@ -743,6 +803,138 @@ def ensure_caelestia_running(force_restart: bool = False) -> None:
 restart_caelestia_services = ensure_caelestia_running
 
 
+def is_hyprlock_running() -> bool:
+    """Checks whether hyprlock is currently active and locking the screen."""
+    res = subprocess.run(["pidof", "hyprlock"], capture_output=True, text=True, check=False)
+    return bool(res.stdout.strip())
+
+
+def restart_caelestia_shell_post_login() -> bool:
+    """Executes clean Caelestia shell kill and detached relaunch after session authentication.
+    
+    Equivalent to: caelestia shell -k & caelestia shell -d with verified socket drain and resizer sync.
+    """
+    _ensure_hyprland_env()
+    logger.info("[DisplaySentry] Performing clean post-login Caelestia shell restart (caelestia shell -k & -d)...")
+    try:
+        # 1. Kill existing Quickshell instance cleanly
+        subprocess.run(["caelestia", "shell", "-k"], check=False, timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["pkill", "-15", "-x", "qs"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # 2. Grace period for process to exit
+        for _ in range(12):
+            c = subprocess.run(["pgrep", "-x", "qs"], capture_output=True, text=True, check=False)
+            if not c.stdout.strip():
+                break
+            time.sleep(0.1)
+
+        # Force kill if still lingering
+        c = subprocess.run(["pgrep", "-x", "qs"], capture_output=True, text=True, check=False)
+        if c.stdout.strip():
+            subprocess.run(["pkill", "-9", "-x", "qs"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.1)
+
+        # 3. Clean stale quickshell runtime sockets to prevent "already running" error
+        _clean_stale_quickshell_sockets()
+        time.sleep(0.2)
+
+        # 4. Relaunch Caelestia shell detached
+        if shutil.which("hyprctl"):
+            subprocess.run(
+                ["hyprctl", "dispatch", "exec", "caelestia shell -d"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.Popen(
+                ["caelestia", "shell", "-d"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                env=os.environ.copy(),
+            )
+
+        logger.info("[DisplaySentry] Caelestia shell restarted detached successfully.")
+
+        # 5. Synchronize resizer daemon after shell layer surface appears
+        time.sleep(0.6)
+        resizer_check = subprocess.run(["pgrep", "-f", "caelestia resizer"], capture_output=True, text=True, check=False)
+        if not resizer_check.stdout.strip():
+            if shutil.which("hyprctl"):
+                subprocess.run(
+                    ["hyprctl", "dispatch", "exec", "caelestia resizer -d"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                subprocess.Popen(
+                    ["caelestia", "resizer", "-d"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    env=os.environ.copy(),
+                )
+        return True
+    except Exception as e:
+        logger.warning(f"[DisplaySentry] Error during post-login Caelestia restart: {e}")
+        return False
+
+
+_active_unlock_thread: Optional[threading.Thread] = None
+_unlock_thread_lock = threading.Lock()
+
+
+def _watch_for_unlock_thread(timeout_sec: float = 600.0) -> None:
+    """Monitors hyprlock until user enters password, then triggers Caelestia restart."""
+    logger.info("[DisplaySentry] Armed post-login watcher. Waiting for password entry / session unlock...")
+    start_t = time.time()
+    
+    # Allow 0.5s for hyprlock process registration
+    time.sleep(0.5)
+    
+    while time.time() - start_t < timeout_sec:
+        if not is_hyprlock_running():
+            logger.info("[DisplaySentry] Session logged in! Password entered. Triggering Caelestia restart...")
+            # Allow Hyprland a brief settling window (0.4s) to restore workspace and unmap lock layers
+            time.sleep(0.4)
+            restart_caelestia_shell_post_login()
+            return
+        time.sleep(0.4)
+    logger.warning("[DisplaySentry] Post-login watcher timed out after 10 minutes.")
+
+
+def schedule_post_unlock_caelestia_recovery() -> None:
+    """Schedules post-login Caelestia restart as soon as user enters password."""
+    global _active_unlock_thread
+    with _unlock_thread_lock:
+        if _active_unlock_thread and _active_unlock_thread.is_alive():
+            logger.debug("[DisplaySentry] Post-unlock watcher thread already running.")
+            return
+
+        def _recovery_launcher():
+            # If hyprlock has not yet registered in process table, probe for up to 1 second
+            for _ in range(5):
+                if is_hyprlock_running():
+                    break
+                time.sleep(0.2)
+
+            if is_hyprlock_running():
+                _watch_for_unlock_thread()
+            else:
+                logger.info("[DisplaySentry] Screen awake and session not locked; restarting Caelestia directly.")
+                time.sleep(0.5)
+                restart_caelestia_shell_post_login()
+
+        _active_unlock_thread = threading.Thread(
+            target=_recovery_launcher,
+            name="CaelestiaPostUnlockWatcher",
+            daemon=True,
+        )
+        _active_unlock_thread.start()
+
+
 def turn_display_on(recover_caelestia: bool = True) -> bool:
     """Powers on displays across Linux (Hyprland / xset) and Windows,
     retrieving and restoring the exact pre-sleep state of monitors, workspaces, and Caelestia shell."""
@@ -783,9 +975,11 @@ def turn_display_on(recover_caelestia: bool = True) -> bool:
             if saved:
                 restore_display_state(saved)
 
-            # 6. Verify and recover Caelestia Quickshell if needed (non-destructive if already healthy)
+            # 6. Post-login Caelestia Quickshell recovery:
+            # If screen was locked with hyprlock, wait until user enters password and logs in,
+            # then execute 'caelestia shell -k & caelestia shell -d' cleanly.
             if recover_caelestia:
-                ensure_caelestia_running(force_restart=False)
+                schedule_post_unlock_caelestia_recovery()
 
             return True
 
@@ -880,6 +1074,7 @@ class DisplaySentryService:
         self._last_on_check = time.time()
         self._last_user_activity = time.time()
         self._lock = asyncio.Lock()
+        self._was_display_off = False
 
     def notify_user_activity(self) -> None:
         """Registers recent user interaction (e.g. gesture or command) to prevent false absence locking."""
@@ -973,6 +1168,11 @@ class DisplaySentryService:
                 display_active = await asyncio.to_thread(is_display_on)
 
                 if display_active:
+                    if self._was_display_off:
+                        self._was_display_off = False
+                        logger.info("[DisplaySentry] Display transitioned from OFF to ON. Arming post-login Caelestia recovery.")
+                        schedule_post_unlock_caelestia_recovery()
+
                     # ── Screen is ON: Check for user absence every 5 minutes ─────────
                     await asyncio.sleep(min(5.0, self.screen_on_interval))
                     now = time.time()
@@ -1022,6 +1222,7 @@ class DisplaySentryService:
                                         "Engaging session lock and powering off display."
                                     )
                                     await asyncio.to_thread(turn_display_off, True)
+                                    self._was_display_off = True
                                     if self.on_state_change:
                                         try:
                                             self.on_state_change("ABSENT_LOCK")
@@ -1034,6 +1235,7 @@ class DisplaySentryService:
                             )
 
                 else:
+                    self._was_display_off = True
                     # ── Screen is OFF: Probe camera every 2.5 seconds for return ───────
                     await asyncio.sleep(self.screen_off_interval)
                     if not self.is_running:
@@ -1073,6 +1275,7 @@ class DisplaySentryService:
                                 "Waking display and restoring Caelestia services."
                             )
                             await asyncio.to_thread(turn_display_on, True)
+                            self._was_display_off = False
                             self._last_on_check = time.time()
                             self.notify_user_activity()
                             if self.on_state_change:

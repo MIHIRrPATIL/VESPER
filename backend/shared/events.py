@@ -142,6 +142,9 @@ class ServerHelloPayload(BasePayload):
     session_id: str
     heartbeat_interval_ms: int = 15000
     server_version: str = "2.0.0"
+    gemini_api_key: Optional[str] = None
+    supabase_url: Optional[str] = None
+    supabase_key: Optional[str] = None
 
 
 class PingPayload(BasePayload):

@@ -68,8 +68,46 @@ class ActionQueueManager:
         self._broadcast_callback = callback
 
     def stage_action(self, action: StagedAction) -> StagedAction:
-        """Adds a newly formulated recommendation to the staged queue."""
-        # Evict oldest expired items if queue exceeds capacity
+        """Adds a newly formulated recommendation to the staged queue with deduplication."""
+        now = time.time()
+
+        # Check for duplicate action within debounce window (comparing active unconfirmed actions)
+        for existing_id, existing in list(self._queue.items()):
+            if existing.status in ("staged", "pending_return") and existing.domain == action.domain and existing.action == action.action:
+                # 1. Exact verbatim text match
+                same_verbatim = bool(
+                    existing.verbatim_text.strip().lower() == action.verbatim_text.strip().lower()
+                )
+                # 2. Domain-specific parameter matching
+                same_params = False
+                if action.domain == "finance" and action.action == "log_transaction":
+                    same_params = (
+                        existing.params.get("amount") == action.params.get("amount")
+                        and existing.params.get("category") == action.params.get("category")
+                        and existing.params.get("transaction_type") == action.params.get("transaction_type")
+                    )
+                elif action.domain == "finance" and action.action == "manage_debt":
+                    same_params = (
+                        existing.params.get("amount") == action.params.get("amount")
+                        and str(existing.params.get("person", "")).strip().lower() == str(action.params.get("person", "")).strip().lower()
+                    )
+                elif action.domain == "security" and action.action == "display_otp":
+                    same_params = (existing.params.get("code") == action.params.get("code"))
+                elif action.domain == "tasks" and action.action == "add_task":
+                    same_params = (
+                        str(existing.params.get("title", "")).strip().lower() == str(action.params.get("title", "")).strip().lower()
+                    )
+
+                if same_verbatim or same_params:
+                    logger.info(
+                        f"[ActionQueue] Suppressed duplicate action '{action.id}' matching active '{existing_id}' "
+                        f"[{action.domain}:{action.action}] verbatim: '{action.verbatim_text[:60]}'"
+                    )
+                    # Extend expiry if needed, but do not re-prompt or duplicate
+                    existing.expires_at = max(existing.expires_at, now + 120.0)
+                    return existing
+
+        # Evict oldest items if queue exceeds capacity
         if len(self._queue) >= self._max_capacity:
             oldest_id = min(self._queue.keys(), key=lambda k: self._queue[k].created_at)
             self._queue.pop(oldest_id, None)

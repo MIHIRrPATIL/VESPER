@@ -360,13 +360,99 @@ class VisionSpecialist(BaseSpecialist):
         )
 
 
+    @staticmethod
+    def _resolve_hyprland_target(text: str) -> tuple[Optional[str | int], Optional[str], Optional[Dict[str, Any]]]:
+        """Resolves target workspace and monitor from query using Hyprland client metadata."""
+        import shutil, subprocess, json, re
+        if not shutil.which("hyprctl"):
+            return None, None, None
+
+        try:
+            res = subprocess.run(["hyprctl", "-j", "clients"], stdout=subprocess.PIPE, text=True, timeout=1.0)
+            if res.returncode != 0 or not res.stdout.strip():
+                return None, None, None
+            clients = json.loads(res.stdout)
+
+            # Map monitor IDs and names
+            res_m = subprocess.run(["hyprctl", "-j", "monitors"], stdout=subprocess.PIPE, text=True, timeout=1.0)
+            mon_map: Dict[int, str] = {}
+            if res_m.returncode == 0 and res_m.stdout.strip():
+                mon_map = {m["id"]: m["name"] for m in json.loads(res_m.stdout)}
+
+            # Map workspace to monitor name
+            res_w = subprocess.run(["hyprctl", "-j", "workspaces"], stdout=subprocess.PIPE, text=True, timeout=1.0)
+            ws_mon_map: Dict[str, str] = {}
+            if res_w.returncode == 0 and res_w.stdout.strip():
+                for w in json.loads(res_w.stdout):
+                    ws_mon_map[str(w.get("name") or w.get("id"))] = w.get("monitor", "")
+
+            q_low = (text or "").lower()
+
+            # Check explicit workspace reference (e.g. "third desktop", "3rd desktop", "workspace 3", "desktop three")
+            word_to_num = {
+                "first": 1, "1st": 1, "one": 1,
+                "second": 2, "2nd": 2, "two": 2,
+                "third": 3, "3rd": 3, "three": 3,
+                "fourth": 4, "4th": 4, "four": 4,
+                "fifth": 5, "5th": 5, "five": 5,
+                "sixth": 6, "6th": 6, "six": 6,
+                "seventh": 7, "7th": 7, "seven": 7,
+                "eighth": 8, "8th": 8, "eight": 8,
+                "ninth": 9, "9th": 9, "nine": 9,
+                "tenth": 10, "10th": 10, "ten": 10,
+            }
+            num_pattern = r"\d+|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|one|two|three|four|five|six|seven|eight|nine|ten|1st|2nd|3rd|4th|5th|6th|7th|8th|9th|10th"
+            m_ws = re.search(
+                rf"(?:workspace|desktop|screen)\s*#?\s*({num_pattern})\b|\b({num_pattern})\s+(?:workspace|desktop|screen)\b",
+                q_low,
+                re.IGNORECASE,
+            )
+            if m_ws:
+                raw_token = (m_ws.group(1) or m_ws.group(2) or "").lower()
+                if raw_token.isdigit():
+                    ws_num = str(int(raw_token))
+                else:
+                    ws_num = str(word_to_num.get(raw_token, raw_token))
+
+                target_mon = ws_mon_map.get(ws_num)
+                for c in clients:
+                    c_ws = str(c.get("workspace", {}).get("name") or c.get("workspace", {}).get("id") or "")
+                    if c_ws == ws_num:
+                        mon_name = mon_map.get(c.get("monitor", -1)) or target_mon
+                        return ws_num, mon_name, c
+                return ws_num, target_mon, None
+
+            # Match application / content keywords in query
+            for c in clients:
+                c_class = c.get("class", "").lower()
+                c_title = c.get("title", "").lower()
+                c_ws = str(c.get("workspace", {}).get("name") or c.get("workspace", {}).get("id") or "")
+                c_mon = mon_map.get(c.get("monitor", -1)) or ws_mon_map.get(c_ws)
+
+                # Browser / Resume / Zen match
+                if any(k in q_low for k in ["resume", "cv", "zen", "browser", "pdf"]) and any(k in c_class or k in c_title for k in ["zen", "browser", "cv", "resume", "pdf"]):
+                    return c_ws, c_mon, c
+                # Music / Spotify match
+                if any(k in q_low for k in ["spotify", "music", "song", "track"]) and ("spotify" in c_class or "music" in c_title):
+                    return c_ws, c_mon, c
+                # Code / IDE match
+                if any(k in q_low for k in ["code", "ide", "vscode", "editor", "terminal"]) and any(k in c_class for k in ["antigravity", "code", "terminal"]):
+                    return c_ws, c_mon, c
+
+        except Exception as e:
+            logger.debug(f"[VisionSpecialist] Error resolving Hyprland target: {e}")
+
+        return None, None, None
+
     async def _inspect_screen(self, params: Dict[str, Any]) -> SpecialistResult:
         """Captures desktop monitor frame and conducts multimodal visual reasoning."""
         query = params.get("query") or "Describe the contents and windows currently visible on this desktop screen."
         mon_idx = params.get("monitor_index")
         mon_name = params.get("monitor_name")
 
-        # Natural language display routing if query specifies a screen
+        # Natural language display routing if query specifies a screen or workspace
+        target_ws: Optional[str | int] = None
+        target_client: Optional[Dict[str, Any]] = None
         if query and not mon_name and mon_idx is None:
             q_low = query.lower()
             if any(k in q_low for k in ["both screens", "all screens", "entire desktop", "every monitor", "all monitors"]):
@@ -382,8 +468,12 @@ class VisionSpecialist(BaseSpecialist):
             elif "edp-1" in q_low:
                 mon_name = "eDP-1"
 
+            target_ws, target_mon, target_client = self._resolve_hyprland_target(query)
+            if target_mon:
+                mon_name = target_mon
+
         caps = DeviceProbe.get_capabilities()
-        frame = ScreenCapture.capture_screen(monitor_index=mon_idx, monitor_name=mon_name)
+        frame = ScreenCapture.capture_screen(monitor_index=mon_idx, monitor_name=mon_name, target_workspace=target_ws)
         if not frame.success:
             # Fall back to Workstation RPC via Gateway (for remote swarm nodes)
             try:
@@ -448,10 +538,13 @@ class VisionSpecialist(BaseSpecialist):
         else:
             confidence = "high"
 
+        ws_context = f"On workspace {target_ws} ({target_client.get('title', '')}): " if target_ws and target_client else (f"On workspace {target_ws}: " if target_ws else "")
+        full_summary = ws_context + desc if ws_context and not desc.startswith(ws_context) else desc
+
         return SpecialistResult(
             success=True,
             action="inspect_screen",
-            speech_summary=analysis.description,
+            speech_summary=full_summary,
             data={
                 "description": analysis.description,
                 "confidence": confidence,
@@ -480,6 +573,7 @@ class VisionSpecialist(BaseSpecialist):
         mon_idx = params.get("monitor_index")
         mon_name = params.get("monitor_name")
 
+        target_ws: Optional[str | int] = None
         if focus_hint and not mon_name and mon_idx is None:
             f_low = focus_hint.lower()
             if any(k in f_low for k in ["both screens", "all screens", "all monitors", "entire desktop"]):
@@ -495,8 +589,12 @@ class VisionSpecialist(BaseSpecialist):
             elif "edp-1" in f_low:
                 mon_name = "eDP-1"
 
+            target_ws, target_mon, _ = self._resolve_hyprland_target(focus_hint)
+            if target_mon:
+                mon_name = target_mon
+
         caps = DeviceProbe.get_capabilities()
-        frame = ScreenCapture.capture_screen(monitor_index=mon_idx, monitor_name=mon_name)
+        frame = ScreenCapture.capture_screen(monitor_index=mon_idx, monitor_name=mon_name, target_workspace=target_ws)
         if not frame.success:
             # Fall back to Workstation RPC via Gateway (for remote swarm nodes)
             try:

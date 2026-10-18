@@ -1162,7 +1162,16 @@ class EmailSpecialist(BaseSpecialist):
             action="draft_email",
             data=draft_item,
             speech_summary=speech,
-            card_payload={"type": "email_draft_card", "draft": draft_item},
+            card_payload={
+                "type": "email_draft_card",
+                "title": f"Draft: {subj}",
+                "draft": draft_item,
+                "to": clean_to,
+                "subject": subj,
+                "body": body,
+                "has_valid_email": valid,
+                "status": "draft",
+            },
         )
 
     async def send_email(self, to: str, subject: str, body: str) -> SpecialistResult:
@@ -1177,6 +1186,39 @@ class EmailSpecialist(BaseSpecialist):
                 data={"to": clean_to, "error": "invalid_email_address", "needs": "valid_email_address"},
                 speech_summary=speech,
                 card_payload={"type": "email_error_card", "error": "invalid_email", "to": clean_to},
+            )
+
+        # Placeholder / Scaffold Detection: Protect user from dispatching template text
+        placeholder_match = re.search(
+            r"\[(?:Project|Add|Insert|Your|Recipient|Title|Name|Company|Link|Date|Goal|Key|Technologies|\.\.\.|.*Title|.*Name).*?\]",
+            body or "",
+            re.IGNORECASE,
+        )
+        if placeholder_match:
+            ph_token = placeholder_match.group(0)
+            logger.warning(f"[EmailSpecialist] Halting email dispatch: template placeholder detected '{ph_token}'")
+            draft_res = await self.draft_email(to=clean_to, subject=subject, body=body)
+            speech = (
+                f"I have halted sending this email, sir, because the draft contains incomplete template placeholders like '{ph_token}'. "
+                f"I have saved it as a draft instead so you can review and provide the remaining details."
+            )
+            return SpecialistResult(
+                success=False,
+                action="send_email",
+                error=f"contains_template_placeholder: {ph_token}",
+                data={"to": clean_to, "subject": subject, "body": body, "placeholder": ph_token, "draft": draft_res.data},
+                speech_summary=speech,
+                card_payload={
+                    "type": "email_draft_card",
+                    "title": f"Draft (Action Required): {subject}",
+                    "warning": "placeholder_detected",
+                    "placeholder": ph_token,
+                    "draft": draft_res.data,
+                    "to": clean_to,
+                    "subject": subject,
+                    "body": body,
+                    "status": "draft",
+                },
             )
 
         service = self._get_gmail_service()
@@ -1198,12 +1240,21 @@ class EmailSpecialist(BaseSpecialist):
                 raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
                 sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
                 speech = f"Email successfully sent to {clean_to} regarding '{subject}', sir."
+                sent_id = sent.get("id") if isinstance(sent, dict) else None
                 return SpecialistResult(
                     success=True,
                     action="send_email",
-                    data={"id": sent.get("id"), "to": clean_to, "subject": subject, "status": "sent"},
+                    data={"id": sent_id, "to": clean_to, "subject": subject, "body": body, "status": "sent"},
                     speech_summary=speech,
-                    card_payload={"type": "email_sent_card", "to": clean_to, "subject": subject},
+                    card_payload={
+                        "type": "email_sent_card",
+                        "title": f"Sent: {subject}",
+                        "id": sent_id,
+                        "to": clean_to,
+                        "subject": subject,
+                        "body": body,
+                        "status": "sent",
+                    },
                 )
             except Exception as live_err:
                 logger.warning(f"[EmailSpecialist] Gmail send failed: {live_err}")
@@ -1230,5 +1281,12 @@ class EmailSpecialist(BaseSpecialist):
             action="send_email",
             data=sent_item,
             speech_summary=speech,
-            card_payload={"type": "email_sent_card", "to": clean_to, "subject": subject},
+            card_payload={
+                "type": "email_sent_card",
+                "title": f"Dispatched: {subject}",
+                "to": clean_to,
+                "subject": subject,
+                "body": body,
+                "status": "dispatched_sandbox",
+            },
         )

@@ -78,18 +78,27 @@ export const TasksAgendaView: React.FC<TasksAgendaViewProps> = ({ onSendUserMess
 
   const handleToggleTask = async (task: Task) => {
     // Optimistic UI update
+    const targetDone = !task.done;
     setTasks((prev) =>
-      prev.map((t) => (t.id === task.id ? { ...t, done: !t.done } : t))
+      prev.map((t) => (t.id === task.id ? { ...t, done: targetDone } : t))
     );
 
     try {
       const res = await fetch(`${API_BASE}/${task.id}/toggle`, {
         method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ done: targetDone }),
       });
       if (res.ok) {
         const updated = await res.json();
+        const serverDone = updated.task ? updated.task.done : (updated.done !== undefined ? updated.done : targetDone);
         setTasks((prev) =>
-          prev.map((t) => (t.id === task.id ? { ...t, done: updated.done } : t))
+          prev.map((t) => (t.id === task.id ? { ...t, done: serverDone } : t))
+        );
+      } else {
+        // Revert on actual server failure
+        setTasks((prev) =>
+          prev.map((t) => (t.id === task.id ? { ...t, done: task.done } : t))
         );
       }
     } catch {

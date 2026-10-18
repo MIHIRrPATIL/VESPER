@@ -36,9 +36,12 @@ _EVENT_TRIGGERS = [
 _REMINDER_TRIGGERS = [
     r"\bremind me\b",
     r"\bset a reminder\b",
+    r"\bgive me a reminder\b",
     r"\bdon'?t let me forget\b",
     r"\bping me\b",
     r"\bnotify me\b",
+    r"\balert me\b",
+    r"\b(?:in|after)\s+\d+\s+(?:minutes?|mins?|hours?|hrs?)\b",
 ]
 
 _TASK_TRIGGERS = [
@@ -113,6 +116,8 @@ _TIME_PATTERNS = [
     r"\b(\d{1,2}(?:[:.]\d{2})?\s*o'?clock\s*(?:am|pm)?\s*(?:today|tomorrow|tonight)?)\b",
     # "in 15 minutes", "in 2 hours"
     r"\b(in\s+\d+\s+(?:minutes?|mins?|hours?|hrs?|days?))\b",
+    # "after 30 minutes", "after 2 hours"
+    r"\b(after\s+\d+\s+(?:minutes?|mins?|hours?|hrs?|days?))\b",
     # "at 5.45", "at 3pm", "by 10:30am", "at 9 o'clock"
     r"\b((?:at|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:o'?clock)?\s*(?:am|pm)?)\b",
     # "5.45 today", "3pm tomorrow", "5:45 pm"

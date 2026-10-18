@@ -297,12 +297,34 @@ def _restore_all_ducked_audio() -> None:
 atexit.register(_restore_all_ducked_audio)
 
 
+_GLOBAL_TTS_MGR: Any = None
+
+
+def get_shared_tts_manager():
+    """Returns the process-wide cached TTSManager instance."""
+    global _GLOBAL_TTS_MGR
+    if _GLOBAL_TTS_MGR is None:
+        from backend.voice.tts.manager import TTSManager
+        _GLOBAL_TTS_MGR = TTSManager()
+    return _GLOBAL_TTS_MGR
+
+
+async def prewarm_tts_in_background() -> None:
+    """Warms up local neural voice models in background for zero-latency speech."""
+    try:
+        mgr = get_shared_tts_manager()
+        active = mgr.get_active_providers()
+        if active and hasattr(active[0], "_get_voice"):
+            await asyncio.to_thread(active[0]._get_voice)
+    except Exception:
+        pass
+
+
 async def speak_text(text: str) -> None:
     """Synthesizes text through Alfred's TTS and plays through the speakers."""
-    from backend.voice.tts.manager import TTSManager
     from backend.voice.audio_utils import prepare_audio_for_playback
 
-    tts_mgr = TTSManager()
+    tts_mgr = get_shared_tts_manager()
     chunks = []
     duck_state = await asyncio.to_thread(_duck_background_audio, 20)
     try:
@@ -702,6 +724,7 @@ class TerminalDesktopHUD:
 
             if server_hello.type == EventType.SERVER_HELLO:
                 self.session_id = server_hello.payload.get("session_id")
+                asyncio.create_task(prewarm_tts_in_background())
                 return True
             return False
         except Exception as e:
@@ -967,7 +990,8 @@ class TerminalDesktopHUD:
                             self._current_tts_proc.terminate()
                         except Exception:
                             pass
-                self._current_tts_task = asyncio.create_task(self._play_tts_response(response))
+                followup = bool(p.get("followup_required", False))
+                self._current_tts_task = asyncio.create_task(self._play_tts_response(response, followup_required=followup))
 
             sys.stdout.write("\nvesper> ")
             sys.stdout.flush()
@@ -1187,20 +1211,13 @@ class TerminalDesktopHUD:
                         async def _duck_on_remote_wake():
                             self._voice_duck_state = await asyncio.to_thread(_duck_background_audio, 20)
                         asyncio.create_task(_duck_on_remote_wake())
+                    elif self._call_duck_state is None:
+                        asyncio.create_task(asyncio.to_thread(_duck_background_audio, 20))
 
                     if self._voice_watchdog_task and not self._voice_watchdog_task.done():
                         self._voice_watchdog_task.cancel()
 
-                    async def _voice_timeout_watchdog():
-                        try:
-                            await asyncio.sleep(6.0)
-                            if self._voice_duck_state and self._call_duck_state is None:
-                                await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
-                                self._voice_duck_state = None
-                        except asyncio.CancelledError:
-                            pass
-
-                    self._voice_watchdog_task = asyncio.create_task(_voice_timeout_watchdog())
+                    self._voice_watchdog_task = asyncio.create_task(self._voice_timeout_watchdog(6.0))
                     self._wakeword_listener.trigger_listen()
 
         elif envelope.type == EventType.AGENT_SPEAKING:
@@ -1844,7 +1861,7 @@ class TerminalDesktopHUD:
                 pass
         self.websocket = None
 
-    async def _play_tts_response(self, text: str, is_ack: bool = False) -> None:
+    async def _play_tts_response(self, text: str, is_ack: bool = False, followup_required: bool = False) -> None:
         """Synthesizes and plays Alfred's speech response through host speakers."""
         if not text or not text.strip():
             return
@@ -1863,53 +1880,91 @@ class TerminalDesktopHUD:
                 self._tts_duck_state = await asyncio.to_thread(_duck_background_audio, 20)
             try:
                 if self._tts_mgr is None:
-                    from backend.voice.tts.manager import TTSManager
-                    self._tts_mgr = TTSManager()
+                    self._tts_mgr = get_shared_tts_manager()
+                tts_mgr = self._tts_mgr
+                if tts_mgr is None:
+                    logger.warning("[TTS] TTS manager unavailable; cannot synthesize speech.")
+                    return
 
                 from backend.voice.audio_utils import prepare_audio_for_playback
                 import tempfile
                 import shutil
+                from pathlib import Path
 
-                logger.info(f"[TTS] Synthesizing speech ({len(text)} chars, ack={is_ack}): '{text[:60]}...'")
-                chunks = []
-                async for chunk in self._tts_mgr.stream_speech(text):
-                    chunks.append(chunk)
-
-                if not chunks:
-                    logger.warning("[TTS] No audio chunks returned from TTSManager.")
-                    return
-
-                audio_bytes, ext = prepare_audio_for_playback(chunks)
-                if not audio_bytes:
-                    logger.warning("[TTS] Prepared audio bytes empty.")
-                    return
-
-                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
-                    f.write(audio_bytes)
-                    temp_audio_path = f.name
-
-                cmd = None
-                if ext == ".wav":
-                    if shutil.which("paplay"):
-                        cmd = ["paplay", "--volume=65536", "--client-name=Alfred-Speech", "--stream-name=TTS-Voice", temp_audio_path]
-                    elif shutil.which("mpv"):
-                        cmd = ["mpv", "--no-video", "--really-quiet", "--volume=100", temp_audio_path]
-                    elif shutil.which("pw-play"):
-                        cmd = ["pw-play", "--volume", "1.0", temp_audio_path]
-                if not cmd:
+                def _get_player_cmd(ext: str, target_path: str):
+                    if ext == ".wav":
+                        if shutil.which("paplay"):
+                            return ["paplay", "--volume=65536", "--client-name=Alfred-Speech", "--stream-name=TTS-Voice", target_path]
+                        elif shutil.which("mpv"):
+                            return ["mpv", "--no-video", "--really-quiet", "--volume=100", target_path]
+                        elif shutil.which("pw-play"):
+                            return ["pw-play", "--volume", "1.0", target_path]
                     if shutil.which("mpv"):
-                        cmd = ["mpv", "--no-video", "--really-quiet", "--volume=100", temp_audio_path]
+                        return ["mpv", "--no-video", "--really-quiet", "--volume=100", target_path]
                     elif shutil.which("ffplay"):
-                        cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", temp_audio_path]
+                        return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", target_path]
                     elif shutil.which("paplay"):
-                        cmd = ["paplay", "--volume=65536", "--client-name=Alfred-Speech", "--stream-name=TTS-Voice", temp_audio_path]
+                        return ["paplay", "--volume=65536", "--client-name=Alfred-Speech", "--stream-name=TTS-Voice", target_path]
+                    return None
 
-                if cmd:
-                    logger.info(f"[TTS] Executing audio player: {' '.join(cmd)}")
-                    self._current_tts_proc = await asyncio.create_subprocess_exec(*cmd)
-                    await self._current_tts_proc.wait()
-                    self._current_tts_proc = None
+                sentences = tts_mgr.split_sentences(text)
+                if is_ack or len(sentences) <= 1 or len(text) <= 120:
+                    units = [text]
+                else:
+                    units = sentences
+
+                logger.info(f"[TTS] Synthesizing speech ({len(text)} chars, {len(units)} unit(s), ack={is_ack}): '{text[:60]}...'")
+
+                play_queue: asyncio.Queue[Optional[tuple[str, str]]] = asyncio.Queue(maxsize=4)
+                created_temp_files: list[str] = []
+
+                async def _producer():
+                    try:
+                        for unit in units:
+                            chunks = []
+                            async for chunk in tts_mgr.stream_speech(unit):
+                                chunks.append(chunk)
+                            if not chunks:
+                                continue
+                            audio_bytes, ext = prepare_audio_for_playback(chunks)
+                            if not audio_bytes:
+                                continue
+                            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+                                f.write(audio_bytes)
+                                s_path = f.name
+                            created_temp_files.append(s_path)
+                            await play_queue.put((s_path, ext))
+                    except Exception as pe:
+                        logger.warning(f"[TTS Producer Error] {pe}")
+                    finally:
+                        await play_queue.put(None)
+
+                async def _consumer():
+                    while True:
+                        item = await play_queue.get()
+                        if item is None:
+                            break
+                        s_path, ext = item
+                        cmd = _get_player_cmd(ext, s_path)
+                        if cmd:
+                            logger.info(f"[TTS] Executing audio player: {' '.join(cmd)}")
+                            self._current_tts_proc = await asyncio.create_subprocess_exec(*cmd)
+                            await self._current_tts_proc.wait()
+                            self._current_tts_proc = None
+
+                producer_task = asyncio.create_task(_producer())
+                consumer_task = asyncio.create_task(_consumer())
+                try:
+                    await asyncio.gather(producer_task, consumer_task)
                     logger.info("[TTS] Audio playback completed.")
+                finally:
+                    producer_task.cancel()
+                    consumer_task.cancel()
+                    for s_path in created_temp_files:
+                        try:
+                            Path(s_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
 
             except asyncio.CancelledError:
                 if self._current_tts_proc:
@@ -1926,16 +1981,17 @@ class TerminalDesktopHUD:
             finally:
                 if is_ack:
                     self._is_playing_ack = False
-                if self._voice_watchdog_task and not self._voice_watchdog_task.done():
-                    self._voice_watchdog_task.cancel()
-                if self._tts_duck_state is not None:
-                    await asyncio.to_thread(_unduck_background_audio, self._tts_duck_state)
-                    self._tts_duck_state = None
-                if self._voice_duck_state is not None and not call_duck_active:
-                    await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
-                    self._voice_duck_state = None
-                # Unconditionally sweep all streams to restore normal volume!
-                await asyncio.to_thread(_restore_all_ducked_audio)
+                else:
+                    if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+                        self._voice_watchdog_task.cancel()
+                    if self._tts_duck_state is not None:
+                        await asyncio.to_thread(_unduck_background_audio, self._tts_duck_state)
+                        self._tts_duck_state = None
+                    if self._voice_duck_state is not None and not call_duck_active:
+                        await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
+                        self._voice_duck_state = None
+                    # Unconditionally sweep all streams to restore normal volume on final response!
+                    await asyncio.to_thread(_restore_all_ducked_audio)
                 if temp_audio_path:
                     try:
                         os.unlink(temp_audio_path)
@@ -1945,7 +2001,47 @@ class TerminalDesktopHUD:
                     # Echo dissipation cooldown (500ms) before resuming mic listener
                     await asyncio.sleep(0.5)
                     if self._wakeword_listener and self.is_running and not self._is_handling_voice:
-                        self._wakeword_listener.resume()
+                        if followup_required:
+                            console.print("\n[bold cyan][FLUID MIC] Follow-up / continuation expected. Arming microphone directly...[/bold cyan]")
+                            sys.stdout.write("vesper> ")
+                            sys.stdout.flush()
+                            if self._voice_duck_state is None and self._call_duck_state is None:
+                                self._voice_duck_state = await asyncio.to_thread(_duck_background_audio, 20)
+                            if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+                                self._voice_watchdog_task.cancel()
+                            self._voice_watchdog_task = asyncio.create_task(self._voice_timeout_watchdog(7.5))
+                            if self.websocket:
+                                await self.send_envelope(
+                                    Channel.VOICE,
+                                    EventType.WAKE_WORD_DETECTED,
+                                    {
+                                        "wake_word": "hey alfred",
+                                        "confidence": 1.0,
+                                        "source": self.client_id,
+                                        "trigger": "followup_continuation",
+                                    },
+                                )
+                            self._wakeword_listener.trigger_listen()
+                        else:
+                            self._wakeword_listener.resume()
+
+    async def _voice_timeout_watchdog(self, timeout_sec: float = 6.0):
+        """Watchdog to ensure ducked audio is restored and AGENT_IDLE broadcast if voice interaction times out."""
+        try:
+            if timeout_sec > 0:
+                await asyncio.sleep(timeout_sec)
+            if self._voice_duck_state and self._call_duck_state is None:
+                await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
+                self._voice_duck_state = None
+            await asyncio.to_thread(_restore_all_ducked_audio)
+            if self.websocket:
+                await self.send_envelope(
+                    Channel.VOICE,
+                    EventType.AGENT_IDLE,
+                    {"state": "IDLE", "reason": "VOICE_TIMEOUT"},
+                )
+        except asyncio.CancelledError:
+            pass
 
     def _on_wake_detected(self, event: Any) -> None:
         """Invoked on the main asyncio thread when a wake word is detected."""
@@ -1971,6 +2067,19 @@ class TerminalDesktopHUD:
             )
             asyncio.create_task(asyncio.to_thread(turn_display_on, True))
             if is_direct_wake:
+                async def _finish_direct_wake():
+                    try:
+                        if self._current_tts_task:
+                            await self._current_tts_task
+                    except Exception:
+                        pass
+                    if self.websocket:
+                        await self.send_envelope(
+                            Channel.VOICE,
+                            EventType.AGENT_IDLE,
+                            {"state": "IDLE", "reason": "DIRECT_WAKE_COMPLETE"},
+                        )
+                asyncio.create_task(_finish_direct_wake())
                 return
 
         if not remaining:
@@ -1985,21 +2094,14 @@ class TerminalDesktopHUD:
             async def _duck_on_wake():
                 self._voice_duck_state = await asyncio.to_thread(_duck_background_audio, 20)
             asyncio.create_task(_duck_on_wake())
+        elif self._call_duck_state is None:
+            asyncio.create_task(asyncio.to_thread(_duck_background_audio, 20))
 
         # Arm a 6s voice interaction watchdog to prevent audio staying ducked if user says nothing or speech pipeline errors
         if self._voice_watchdog_task and not self._voice_watchdog_task.done():
             self._voice_watchdog_task.cancel()
 
-        async def _voice_timeout_watchdog():
-            try:
-                await asyncio.sleep(6.0)
-                if self._voice_duck_state and self._call_duck_state is None:
-                    await asyncio.to_thread(_unduck_background_audio, self._voice_duck_state)
-                    self._voice_duck_state = None
-            except asyncio.CancelledError:
-                pass
-
-        self._voice_watchdog_task = asyncio.create_task(_voice_timeout_watchdog())
+        self._voice_watchdog_task = asyncio.create_task(self._voice_timeout_watchdog(6.0))
 
         if self.websocket:
             asyncio.create_task(
@@ -2029,6 +2131,13 @@ class TerminalDesktopHUD:
         try:
             # If empty or shorter than 350ms, user did not speak (silence / timeout)
             if not pcm_bytes or len(pcm_bytes) < int(16000 * 2 * 0.35):
+                logger.info("[Voice] No speech captured (silence or timeout). Reverting to IDLE.")
+                if self.websocket:
+                    await self.send_envelope(
+                        Channel.VOICE,
+                        EventType.AGENT_IDLE,
+                        {"state": "IDLE", "reason": "TIMEOUT_NO_SPEECH"},
+                    )
                 return
 
             from backend.voice.audio_utils import pack_pcm_to_wav
@@ -2045,7 +2154,17 @@ class TerminalDesktopHUD:
                 "[music]", "[applause]", "subtitles by", "translated by",
             }
             clean_text = transcript.strip()
-            if clean_text and clean_text.lower() not in hallucination_phrases:
+            # Strip bracketed sound descriptors (e.g. [Music], (music), [Applause]) produced by Whisper
+            stripped_sound_tags = re.sub(r"\[.*?\]|\(.*?\)", "", clean_text).strip(" .!?,")
+            is_hallucination = (
+                not clean_text
+                or not stripped_sound_tags
+                or clean_text.lower() in hallucination_phrases
+                or stripped_sound_tags.lower() in hallucination_phrases
+                or any(stripped_sound_tags.lower() == h.strip(" .!?,") for h in hallucination_phrases)
+            )
+
+            if not is_hallucination:
                 console.print(f'[bold green]You (Voice):[/bold green] "{clean_text}"')
 
                 # Direct screen power and lock voice commands (zero-LLM deterministic execution)
@@ -2140,8 +2259,23 @@ class TerminalDesktopHUD:
                     logger.info(f"[Voice] Suppressed ambient silence hallucination: \"{clean_text}\"")
                 else:
                     console.print("[dim yellow][Voice] Could not decipher speech.[/dim yellow]")
+                if self.websocket:
+                    await self.send_envelope(
+                        Channel.VOICE,
+                        EventType.AGENT_IDLE,
+                        {"state": "IDLE", "reason": "UNRECOGNIZED_SPEECH"},
+                    )
         except Exception as e:
             console.print(f"[dim red][Voice Error] {e}[/dim red]")
+            if self.websocket:
+                try:
+                    await self.send_envelope(
+                        Channel.VOICE,
+                        EventType.AGENT_IDLE,
+                        {"state": "IDLE", "reason": "STT_ERROR"},
+                    )
+                except Exception:
+                    pass
         finally:
             self._is_handling_voice = False
             # Cancel voice watchdog immediately once utterance is processed or discarded
@@ -2161,6 +2295,15 @@ class TerminalDesktopHUD:
                         if self._wakeword_listener and self.is_running and not self._is_handling_voice:
                             self._wakeword_listener.resume()
                     asyncio.create_task(_unpause())
+
+                if self.websocket:
+                    asyncio.create_task(
+                        self.send_envelope(
+                            Channel.VOICE,
+                            EventType.AGENT_IDLE,
+                            {"state": "IDLE", "reason": "DISCARDED"},
+                        )
+                    )
             sys.stdout.write("vesper> ")
             sys.stdout.flush()
 
@@ -2178,6 +2321,12 @@ class TerminalDesktopHUD:
         loop = self._loop or asyncio.get_running_loop()
 
         def _wake_cb(event):
+            # Immediately duck background audio synchronously right when wake word is detected (<50ms)
+            # so the microphone stream is clean when _collect_command_utterance begins reading!
+            try:
+                self._voice_duck_state = _duck_background_audio(20)
+            except Exception:
+                pass
             if loop and loop.is_running():
                 loop.call_soon_threadsafe(self._on_wake_detected, event)
 
@@ -2190,7 +2339,7 @@ class TerminalDesktopHUD:
             on_utterance_complete=_utterance_cb,
             device_index=device_idx,
             sample_rate=sample_rate,
-            threshold=0.45,
+            threshold=float(os.getenv("WAKEWORD_THRESHOLD", 0.30)),
         )
         self._wakeword_listener.start()
         console.print("[bold green][WAKE WORD] Armed 'Alfred' and 'Jarvis' continuous listeners.[/bold green]")
@@ -2225,19 +2374,8 @@ class TerminalDesktopHUD:
         if with_sentry:
             self.start_sentry()
 
-        # Pre-warm local Piper TTS in background for instant speech synthesis (<150ms)
-        async def _prewarm_tts() -> None:
-            try:
-                from backend.voice.tts.manager import TTSManager
-                if self._tts_mgr is None:
-                    self._tts_mgr = TTSManager()
-                active = self._tts_mgr.get_active_providers()
-                if active and hasattr(active[0], "_get_voice"):
-                    await asyncio.to_thread(active[0]._get_voice)
-            except Exception:
-                pass
-
-        asyncio.create_task(_prewarm_tts())
+        # Pre-warm shared local Piper TTS in background for instant speech synthesis (<150ms)
+        asyncio.create_task(prewarm_tts_in_background())
 
         if headless:
             console.print("[bold green]VESPER Workstation Daemon active (headless mode - camera & wake word armed).[/bold green]")

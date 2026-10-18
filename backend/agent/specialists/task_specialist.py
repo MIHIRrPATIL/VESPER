@@ -46,9 +46,21 @@ class TaskSpecialist(BaseSpecialist):
             filter_label = f" for {context_label}" if context_label else ""
             return f"Your calendar has no events scheduled{filter_label}, sir."
 
+        # Prioritize actual calendar appointments/meetings over synced tasks or completed reminders
+        real_events = [
+            ev for ev in events
+            if not (
+                str(ev.get("summary", "")).startswith("Task:")
+                or str(ev.get("summary", "")).startswith("Reminder:")
+                or str(ev.get("summary", "")).startswith("✓")
+            )
+        ]
+        other_events = [ev for ev in events if ev not in real_events]
+        ordered_events = real_events + other_events
+
         # Group events by summary to prevent repeating identical titles (e.g. recurring syncs)
         groups: Dict[str, List[str]] = {}
-        for ev in events[:5]:
+        for ev in ordered_events[:10]:
             title = ev.get("summary") or "Scheduled Event"
             time_str = ev.get("spoken_time") or cls._format_spoken_datetime(ev.get("start") or ev.get("time"))
             groups.setdefault(title, []).append(time_str)
@@ -201,17 +213,23 @@ class TaskSpecialist(BaseSpecialist):
 
     async def _fetch_calendar_events(
         self,
-        max_results: int = 10,
+        max_results: int = 20,
         time_min: Optional[datetime.datetime] = None,
         time_max: Optional[datetime.datetime] = None,
+        query: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Safely queries calendar events supporting both time-filtered and legacy/mock signatures."""
+        """Safely queries calendar events supporting time-filtered, text query, and legacy/mock signatures."""
         try:
             return await self.calendar.list_upcoming_events(
-                max_results=max_results, time_min=time_min, time_max=time_max
+                max_results=max_results, time_min=time_min, time_max=time_max, query=query
             )
         except TypeError:
-            return await self.calendar.list_upcoming_events(max_results=max_results)
+            try:
+                return await self.calendar.list_upcoming_events(
+                    max_results=max_results, time_min=time_min, time_max=time_max
+                )
+            except TypeError:
+                return await self.calendar.list_upcoming_events(max_results=max_results)
 
     def __init__(
         self,
@@ -447,6 +465,35 @@ class TaskSpecialist(BaseSpecialist):
 
                 p_str = params.get("priority", "normal").lower()
                 priority = PriorityLevel.HIGH if ("high" in p_str or "urgent" in p_str) else PriorityLevel.NORMAL
+
+                # Deduplication guard: Check if an identical reminder was created within the last 10 seconds
+                try:
+                    recent_pending = self.repo.list(include_completed=False, limit=5)
+                    clean_norm = reminder_text.strip().lower()
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    for existing_t in recent_pending:
+                        ex_meta = existing_t.metadata or {}
+                        ex_text = str(ex_meta.get("reminder_text") or existing_t.title).strip().lower()
+                        if clean_norm in ex_text or ex_text in clean_norm:
+                            created_dt = existing_t.created_at
+                            if created_dt:
+                                if created_dt.tzinfo is None:
+                                    created_dt = created_dt.replace(tzinfo=datetime.timezone.utc)
+                                if (now_utc - created_dt).total_seconds() < 10.0:
+                                    logger.info(f"[TaskSpecialist] Deduplicated duplicate reminder request: '{reminder_text}'")
+                                    time_disp = self._format_spoken_datetime(ex_meta.get("formatted_time")) or time_str
+                                    return SpecialistResult(
+                                        success=True,
+                                        action="set_reminder",
+                                        data={
+                                            "task_id": existing_t.id,
+                                            "reminder": reminder_text,
+                                            "time": time_disp,
+                                        },
+                                        speech_summary=f"Very well, sir. A reminder for '{reminder_text}' was already set.",
+                                    )
+                except Exception as de:
+                    logger.debug(f"[TaskSpecialist] Deduplication check non-blocking error: {de}")
 
                 # 1. Schedule on Google Calendar so it has an alert/time block
                 cal_event = await self.calendar.create_event(
@@ -734,13 +781,31 @@ class TaskSpecialist(BaseSpecialist):
 
             # ── 6. List Calendar Events ───────────────────────────────────────
             elif act in ["list_calendar_events", "get_calendar_events", "list_events", "calendar", "events"]:
-                max_res = int(params.get("max_results", 10))
+                max_res = int(params.get("max_results", 20))
                 date_filter = params.get("date") or params.get("day")
                 start_filter = params.get("start_date") or params.get("from") or params.get("start")
                 end_filter = params.get("end_date") or params.get("to") or params.get("end")
+                query_filter = params.get("query") or params.get("search") or params.get("q")
 
                 t_min, t_max = self._resolve_filter_range(date_val=date_filter, start_val=start_filter, end_val=end_filter)
                 events = await self._fetch_calendar_events(max_results=max_res, time_min=t_min, time_max=t_max)
+
+                filter_term = ""
+                matched_specifically = False
+                if query_filter and events:
+                    q_lower = query_filter.lower().strip()
+                    clean_q = re.sub(
+                        r"\b(meeting with|call with|sync with|appointment with|chat with|discussion with|meeting|call|sync|events?|appointment)\b",
+                        "",
+                        q_lower,
+                        flags=re.IGNORECASE,
+                    ).strip()
+                    filter_term = clean_q if clean_q else q_lower
+                    matching = [e for e in events if filter_term in str(e.get("summary", "")).lower()]
+                    if matching:
+                        events = matching
+                        matched_specifically = True
+
                 formatted_events = [
                     {
                         "id": e.get("id"),
@@ -755,6 +820,9 @@ class TaskSpecialist(BaseSpecialist):
                 if not formatted_events:
                     filter_label = f" for {date_filter}" if date_filter else ""
                     speech = f"Your calendar has no events scheduled{filter_label}, sir."
+                elif query_filter and not matched_specifically:
+                    agenda_speech = self._format_event_list_speech(formatted_events)
+                    speech = f"I could not locate an event specifically matching '{filter_term or query_filter}', sir. {agenda_speech}"
                 else:
                     speech = self._format_event_list_speech(formatted_events)
 
@@ -1111,7 +1179,7 @@ class TaskSpecialist(BaseSpecialist):
 
                 all_pending = self.repo.list(include_completed=False, limit=50)
                 # Fetch events specifically within target date window
-                events = await self._fetch_calendar_events(max_results=10, time_min=t_min, time_max=t_max)
+                events = await self._fetch_calendar_events(max_results=20, time_min=t_min, time_max=t_max)
 
                 reminders = [t for t in all_pending if (t.metadata and t.metadata.get("item_type") == "reminder")]
                 pure_tasks = [t for t in all_pending if not (t.metadata and t.metadata.get("item_type") in ("reminder", "event"))]

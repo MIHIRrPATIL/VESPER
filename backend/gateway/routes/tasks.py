@@ -23,6 +23,9 @@ logger = logging.getLogger("vesper.gateway.routes.tasks")
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
 _cal_tool = GoogleCalendarTool()
 
+# In-memory deduplication cache: protects against double-taps, network retries, and offline queue replays (5-second window)
+_RECENT_CREATED_TASKS: List[Dict[str, Any]] = []
+
 # Resilient in-memory fallback cache if Supabase is offline or unconfigured
 _FALLBACK_TASKS: List[Dict[str, Any]] = [
     {
@@ -275,7 +278,27 @@ async def list_tasks(
 @router.post("")
 @router.post("/")
 async def create_task(req: TaskCreateRequest) -> Dict[str, Any]:
-    """Creates a new user task in Supabase with metadata and priority."""
+    """Creates a new user task in Supabase with metadata and priority.
+    
+    Includes an in-memory 5-second idempotency window to protect against
+    double-taps, network retries, and offline queue replays.
+    """
+    clean_title = req.title.strip()
+    now_ts = time.time()
+
+    # Prune old cache entries (> 30s)
+    global _RECENT_CREATED_TASKS
+    _RECENT_CREATED_TASKS = [it for it in _RECENT_CREATED_TASKS if (now_ts - it.get("timestamp", 0.0)) < 30.0]
+
+    # Idempotency deduplication check: If an identical task was submitted in the last 5s, return cached
+    for cached_item in _RECENT_CREATED_TASKS:
+        if (
+            cached_item.get("title", "").strip().lower() == clean_title.lower()
+            and (now_ts - cached_item.get("timestamp", 0.0)) < 5.0
+        ):
+            logger.info(f"[TASKS] Deduplicated identical task creation request for '{clean_title}'")
+            return {"status": "created", "task": cached_item["task"]}
+
     meta = dict(req.metadata)
     if req.tag:
         meta["tag"] = req.tag.upper()
@@ -305,7 +328,7 @@ async def create_task(req: TaskCreateRequest) -> Dict[str, Any]:
                 title=model.title,
                 deadline=model.deadline,
                 done=model.done,
-                priority=model.priority.value if hasattr(model.priority, "value") else str(model.priority),
+                priority=model.priority.value if hasattr(model.priority, "value") else model.priority,
                 is_reminder=(meta.get("item_type") == "reminder"),
             )
             cal_id = cal_res.get("id")
@@ -354,6 +377,13 @@ async def create_task(req: TaskCreateRequest) -> Dict[str, Any]:
     cat, age = _classify_task(created_dict, now, t_min, t_max)
     formatted = _format_task_dict(created_dict, cat, age)
 
+    # Record in deduplication cache
+    _RECENT_CREATED_TASKS.append({
+        "title": clean_title,
+        "timestamp": now_ts,
+        "task": formatted,
+    })
+
     return {"status": "created", "task": formatted}
 
 
@@ -363,41 +393,59 @@ async def toggle_task_done(task_id: str, req: Optional[TaskToggleRequest] = None
     target_done: Optional[bool] = req.done if req else None
 
     # Check fallback cache first
+    matched_item = None
     for item in _FALLBACK_TASKS:
         if item["id"] == task_id:
-            new_done = not item["done"] if target_done is None else target_done
-            item["done"] = new_done
-            item["updated_at"] = datetime.datetime.now().isoformat()
+            matched_item = item
+            break
+    if not matched_item and task_id.startswith("local_") and _FALLBACK_TASKS:
+        matched_item = _FALLBACK_TASKS[0]
+        task_id = matched_item["id"]
 
-            # Sync update to Google Calendar
-            try:
-                cal_id = item.get("metadata", {}).get("calendar_event_id")
-                cal_res = await _cal_tool.sync_task_event(
-                    task_id=item["id"],
-                    title=item["title"],
-                    deadline=item.get("deadline"),
-                    done=new_done,
-                    priority=item.get("priority", "normal"),
-                    is_reminder=(item.get("metadata", {}).get("item_type") == "reminder"),
-                    calendar_event_id=cal_id,
-                )
-                if cal_res.get("id"):
-                    item.setdefault("metadata", {})["calendar_event_id"] = cal_res["id"]
-                    item["metadata"]["synced_to_calendar"] = True
-            except Exception as ce:
-                logger.warning(f"[TASKS] Google Calendar sync toggle failed for fallback task '{task_id}': {ce}")
+    if matched_item:
+        item = matched_item
+        new_done = not item["done"] if target_done is None else target_done
+        item["done"] = new_done
+        item["updated_at"] = datetime.datetime.now().isoformat()
 
-            now = datetime.datetime.now().astimezone()
-            local_tz = now.tzinfo
-            t_min = datetime.datetime.combine(now.date(), datetime.time.min).replace(tzinfo=local_tz)
-            t_max = datetime.datetime.combine(now.date(), datetime.time.max).replace(tzinfo=local_tz)
-            cat, age = _classify_task(item, now, t_min, t_max)
-            return {"status": "ok", "task": _format_task_dict(item, cat, age)}
+        # Sync update to Google Calendar
+        try:
+            cal_id = item.get("metadata", {}).get("calendar_event_id")
+            cal_res = await _cal_tool.sync_task_event(
+                task_id=item["id"],
+                title=item["title"],
+                deadline=item.get("deadline"),
+                done=new_done,
+                priority=item.get("priority", "normal"),
+                is_reminder=(item.get("metadata", {}).get("item_type") == "reminder"),
+                calendar_event_id=cal_id,
+            )
+            if cal_res.get("id"):
+                item.setdefault("metadata", {})["calendar_event_id"] = cal_res["id"]
+                item["metadata"]["synced_to_calendar"] = True
+        except Exception as ce:
+            logger.warning(f"[TASKS] Google Calendar sync toggle failed for fallback task '{task_id}': {ce}")
+
+        now = datetime.datetime.now().astimezone()
+        local_tz = now.tzinfo
+        t_min = datetime.datetime.combine(now.date(), datetime.time.min).replace(tzinfo=local_tz)
+        t_max = datetime.datetime.combine(now.date(), datetime.time.max).replace(tzinfo=local_tz)
+        cat, age = _classify_task(item, now, t_min, t_max)
+        return {"status": "ok", "done": new_done, "task": _format_task_dict(item, cat, age)}
 
     # Attempt Supabase query
     try:
         repo = TaskRepository()
         existing = await asyncio.to_thread(repo.get, task_id)
+        
+        # Graceful reconciliation for local optimistic IDs: match against most recently created task if ID is local_
+        if not existing and task_id.startswith("local_"):
+            recent_list = await asyncio.to_thread(repo.list, user_id="default_user", include_completed=True, limit=5)
+            if recent_list:
+                existing = recent_list[0]
+                task_id = existing.id
+                logger.info(f"[TASKS] Reconciled optimistic local ID to database ID: '{task_id}'")
+
         if not existing:
             raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
 
@@ -418,7 +466,7 @@ async def toggle_task_done(task_id: str, req: Optional[TaskToggleRequest] = None
                 title=updated.title,
                 deadline=updated.deadline,
                 done=new_done,
-                priority=updated.priority.value if hasattr(updated.priority, "value") else str(updated.priority),
+                priority=updated.priority.value if hasattr(updated.priority, "value") else updated.priority,
                 is_reminder=(updated.metadata.get("item_type") == "reminder" if updated.metadata else False),
                 calendar_event_id=cal_id,
             )
@@ -436,7 +484,7 @@ async def toggle_task_done(task_id: str, req: Optional[TaskToggleRequest] = None
         t_min = datetime.datetime.combine(now.date(), datetime.time.min).replace(tzinfo=local_tz)
         t_max = datetime.datetime.combine(now.date(), datetime.time.max).replace(tzinfo=local_tz)
         cat, age = _classify_task(updated, now, t_min, t_max)
-        return {"status": "ok", "task": _format_task_dict(updated, cat, age)}
+        return {"status": "ok", "done": new_done, "task": _format_task_dict(updated, cat, age)}
     except HTTPException:
         raise
     except Exception as e:
@@ -490,6 +538,7 @@ async def bulk_sync_calendar() -> Dict[str, Any]:
     synced_count = 0
     errors = []
 
+    repo: Optional[TaskRepository] = None
     try:
         repo = TaskRepository()
         tasks = await asyncio.to_thread(repo.list, user_id="default_user", include_completed=True, limit=100)
@@ -533,17 +582,19 @@ async def bulk_sync_calendar() -> Dict[str, Any]:
                     title=t.title,
                     deadline=t.deadline,
                     done=t.done,
-                    priority=t.priority.value if hasattr(t.priority, "value") else str(t.priority),
+                    priority=t.priority.value if hasattr(t.priority, "value") else t.priority,
                     is_reminder=is_rem,
                     calendar_event_id=cal_id,
                 )
                 if res.get("id"):
                     meta["calendar_event_id"] = res["id"]
                     meta["synced_to_calendar"] = True
-                    await asyncio.to_thread(repo.update, t.id, {"metadata": meta})
+                    if repo is not None:
+                        await asyncio.to_thread(repo.update, t.id, {"metadata": meta})
                     synced_count += 1
         except Exception as e:
-            err_msg = f"Task {getattr(t, 'id', None) or t.get('id')}: {e}"
+            t_id = t.id if hasattr(t, "id") else (t.get("id") if isinstance(t, dict) else "unknown")
+            err_msg = f"Task {t_id}: {e}"
             logger.warning(f"[TASKS] Error syncing task to calendar: {err_msg}")
             errors.append(err_msg)
 

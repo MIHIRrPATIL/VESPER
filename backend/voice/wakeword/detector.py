@@ -47,7 +47,7 @@ class WakeWordDetector:
     def __init__(
         self,
         wake_words: Optional[List[str]] = None,
-        threshold: float = 0.45,
+        threshold: float = 0.30,
         sample_rate: int = 16000,
         vad_mode: int = 1,
         on_wake_word: Optional[Callable[[WakeWordEvent], None]] = None,
@@ -57,7 +57,7 @@ class WakeWordDetector:
         self.threshold = float(env_th) if env_th else threshold
         self.alfred_threshold = float(os.getenv("ALFRED_THRESHOLD", self.threshold))
         self.jarvis_threshold = float(os.getenv("JARVIS_THRESHOLD", self.threshold))
-        self.oww_threshold = float(os.getenv("OWW_THRESHOLD", 0.45))
+        self.oww_threshold = float(os.getenv("OWW_THRESHOLD", 0.32))
         self.sample_rate = sample_rate
         self.vad_mode = vad_mode
         self.on_wake_word = on_wake_word
@@ -162,17 +162,17 @@ class WakeWordDetector:
                             is_speech = True
                             break
                     except Exception:
-                        is_speech = rms > 120
+                        is_speech = rms > 65
             else:
                 try:
                     is_speech = self.vad.is_speech(pcm_chunk, self.sample_rate)
                 except Exception:
-                    is_speech = rms > 120
+                    is_speech = rms > 65
         else:
-            is_speech = rms > 120 or peak > 300
+            is_speech = rms > 65 or peak > 180
 
-        # Gentle speech sensitivity boost for quiet or distant voices
-        if not is_speech and rms > 140 and peak > 350:
+        # Gentle speech sensitivity boost for quiet, conversational, or distant voices
+        if not is_speech and rms > 70 and peak > 200:
             is_speech = True
 
         self.last_is_speech = is_speech
@@ -322,6 +322,15 @@ class WakeWordDetector:
         clean = re.sub(r"[^\w\s]", " ", clean)
         clean = " ".join(clean.split())
 
+        # Strip conversational filler words / hesitations at start of utterance
+        clean = re.sub(r"^(?:um|uh|so|yo|ok|okay|hi|hello|please|hey\s+there)\b\s*", "", clean, flags=re.IGNORECASE).strip()
+
+        # Phonetic alias mapping for frequent Whisper transcription artifacts
+        # e.g. "Al fred", "All fred", "Elfred", "Albert", "Alford", "Afred", "Halford" -> "alfred"
+        clean = re.sub(r"\b(?:al\s+fred|all\s+fred|all-fred|elfred|alford|albert|afred|halford)\b", "alfred", clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\b(?:jervis|jarves|jarviss)\b", "jarvis", clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\b(?:vespr|whisper)\b", "vesper", clean, flags=re.IGNORECASE)
+
         wake_terms = [
             "wake up alfred", "wake up jarvis", "wake up vesper",
             "hey alfred", "hey jarvis", "hey vesper",
@@ -349,6 +358,16 @@ class WakeWordDetector:
             elif len(tokens) >= 2 and tokens[0] == "hey" and tokens[1] in ("alfred", "jarvis", "vesper"):
                 matched_term = f"hey {tokens[1]}"
                 remaining_cmd = " ".join(tokens[2:]).strip()
+            elif any(t in ("alfred", "jarvis", "vesper") for t in tokens[:3]):
+                for i, t in enumerate(tokens[:3]):
+                    if t in ("alfred", "jarvis", "vesper"):
+                        if i > 0 and tokens[i - 1] == "hey":
+                            matched_term = f"hey {t}"
+                            remaining_cmd = " ".join(tokens[:i - 1] + tokens[i + 1:]).strip()
+                        else:
+                            matched_term = t
+                            remaining_cmd = " ".join(tokens[:i] + tokens[i + 1:]).strip()
+                        break
 
         canonical: Optional[str] = None
         if matched_term:

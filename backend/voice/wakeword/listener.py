@@ -235,8 +235,8 @@ class WakeWordListener:
                 if evt == VadEvent.UTTERANCE_COMPLETE and completed_audio:
                     captured = bytearray(completed_audio)
                     break
-                elif (time.time() - start_t > 3.5) and segmenter.state == VadState.IDLE:
-                    # No speech detected within 3.5 seconds of wake word
+                elif (time.time() - start_t > 4.5) and segmenter.state == VadState.IDLE:
+                    # No speech detected within 4.5 seconds of wake word
                     break
             except Exception as read_err:
                 logger.warning(f"[WakeWordListener] Stream read error during utterance collection: {read_err}")

@@ -147,6 +147,7 @@ class WeatherSpecialist(BaseSpecialist):
 
         card = {
             "type": "weather_card",
+            "title": f"Weather in {city}: {condition} ({temp:.0f}°C)" if temp is not None else f"Weather in {city}: {condition}",
             "city": city,
             "country": data.get("country", ""),
             "condition": condition,
@@ -163,6 +164,7 @@ class WeatherSpecialist(BaseSpecialist):
             "wind_speed_kmh": wind,
             "uv_index": uv,
             "precip_probability_pct": precip_prob,
+            "precipitation_mm": data.get("precipitation_mm"),
             "observed_at": data.get("observed_at"),
         }
 
@@ -212,9 +214,11 @@ class WeatherSpecialist(BaseSpecialist):
 
         card = {
             "type": "weather_forecast_card",
+            "title": f"{days}-Day Weather Forecast: {city}",
             "city": city,
             "country": data.get("country", ""),
             "days": forecast_days,
+            "forecast": forecast_days,
             "hourly_today": data.get("hourly_today", [])[:5],
         }
 

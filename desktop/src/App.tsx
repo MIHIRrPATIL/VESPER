@@ -202,6 +202,17 @@ export function App() {
     activeViewRef.current = activeView;
   }, [activeView]);
 
+  // Safety watchdog: auto-revert LISTENING state to IDLE if no command or response arrives within 8s
+  useEffect(() => {
+    if (agentState === 'LISTENING') {
+      const timer = setTimeout(() => {
+        console.warn('[VOICE] Agent state remained in LISTENING for >8s without event. Auto-reverting to IDLE.');
+        setAgentState('IDLE');
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [agentState]);
+
   const handleSelectNavView = useCallback((view: string) => {
     if (view === activeViewRef.current) return;
     setPendingView(view);
@@ -219,12 +230,15 @@ export function App() {
 
       if (type === 'WAKE_WORD_DETECTED') {
         setAgentState('LISTENING');
+        const isFollowup = payload?.trigger === 'followup_continuation';
         setMessages((prev) => [
           ...prev,
           {
             id: envelope.uuid || crypto.randomUUID(),
             sender: 'system',
-            text: `Vocal Wake Word Perceived: "${payload.wake_word || 'Hey Alfred'}"`,
+            text: isFollowup
+              ? 'Alfred is listening for your response...'
+              : `Vocal Wake Word Perceived: "${payload.wake_word || 'Hey Alfred'}"`,
             timestamp: Date.now(),
             intent: 'WAKE_WORD',
             isSingleton: true,

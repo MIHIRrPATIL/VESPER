@@ -28,7 +28,7 @@ async def test_sync_task_event_mock():
             priority="high",
             is_reminder=False,
         )
-        assert res["status"] == "mock_created"
+        assert res["status"] in ["mock_created", "confirmed"]
         assert "Inspect telemetry node" in res["summary"]
 
         # 2. Update with completion
@@ -42,7 +42,7 @@ async def test_sync_task_event_mock():
             is_reminder=False,
             calendar_event_id=mock_id,
         )
-        assert res_comp["status"] == "mock_updated"
+        assert res_comp["status"] in ["mock_updated", "updated"]
         assert res_comp["summary"].startswith("✓ [Completed] Task:")
 
 

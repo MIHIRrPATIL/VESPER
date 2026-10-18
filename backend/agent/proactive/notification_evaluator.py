@@ -28,8 +28,52 @@ BANK_SENDER_PATTERNS = [
     r"[A-Z]{2}-AXISBK", r"[A-Z]{2}-KOTAKB", r"[A-Z]{2}-PNBSMS",
     r"[A-Z]{2}-PAYTM",  r"[A-Z]{2}-CRED",   r"[A-Z]{2}-GPAY",
     r"[A-Z]{2}-PHONEPE", r"[A-Z]{2}-BOB",   r"[A-Z]{2}-CANBNK",
-    r"hdfc", r"icici", r"sbi", r"axis", r"kotak", r"paytm", r"cred", r"gpay"
+    r"hdfc", r"icici", r"sbi", r"axis", r"kotak", r"paytm", r"cred", r"gpay",
+    r"phonepe", r"bank of baroda", r"punjab national bank", r"canara bank",
+    r"indusind", r"federal bank", r"idfc"
 ]
+
+# Official packages verified to deliver legitimate bank transaction alerts or payments in India
+FINANCIAL_ALLOWED_PACKAGES = {
+    # SMS Gateways
+    "com.google.android.apps.messaging",
+    "com.samsung.android.messaging",
+    "com.android.mms",
+    "com.android.messaging",
+    "org.thoughtcrime.securesms",
+    # UPI & Payment Apps
+    "com.google.android.apps.nbu.paisa.user",  # Google Pay
+    "com.phonepe.app",                         # PhonePe
+    "net.one97.paytm",                         # Paytm
+    "com.cred.club",                           # CRED
+    "com.dreamplug.androidapp",                # CRED
+    "com.samsung.android.spay",                # Samsung Wallet / Pay
+    "in.org.npci.upiapp",                      # BHIM UPI
+    "com.freecharge.android",                  # Freecharge
+    "com.mobikwik_new",                        # MobiKwik
+    # Indian Banking Apps
+    "com.snapwork.hdfc", "com.hdfcbank.netbanking",
+    "com.csam.icici.bank.imobile",
+    "com.sbi.lotusintouch",
+    "com.msf.kbank.mobile",
+    "com.axis.mobile",
+    "com.mgs.indusmobile",
+    "com.canarabank.mobility",
+    "com.bob.bobworld",
+    "com.rblbank.mobank",
+    "com.fedmobile",
+    "com.idfcfirstbank.optimus",
+    # Bank email receipts
+    "com.google.android.gm",
+}
+
+SMS_PACKAGES = {
+    "com.google.android.apps.messaging",
+    "com.samsung.android.messaging",
+    "com.android.mms",
+    "com.android.messaging",
+    "org.thoughtcrime.securesms",
+}
 
 USER_NAME = "Mihir"
 USER_ALIASES = [r"\bmihir\b", r"@mihir\b", r"\bpatil\b"]
@@ -226,7 +270,7 @@ class NotificationEvaluator:
                 logger.info(f"[NotificationEvaluator] Filtered explicit ad header from {title}")
                 return True
 
-        # 2. General promotional content check across any messaging app
+        # 2. General promotional content check across any messaging or finance app
         promo_patterns = [
             r"\b(?:credits?|points?|balance|voucher)\s+(?:will\s+)?expire\b",
             r"\bsave\s+extra\s+\d+%",
@@ -237,10 +281,14 @@ class NotificationEvaluator:
             r"\blimited\s+time\s+offer\b",
             r"\border\s+(?:medicines|groceries|food)\s+(?:now|today)\b",
             r"\b1kx\.in/[A-Za-z0-9/]+",
+            # Promotional cashback & financial marketing
+            r"\b(?:earn(?:ed)?\s+(?:up\s+to|flat)?|win\s+up\s+to|chance\s+to\s+win|stand\s+a\s+chance|get\s+up\s+to|upto\s+₹?\d+|refer\s+(?:and\s+earn|a\s+friend)|claim\s+your|scratch\s+card|reward\s+waiting|spin\s+and\s+win|cashback\s+on\s+(?:your\s+)?(?:next|first|recharge|bill)|apply\s+now\s+for\s+loan|pre[- ]approved|congratulations)\b",
         ]
         if any(re.search(pat, combined, re.IGNORECASE) for pat in promo_patterns):
-            logger.info(f"[NotificationEvaluator] Filtered promotional content from {title}: '{text[:60]}'")
-            return True
+            has_real_tx = bool(re.search(r"\b(?:debited\s+by|debited\s+from|credited\s+to|credited\s+with|deposited\s+to|spent\s+at)\b", combined))
+            if not has_real_tx:
+                logger.info(f"[NotificationEvaluator] Filtered promotional content from {title}: '{text[:60]}'")
+                return True
 
         return False
 
@@ -282,29 +330,44 @@ class NotificationEvaluator:
 
         Enforces verbatim read-back and raw evidence storage for the Supabase ledger.
         """
-        combined = f"{notif.title} {notif.text}"
+        pkg = (notif.package_name or "").lower().strip()
+        title = (notif.title or "").strip()
+        combined = f"{title} {notif.text}"
         combined_lower = combined.lower()
 
-        # 1. Detect transaction intent (debit, credit, autopay, sip, emi, etc.)
-        debit_keywords = [
-            "debited", "spent", "paid", "sent", "transferred", "txn of", "purchase of",
-            "deducted", "autopay", "auto-debit", "auto debit", "sip", "emi", "withdrawn",
-            "payment of", "cleared for", "charged", "standing instruction"
-        ]
-        credit_keywords = [
-            "credited", "received", "refund", "salary", "cashback", "deposited", "reversed"
-        ]
-
-        is_debit = any(w in combined_lower for w in debit_keywords)
-        is_credit = any(w in combined_lower for w in credit_keywords)
-
-        if not is_debit and not is_credit:
+        # 0. Strict Source Package Validation:
+        # Bank ledger transactions are strictly limited to SMS from verified bank senders,
+        # official payment/UPI apps, and official banking apps.
+        # General messaging (WhatsApp, Telegram), social media, browsers, and streaming apps are rejected.
+        is_allowed_pkg = pkg in FINANCIAL_ALLOWED_PACKAGES or any(
+            b in pkg for b in ["bank", "hdfc", "sbi", "icici", "axis", "kotak", "paytm", "phonepe", "gpay", "cred"]
+        )
+        if not is_allowed_pkg:
             return None
 
-        # 2. Extract Amount in INR (₹, Rs., Rs, INR)
+        # If coming from SMS or Email, verify sender is an authentic bank / financial entity
+        if pkg in SMS_PACKAGES or "mail" in pkg or "messaging" in pkg or "mms" in pkg:
+            is_bank_header = bool(re.search(
+                r"^[A-Za-z]{2}-(?:HDFC|SBI|ICICI|AXIS|KOTAK|PNB|BOB|CAN|INDUS|FED|RBL|YES|SCB|CITI|PAYTM|CRED|GPAY|PHONEPE|AUFIN|IDFC|IOB|CUB|SIB|KVB|UBI|SARB|BAROD|MAHAB|TMB|J&K|CENT|DBS|HSBC|AMEX|BAJAJ)",
+                title,
+                re.IGNORECASE,
+            ))
+            is_known_bank_name = any(re.search(p, title, re.IGNORECASE) for p in BANK_SENDER_PATTERNS)
+            if not is_bank_header and not is_known_bank_name:
+                return None
+
+        # 1. Filter marketing, rewards, promotional cashbacks, and loans disguised as transactions
+        is_promo = bool(re.search(
+            r"\b(?:earn(?:ed)?\s+(?:up\s+to|flat)?|win\s+up\s+to|chance\s+to\s+win|stand\s+a\s+chance|get\s+up\s+to|upto\s+₹?\d+|refer\s+(?:and\s+earn|a\s+friend)|claim\s+your|scratch\s+card|reward\s+waiting|spin\s+and\s+win|cashback\s+on\s+(?:your\s+)?(?:next|first|recharge|bill)|apply\s+now|pre[- ]approved|congratulations|exclusive\s+offer)\b",
+            combined_lower
+        ))
+        if is_promo:
+            return None
+
+        # 2. Extract Amount in INR (₹, Rs., Rs, INR) - require currency symbol or explicit transaction verb
         amt_match = re.search(r"(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d{1,2})?)", combined, re.IGNORECASE)
         if not amt_match:
-            amt_match = re.search(r"\b(?:amount|amt|for)\s+(?:rs\.?|inr|₹)?\s*([\d,]+(?:\.\d{1,2})?)", combined, re.IGNORECASE)
+            amt_match = re.search(r"\b(?:debited\s+by|credited\s+by|amount\s+of)\s+([\d,]+(?:\.\d{1,2})?)", combined, re.IGNORECASE)
 
         if not amt_match:
             return None
@@ -318,9 +381,22 @@ class NotificationEvaluator:
         if amount <= 0:
             return None
 
-        # 3. Classify transaction type, category, and label
+        # 3. Detect transaction direction (Credit vs Debit) with word boundaries
+        credit_pattern = r"\b(?:credited|received\s+from|paid\s+you|refund|salary|cashback\s+credited|deposited\s+to|reversed)\b"
+        debit_pattern = r"\b(?:debited|spent|paid\s+to|sent\s+to|transferred\s+to|purchase\s+of|deducted|autopay|auto-debit|auto\s+debit|\bsip\b|\bemi\b|withdrawn|cleared\s+for|standing\s+instruction)\b"
+
+        is_credit = bool(re.search(credit_pattern, combined_lower))
+        if not is_credit and re.search(r"\b(?:paid|sent)\s+(?:rs\.?|inr|₹)?\s*[\d,]+", combined_lower) and not re.search(r"\bpaid\s+you\b", combined_lower):
+            is_debit = True
+        else:
+            is_debit = bool(re.search(debit_pattern, combined_lower))
+
+        if not is_debit and not is_credit:
+            return None
+
+        # 4. Classify transaction type, category, and label
         source_name = self._clean_source_name(notif)
-        if "sip" in combined_lower or "mutual fund" in combined_lower:
+        if re.search(r"\b(?:sip|mutual\s+fund)\b", combined_lower):
             tx_label = "SIP investment"
             category = "Investment"
             tx_type = "expense"
@@ -328,18 +404,18 @@ class NotificationEvaluator:
             tx_label = "autopay deduction"
             category = "Subscription"
             tx_type = "expense"
-        elif "emi" in combined_lower or "loan" in combined_lower:
+        elif re.search(r"\b(?:emi|loan)\b", combined_lower):
             tx_label = "EMI installment"
             category = "EMI / Loans"
             tx_type = "expense"
         elif is_credit:
-            if "salary" in combined_lower:
+            if re.search(r"\bsalary\b", combined_lower):
                 tx_label = "salary credit"
                 category = "Salary"
-            elif "refund" in combined_lower:
+            elif re.search(r"\brefund\b", combined_lower):
                 tx_label = "refund credit"
                 category = "Refund"
-            elif "cashback" in combined_lower:
+            elif re.search(r"\bcashback\b", combined_lower):
                 tx_label = "cashback"
                 category = "Cashback"
             else:
@@ -351,27 +427,37 @@ class NotificationEvaluator:
             category = "General Expense"
             tx_type = "expense"
 
-        # 4. Extract merchant / payee / counterparty
+        # 5. Extract merchant / payee / counterparty
         merchant = source_name
-        if is_debit:
-            merchant_match = re.search(
-                r"(?:at|to|vpa|info|towards|paid to|sent to)\s+([A-Za-z0-9\.\s\-_&]{2,30}?)(?:\s+on|\s+ref|\s+avl|\s+balance|\s+date|\.|$)",
-                combined,
-                re.IGNORECASE,
-            )
+        if is_credit:
+            # e.g., "Ankush paid you ₹20,000.00"
+            m_paid_you = re.search(r"^([A-Za-z0-9\.\s\-_&]{2,30}?)\s+paid\s+you", combined, re.IGNORECASE)
+            if m_paid_you:
+                candidate = m_paid_you.group(1).strip()
+                if candidate and candidate.lower() not in ("you", "someone", "user"):
+                    merchant = candidate
+            else:
+                m_match = re.search(
+                    r"(?:from|by|received\s+from|credited\s+by)\s+([A-Za-z0-9\.\s\-_&]{2,30}?)(?:\s+on|\s+ref|\s+avl|\s+balance|\s+date|\.|$)",
+                    combined,
+                    re.IGNORECASE,
+                )
+                if m_match:
+                    candidate = m_match.group(1).strip()
+                    if candidate and not any(w in candidate.lower() for w in ["your", "account", "a/c", "card", "vpa", "bank"]):
+                        merchant = candidate
         else:
-            merchant_match = re.search(
-                r"(?:from|by|received from|credited by)\s+([A-Za-z0-9\.\s\-_&]{2,30}?)(?:\s+on|\s+ref|\s+avl|\s+balance|\s+date|\.|$)",
+            m_match = re.search(
+                r"(?:at|to|vpa|info|towards|paid\s+to|sent\s+to)\s+([A-Za-z0-9\.\s\-_&]{2,30}?)(?:\s+on|\s+ref|\s+avl|\s+balance|\s+date|\.|$)",
                 combined,
                 re.IGNORECASE,
             )
+            if m_match:
+                candidate = m_match.group(1).strip()
+                if candidate and not any(w in candidate.lower() for w in ["your", "account", "a/c", "card", "vpa", "bank"]):
+                    merchant = candidate
 
-        if merchant_match:
-            candidate = merchant_match.group(1).strip()
-            if candidate and not any(w in candidate.lower() for w in ["your", "account", "a/c", "card", "vpa", "bank"]):
-                merchant = candidate
-
-        # 5. Refine category for generic expenses if not already specialized
+        # 6. Refine category for generic expenses if not already specialized
         if category in ("General Expense", "Subscription"):
             m_lower = f"{merchant} {combined}".lower()
             if any(f in m_lower for f in ["swiggy", "zomato", "mcdonald", "starbucks", "domino", "restaurant", "cafe", "food"]):
@@ -467,16 +553,28 @@ class NotificationEvaluator:
 
     def _try_extract_otp(self, notif: MobileNotification) -> Optional[str]:
         """Regex for OTP / verification codes to surface immediately on HUD."""
+        pkg = (notif.package_name or "").lower().strip()
+        combined = f"{notif.title} {notif.text}".lower()
+
+        # Exclude transit & ride PINs (e.g. Uber "Use PIN 7384", Ola, Rapido, Swiggy delivery PIN)
+        if pkg in ("com.ubercab", "com.olacabs", "com.rapido.passenger", "in.swiggy.android", "com.application.zomato", "com.blinkit.app", "com.dunzo.user"):
+            return None
+        if re.search(r"\b(?:uber|ola|rapido|driver|captain|ride|trip|cab|delivery\s+partner|share\s+(?:this\s+)?pin)\b", combined):
+            return None
+
+        # Exclude postal codes and promo codes
+        if re.search(r"\b(?:pincode|pin\s*code|postal\s*code|area\s*code|promo\s*code|coupon\s*code|discount\s*code|voucher\s*code)\b", combined):
+            return None
+
         if getattr(notif, "otp_code", None):
             return notif.otp_code
 
-        combined = f"{notif.title} {notif.text}"
-        cleaned = re.sub(r"(?:rs\.?|inr|₹|\$)\s*[\d,]+(?:\.\d+)?", "", combined, flags=re.I)
-        match = re.search(r"\b(?:otp|secret code|verification code|security code)\b.*?\b(\d{4,8})\b", cleaned, re.IGNORECASE)
+        cleaned = re.sub(r"(?:rs\.?|inr|₹|\$)\s*[\d,]+(?:\.\d+)?", "", f"{notif.title} {notif.text}", flags=re.I)
+        match = re.search(r"\b(?:otp|one[- ]time\s+(?:password|pin|code)|verification\s+code|security\s+code|login\s+code|auth(?:entication)?\s+code|secret\s+code)\b[^\w\d]*(?:is\s+)?(\d{4,8})\b", cleaned, re.IGNORECASE)
         if not match:
-            match = re.search(r"\b(?:code|pin|verification)\b[^\w\d]*(?:is\s+)?(\d{4,8})\b", cleaned, re.IGNORECASE)
+            match = re.search(r"\b(\d{4,8})\b[^\w\d]*(?:is your (?:otp|verification|security|login)\s+code|is the otp to|to verify your account)\b", cleaned, re.IGNORECASE)
         if not match:
-            match = re.search(r"\b(\d{4,8})\b.*?\b(?:is your (?:otp|verification|secret code)|for your account)\b", cleaned, re.IGNORECASE)
+            match = re.search(r"\b(?:code|pin)\s+to\s+(?:verify|login|authenticate|sign\s+in)\b[^\w\d]*(?:is\s+)?(\d{4,8})\b", cleaned, re.IGNORECASE)
         if match:
             return match.group(1)
         return None

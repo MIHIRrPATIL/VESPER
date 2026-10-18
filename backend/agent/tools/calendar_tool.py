@@ -49,8 +49,9 @@ class GoogleCalendarTool:
         max_results: int = 10,
         time_min: Optional[datetime.datetime] = None,
         time_max: Optional[datetime.datetime] = None,
+        query: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Lists upcoming calendar events with optional time boundaries."""
+        """Lists upcoming calendar events with optional time boundaries and text search."""
         if not self.is_configured():
             return []
 
@@ -91,6 +92,8 @@ class GoogleCalendarTool:
                 if time_max:
                     t_max = time_max if time_max.tzinfo else time_max.replace(tzinfo=local_tz)
                     params["timeMax"] = t_max.astimezone(datetime.timezone.utc).isoformat()
+                if query:
+                    params["q"] = query
 
                 events_result = service.events().list(**params).execute()
 
@@ -161,8 +164,8 @@ class GoogleCalendarTool:
                 return {
                     "id": created.get("id"),
                     "summary": created.get("summary", summary),
-                    "start": start_dt.strftime("%I:%M %p"),
-                    "end": end_dt.strftime("%I:%M %p"),
+                    "start": s_dt.isoformat(),
+                    "end": e_dt.isoformat(),
                     "status": "confirmed",
                     "html_link": created.get("htmlLink", "https://calendar.google.com"),
                 }
@@ -406,13 +409,34 @@ class GoogleCalendarTool:
 
     @staticmethod
     def _parse_event_time(start_str: str, end_str: Optional[str] = None) -> tuple[datetime.datetime, datetime.datetime]:
-        """Parses conversational time expressions (e.g. '5.30 today', '5:30 PM', 'tomorrow at 3pm') into datetimes."""
+        """Parses conversational time expressions (e.g. '5.30 today', '5:30 PM', 'tomorrow at 3pm',
+        'in 30 minutes', 'after 2 hours') into timezone-aware datetimes."""
         import re
 
-        now = datetime.datetime.now()
+        now = datetime.datetime.now().astimezone()
+        local_tz = now.tzinfo
         target_date = now.date()
 
         text = start_str.lower().strip()
+
+        # ── Relative time expressions ("in 30 minutes", "after 2 hours") ──
+        rel_match = re.search(r"(?:in|after)\s+(\d+)\s+(minutes?|mins?|hours?|hrs?|days?)", text)
+        if rel_match:
+            amount = int(rel_match.group(1))
+            unit = rel_match.group(2).lower()
+            if unit.startswith("min"):
+                delta = datetime.timedelta(minutes=amount)
+            elif unit.startswith("hr") or unit.startswith("hour"):
+                delta = datetime.timedelta(hours=amount)
+            elif unit.startswith("day"):
+                delta = datetime.timedelta(days=amount)
+            else:
+                delta = datetime.timedelta(minutes=amount)
+            start_dt = now + delta
+            end_dt = start_dt + datetime.timedelta(minutes=30)
+            return start_dt, end_dt
+
+        # ── Absolute time expressions ──
         if "tomorrow" in text:
             target_date = target_date + datetime.timedelta(days=1)
         elif "day after tomorrow" in text:
@@ -447,6 +471,7 @@ class GoogleCalendarTool:
             day=target_date.day,
             hour=hour,
             minute=minute,
+            tzinfo=local_tz,
         )
         # Default duration 30 minutes
         end_dt = start_dt + datetime.timedelta(minutes=30)

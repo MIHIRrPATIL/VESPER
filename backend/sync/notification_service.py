@@ -190,16 +190,37 @@ class NotificationService:
         body = (text or "").strip()
         combined = f"{t} {body}".lower()
 
-        # 1. Check for OTP / Security verification code
+        # 1. Check for OTP / Security verification code (Exclude cab PINs, postal codes, and coupons)
         otp_code: Optional[str] = None
-        cleaned_no_amounts = re.sub(r"(?:rs\.?|inr|₹|\$)\s*[\d,]+(?:\.\d+)?", "", combined, flags=re.I)
-        otp_match = re.search(r"\b(?:otp|secret code|verification code|security code)\b.*?\b(\d{4,8})\b", cleaned_no_amounts, re.IGNORECASE)
-        if not otp_match:
-            otp_match = re.search(r"\b(?:code|pin|verification)\b[^\w\d]*(?:is\s+)?(\d{4,8})\b", cleaned_no_amounts, re.IGNORECASE)
-        if not otp_match:
-            otp_match = re.search(r"\b(\d{4,8})\b.*?\b(?:is your (?:otp|verification|secret code)|for your account)\b", cleaned_no_amounts, re.IGNORECASE)
-        if otp_match:
-            otp_code = otp_match.group(1)
+        is_ride_or_delivery = (
+            pkg in ("com.ubercab", "com.olacabs", "com.rapido.passenger", "in.swiggy.android", "com.application.zomato", "com.blinkit.app", "com.dunzo.user")
+            or bool(re.search(r"\b(?:uber|ola|rapido|cab|driver|captain|ride|trip|delivery\s+partner|share\s+(?:this\s+)?pin)\b", combined))
+        )
+        is_postal_or_coupon = bool(
+            re.search(r"\b(?:pincode|pin\s*code|postal\s*code|area\s*code|promo\s*code|coupon\s*code|discount\s*code|voucher\s*code)\b", combined)
+        )
+
+        if not is_ride_or_delivery and not is_postal_or_coupon:
+            cleaned_no_amounts = re.sub(r"(?:rs\.?|inr|₹|\$)\s*[\d,]+(?:\.\d+)?", "", combined, flags=re.I)
+            otp_match = re.search(
+                r"\b(?:otp|secret\s+code|verification\s+code|security\s+code|auth(?:entication)?\s+code|login\s+code)\b.*?\b(?:is|:|-)?\s*(\d{4,8})\b",
+                cleaned_no_amounts,
+                re.IGNORECASE,
+            )
+            if not otp_match:
+                otp_match = re.search(
+                    r"\b(\d{4,8})\b[^\w\d]*(?:is\s+(?:your\s+|the\s+)?(?:otp|verification|security|login)(?:\s+code)?|is\s+the\s+otp|to\s+verify)\b",
+                    cleaned_no_amounts,
+                    re.IGNORECASE,
+                )
+            if not otp_match:
+                otp_match = re.search(
+                    r"\b(?:code|pin)\s+to\s+(?:verify|login|authenticate|sign\s+in)\b[^\w\d]*(?:is\s+)?(\d{4,8})\b",
+                    cleaned_no_amounts,
+                    re.IGNORECASE,
+                )
+            if otp_match:
+                otp_code = otp_match.group(1)
 
         if otp_code:
             return "URGENT", False, otp_code
@@ -217,27 +238,26 @@ class NotificationService:
             "offer", "discount", "coupon", "promo", "flat ", "save extra", "sale",
             "shop now", "order now", "buy now", "cashback offer", "free delivery",
             "win up to", "congratulations", "voucher", "points will expire", "credits will expire",
-            "hurry", "limited period deal", "apply now for loan", "exclusive deal", "special price"
+            "hurry", "limited period deal", "apply now for loan", "exclusive deal", "special price",
+            "earn flat", "earn up to", "stand a chance", "refer a friend", "refer and earn",
+            "scratch card", "spin and win", "cashback on", "chance to win"
         ]
         is_ad_header = bool(re.match(r"^(?:AD|DM|TM|QP|XY|BA|BW)-", t, re.IGNORECASE))
         has_promo_link = bool(re.search(r"\b(?:1kx\.in|bit\.ly|tinyurl|myntr\.it|fkrt\.it)/", combined))
         has_promo_pct = bool(re.search(r"\b\d+%\s*(?:off|discount|cashback)\b", combined))
 
-        if (is_ad_header or has_promo_link or has_promo_pct or any(pt in combined for pt in promo_tokens)) and not any(
-            bk in combined for bk in ["debited", "credited", "spent", "received", "autopay", "auto-debit", "sip", "emi", "salary"]
-        ):
+        has_real_tx = bool(re.search(
+            r"\b(?:debited|credited|spent|received|autopay|auto-debit|auto debit|salary|withdrawn|\bsip\b|\bemi\b)\b",
+            combined
+        ))
+
+        if (is_ad_header or has_promo_link or has_promo_pct or any(pt in combined for pt in promo_tokens)) and not has_real_tx:
             return "PROMO", True, None
 
         # 4. Financial / Transactions (Debits, Credits, Autopay, SIP, UPI, Bank SMS)
-        financial_keywords = [
-            "debited", "credited", "spent", "paid", "sent", "transferred", "txn of",
-            "purchase of", "deducted", "autopay", "auto-debit", "auto debit", "sip",
-            "emi", "withdrawn", "payment of", "received", "refund", "salary",
-            "cashback credited", "deposited", "standing instruction", "upi ref", "vpa",
-            "balance alert", "bank alert", "a/c balance"
-        ]
+        financial_pattern = r"\b(?:debited|credited|spent|paid to|sent to|transferred to|purchase of|deducted|autopay|auto-debit|auto debit|\bsip\b|\bemi\b|withdrawn|salary|cashback credited|deposited to|standing instruction|upi ref|balance alert|a/c balance)\b"
         is_financial_pkg = any(b in pkg for b in ["bank", "hdfc", "sbi", "icici", "axis", "kotak", "paytm", "phonepe", "gpay", "cred"])
-        if any(fk in combined for fk in financial_keywords) or is_financial_pkg:
+        if re.search(financial_pattern, combined) or is_financial_pkg:
             return "FINANCIAL", False, None
 
         # 5. Direct Personal Messaging & Telephony
