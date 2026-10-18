@@ -504,6 +504,21 @@ class GatewayClient {
         return;
       }
 
+      // Handle SERVER_HELLO handshake credential synchronization
+      if (env.type === EventType.SERVER_HELLO && env.payload) {
+        const payload: any = env.payload;
+        if (payload.gemini_api_key) {
+          import('./gemini-batch').then(({ GeminiBatchEnricher }) => {
+            GeminiBatchEnricher.setApiKey(payload.gemini_api_key);
+          });
+        }
+        if (payload.supabase_url && payload.supabase_key) {
+          import('./supabase').then(({ SupabaseClient }) => {
+            SupabaseClient.configure(payload.supabase_url, payload.supabase_key);
+          });
+        }
+      }
+
       // Handle State updates
       if (env.channel === Channel.SYNC) {
         if (env.type === EventType.STATE_SNAPSHOT || env.type === EventType.STATE_SYNC) {
@@ -647,6 +662,10 @@ class GatewayClient {
   }
 
   public sendVoiceCommand(command: string): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      // Disconnected: Do not buffer voice commands in outgoingQueue to avoid duplicate execution upon reconnect
+      return false;
+    }
     return this.send({
       channel: Channel.VOICE,
       type: EventType.VOICE_COMMAND,

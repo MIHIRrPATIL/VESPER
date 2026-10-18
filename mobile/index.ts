@@ -2,6 +2,8 @@ import { registerRootComponent } from 'expo';
 import { AppRegistry, Platform } from 'react-native';
 import App from './App';
 import { gatewayClient } from './src/services/gateway';
+import { TransactionExtractor } from './src/services/transaction-extractor';
+import { transactionStash } from './src/services/transaction-stash';
 
 // Register Android Native Notification Interceptor (Active in standalone APK)
 if (Platform.OS === 'android') {
@@ -178,6 +180,18 @@ if (Platform.OS === 'android') {
         recentNotifs.set(notifKey, { text, time: now });
 
         console.log('[NativeListener] Intercepted live OS notification:', parsed.app, title, isMasked ? '(MASKED)' : '');
+
+        // Autonomous on-device financial transaction extraction & stashing
+        if (!isMasked) {
+          try {
+            const stashedTx = await TransactionExtractor.extract(parsed.app || '', title, text, now);
+            if (stashedTx) {
+              await transactionStash.addToStash(stashedTx);
+            }
+          } catch (exErr) {
+            console.warn('[NativeListener] On-device transaction extraction notice:', exErr);
+          }
+        }
 
         let priority: 'URGENT' | 'HIGH' | 'MEDIUM' | 'LOW' = 'MEDIUM';
         if (isTelephony || isOtp) {

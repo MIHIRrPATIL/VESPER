@@ -651,7 +651,40 @@ class WorkstationStore {
     ];
     this.notify();
 
-    gatewayClient.sendVoiceCommand(trimmed);
+    const sent = gatewayClient.sendVoiceCommand(trimmed);
+    if (!sent) {
+      // Disconnected from workstation: Execute via Standalone Mobile AI (Gemini 2.5 Flash + Local Fast-Paths)
+      import('./mobile-ai')
+        .then(({ MobileAI }) => {
+          MobileAI.query(trimmed)
+            .then((reply) => {
+              this.agentState = 'IDLE';
+              this.messages = [
+                ...this.messages,
+                {
+                  id: Math.random().toString(36),
+                  sender: 'agent',
+                  text: reply,
+                  timestamp: Date.now(),
+                  queryId: userMsgId,
+                  queryText: trimmed,
+                  eventType: 'AGENT_RESPONSE',
+                  channel: 'AGENT',
+                },
+              ];
+              this.notify();
+            })
+            .catch((err) => {
+              console.warn('[WorkstationStore] Standalone query execution error:', err);
+              this.agentState = 'IDLE';
+              this.notify();
+            });
+        })
+        .catch(() => {
+          this.agentState = 'IDLE';
+          this.notify();
+        });
+    }
   }
 
   // ── System Toggles ─────────────────────────────────────────────────────────

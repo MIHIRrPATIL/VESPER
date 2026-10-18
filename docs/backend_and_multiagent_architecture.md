@@ -166,12 +166,15 @@ graph TB
 
 A stationary desk companion must act autonomously when appropriate:
 
-### `TriageAgent` (The Focus Sentry)
+### `TriageAgent` (The Focus Sentry & NotificationEvaluator)
 * Constantly monitors incoming notification streams relayed from the companion mobile app.
-* **Triage Rules**:
-  * *Low / Bulk (Promotions, social media, non-urgent group chats)*: Increments the silent HUD badge counter. No audio interruption.
-  * *Heads-Down / Focus Mode*: Suppresses all alerts except pre-configured VIP contacts (e.g. Manager, Family).
-  * *Critical Alert*: Surfaces an immediate glowing HUD card and prompts Alfred to notify: *"Pardon the intrusion, sir, but an urgent message has arrived from your team."*
+* **Deterministic Triage Pipeline**:
+  * *Commercial Promo & Spam Filter*: Drops advertisements, expiring point alerts, and marketing cashback promos.
+  * *Bank Package & Sender Isolation*: Restricts ledger financial parsing strictly to authentic banking SMS and verified payment apps (`Google Pay`, `PhonePe`, `Paytm`, `CRED`, etc.). Prevents general chat apps and YouTube from logging transactions.
+  * *Hardened OTP & Security Sentry*: Excludes ride PINs (Uber, Ola, Rapido), postal codes, and discount vouchers; displays authenticated 2FA OTPs immediately on the HUD.
+  * *Peer Debt vs General Banter*: Detects informal bill splits ("you owe me 500") while cleanly dropping casual chat ("relax", "lol nice").
+  * *VIP Task Classifier*: Fast LLM extraction for high-priority personal or team action items.
+* **ActionQueueManager Lifecycle**: Staged recommendations are debounced and deduplicated within a 120-second window, supporting 15-second conversational confirm/reject windows and desk-return reconciliation.
 
 ### `PresenceAgent` (Desk Sentinel)
 * Inspects camera frames at low frequency (1 frame every 3–5 seconds) to detect human presence at the desk.
@@ -223,3 +226,19 @@ To prevent the common pitfalls of multi-agent systems:
 1. **No Agent-to-Agent Chatter**: Sub-agents never talk to each other directly. They only execute their scoped tool and return structured Pydantic JSON to Alfred.
 2. **Strict Tool Scoping**: Each specialist agent has access to a maximum of 4–6 tools. Tool definition schemas in LLM prompts are tiny, preventing attention dilution and hallucinations.
 3. **Bounded Working Memory**: Working conversation state in LangGraph is restricted to a **sliding window of the last 10–15 messages**. Long-term recall is handled algorithmically via **Shodh-Memory** without bloating prompt tokens.
+
+---
+
+## 9. Task & Agenda Synchronization & Deduplication Pipeline
+
+To prevent double-creation and state bounce-back across distributed clients (Mobile React Native, Tauri Desktop, and Google Calendar):
+
+1. **Gateway Idempotency Window**:
+   - `POST /api/tasks` enforces an in-memory 5-second idempotency window. Rapid taps, offline queue replays, or concurrent voice/HTTP requests with matching normalized titles return the cached response rather than creating duplicate Supabase records.
+2. **Voice Specialist Deduplication**:
+   - `TaskSpecialist.set_reminder` inspects recent active tasks within a 10-second window. Identical reminders avoid redundant Google Calendar event scheduling.
+3. **Optimistic Local ID Reconciliation**:
+   - Mobile and desktop clients assign temporary IDs (`local_task_<timestamp>`) for immediate 0ms UI rendering. When a user marks a task done before server ID resolution completes, `PATCH /api/tasks/{task_id}/toggle` automatically reconciles the optimistic ID against the most recently created task.
+4. **State Contract & Toggle Response**:
+   - `toggle_task_done` returns `{ "status": "ok", "done": new_done, "task": {...} }`. Clients consume the explicit boolean state and update React state immutably with the permanent database UUID.
+

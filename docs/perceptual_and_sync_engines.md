@@ -104,12 +104,19 @@ The Display Sentry subsystem monitors desk occupancy, enforces session security 
 - **Absence Session Locking & DPMS Sleep**:
   - Tracks consecutive absent frames (default threshold: 10 frames / ~15–20s).
   - When user absence is confirmed, spawns `hyprlock` and powers off displays via `hyprctl dispatch dpms off` across all active outputs (`eDP-1`, `DP-3`).
-- **Display Wake & Caelestia Shell Recovery**:
+- **Display Wake & Post-Login Caelestia Shell Recovery**:
   - Displays are powered back on upon return detection, wake word invocation, or any touchless gesture.
-  - **DRM Settle Barrier**: Waits 0.8s for kernel DRM/KMS handshaking to complete before querying compositor heads.
-  - **Layer Surface Health Audit (`is_caelestia_shell_healthy`)**: Interrogates `hyprctl layers` to verify that `caelestia-drawers`, `caelestia-background`, and `caelestia-border-exclusion` are actively attached to outputs.
-  - **Graceful Quickshell Recovery**: Dispatches `qs -c caelestia kill`, cleans stale runtime sockets in `$XDG_RUNTIME_DIR/quickshell/`, and relaunches `caelestia shell -d`.
-  - **Resizer Synchronization & Tiling Barrier**: Waits for `caelestia-border-exclusion` layer surfaces to appear in Hyprland before restarting `caelestia resizer -d`, preventing window margin corruption and tiling distortion.
+  - **Hyprlock Exclusivity & Post-Unlock Watcher (`schedule_post_unlock_caelestia_recovery`)**:
+    - Launching Quickshell while `hyprlock` is actively presenting exclusive lock surfaces freezes Wayland layer rendering and crashes multi-monitor bar integration on external displays (`eDP-1`, `DP-3`).
+    - The sentry starts a background watcher (`_watch_for_unlock_thread`) that polls for `hyprlock` termination (password authenticated).
+    - As soon as `hyprlock` terminates, Hyprland is granted a 0.4s settling window to unmap lock layers and restore the active workspace.
+  - **Clean Socket Draining & Detached Relaunch (`restart_caelestia_shell_post_login`)**:
+    - Executes `caelestia shell -k` and `pkill -15 -x qs`.
+    - Actively waits up to 1.2s for process exit, followed by force kill (`-9`) if lingering.
+    - Unlinks stale socket symlinks in `$XDG_RUNTIME_DIR/quickshell/` to prevent `An instance of this configuration is already running` errors.
+    - Dispatches `hyprctl dispatch exec "caelestia shell -d"`.
+  - **Resizer Synchronization & Tiling Barrier**:
+    - Dispatches `hyprctl dispatch exec "caelestia resizer -d"` to bind to the newly initialized layer surfaces, preventing window margin corruption and tiling distortion across all monitors.
 
 ---
 

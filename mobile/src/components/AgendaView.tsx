@@ -31,6 +31,7 @@ export const AgendaView: React.FC = () => {
 
   // New Deliverable Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [itemType, setItemType] = useState<"task" | "reminder">("task");
   const [newTitle, setNewTitle] = useState("");
   const [newPriority, setNewPriority] = useState<"normal" | "high" | "urgent">("normal");
@@ -87,18 +88,32 @@ export const AgendaView: React.FC = () => {
   }, [loadData]);
 
   const handleToggleTask = async (task: ApiTask) => {
+    const nextDone = !task.done;
     const updatedTasks = tasks.map((t) =>
-      t.id === task.id ? { ...t, done: !t.done } : t
+      t.id === task.id ? { ...t, done: nextDone } : t
     );
     setTasks(updatedTasks);
     await offlineStore.saveCachedTasks(updatedTasks);
 
     try {
       const baseUrl = gatewayClient.getHttpUrl();
-      const res = await fetch(`${baseUrl}/api/tasks/${task.id}/toggle`, { method: "PATCH" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetch(`${baseUrl}/api/tasks/${task.id}/toggle`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ done: nextDone }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const serverTask = data.task || data;
+        const finalDone = serverTask.done !== undefined ? serverTask.done : (data.done !== undefined ? data.done : nextDone);
+        setTasks((prev) =>
+          prev.map((t) => (t.id === task.id ? { ...t, done: finalDone } : t))
+        );
+      } else {
+        throw new Error(`HTTP ${res.status}`);
+      }
     } catch {
-      await offlineStore.enqueueOfflineTask("TOGGLE", { id: task.id });
+      await offlineStore.enqueueOfflineTask("TOGGLE", { id: task.id, done: nextDone });
       setIsOffline(true);
     }
   };
@@ -119,21 +134,29 @@ export const AgendaView: React.FC = () => {
   };
 
   const handleCreateTask = async () => {
-    if (!newTitle.trim()) return;
+    if (!newTitle.trim() || isSubmitting) return;
 
+    setIsSubmitting(true);
+    const submittedTitle = newTitle.trim();
+    const submittedDeadline = newDeadline.trim() || null;
+    const submittedPriority = newPriority;
     const isReminder = itemType === "reminder";
+
+    // Close modal immediately to avoid duplicate submits or taps
+    setIsModalOpen(false);
+
     const payload = {
-      title: newTitle.trim(),
-      priority: newPriority,
-      deadline: newDeadline.trim() || null,
+      title: submittedTitle,
+      priority: submittedPriority,
+      deadline: submittedDeadline,
       metadata: { source: "mobile_agenda", item_type: isReminder ? "reminder" : "task" },
     };
 
     const optimisticTask: ApiTask = {
       id: `local_task_${Date.now()}`,
-      title: newTitle.trim(),
-      priority: newPriority,
-      deadline: newDeadline.trim() || undefined,
+      title: submittedTitle,
+      priority: submittedPriority,
+      deadline: submittedDeadline || undefined,
       done: false,
       category: "today",
     };
@@ -151,8 +174,17 @@ export const AgendaView: React.FC = () => {
       });
       if (res.ok) {
         const created = await res.json();
-        optimisticTask.id = created.task?.id || created.id || optimisticTask.id;
-        await offlineStore.saveCachedTasks(updatedTasks);
+        const serverTask = created.task || created;
+        const newId = serverTask.id || optimisticTask.id;
+        
+        // Update local React state with true database ID
+        setTasks((prev) =>
+          prev.map((t) => (t.id === optimisticTask.id ? { ...t, ...serverTask, id: newId } : t))
+        );
+        const cached = updatedTasks.map((t) =>
+          t.id === optimisticTask.id ? { ...t, ...serverTask, id: newId } : t
+        );
+        await offlineStore.saveCachedTasks(cached);
       } else {
         throw new Error(`HTTP ${res.status}`);
       }
@@ -164,7 +196,7 @@ export const AgendaView: React.FC = () => {
       setNewDeadline("");
       setNewPriority("normal");
       setItemType("task");
-      setIsModalOpen(false);
+      setIsSubmitting(false);
     }
   };
 
@@ -875,10 +907,13 @@ export const AgendaView: React.FC = () => {
                   <Text style={styles.cancelActionText}>CANCEL</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.commitActionBtn}
+                  style={[styles.commitActionBtn, isSubmitting && { opacity: 0.6 }]}
                   onPress={handleCreateTask}
+                  disabled={isSubmitting}
                 >
-                  <Text style={styles.commitActionText}>COMMIT DELIVERABLE</Text>
+                  <Text style={styles.commitActionText}>
+                    {isSubmitting ? "COMMITTING..." : "COMMIT DELIVERABLE"}
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>

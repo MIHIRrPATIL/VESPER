@@ -187,6 +187,34 @@ class OfflineStore {
     payload: any
   ): Promise<void> {
     const queue = await this.getPendingTaskQueue();
+
+    // Deduplication & coalescing guards
+    if (action === "CREATE") {
+      const cleanTitle = (payload?.title || "").trim().toLowerCase();
+      const isDuplicate = queue.some(
+        (q) => q.action === "CREATE" && (q.payload?.title || "").trim().toLowerCase() === cleanTitle
+      );
+      if (isDuplicate) {
+        console.log(`[OfflineStore] Deduplicated offline CREATE action for '${payload?.title}'`);
+        return;
+      }
+    } else if (action === "TOGGLE") {
+      const targetId = payload?.id || payload;
+      const existingIdx = queue.findIndex((q) => q.action === "TOGGLE" && (q.payload?.id || q.payload) === targetId);
+      if (existingIdx >= 0) {
+        queue[existingIdx].payload = payload;
+        queue[existingIdx].timestamp = Date.now();
+        await AsyncStorage.setItem("vesper_offline_task_queue", JSON.stringify(queue));
+        await this.notifySync(this.isSyncing);
+        return;
+      }
+    } else if (action === "DELETE") {
+      const targetId = payload?.id || payload;
+      const filtered = queue.filter((q) => !(q.action === "TOGGLE" && (q.payload?.id || q.payload) === targetId));
+      queue.length = 0;
+      queue.push(...filtered);
+    }
+
     const item: OfflineTaskAction = {
       id: `task_action_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       action,
@@ -277,8 +305,11 @@ class OfflineStore {
             });
           } else if (item.action === "TOGGLE") {
             const taskId = item.payload?.id || item.payload;
+            const body = item.payload?.done !== undefined ? JSON.stringify({ done: item.payload.done }) : undefined;
             res = await fetch(`${baseUrl}/api/tasks/${taskId}/toggle`, {
               method: "PATCH",
+              headers: body ? { "Content-Type": "application/json" } : {},
+              body,
             });
           } else if (item.action === "DELETE") {
             const taskId = item.payload?.id || item.payload;

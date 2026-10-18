@@ -135,7 +135,10 @@ Provides autonomous power management and session security:
 - **Activation Threshold**: Tuned to `0.32` for balanced sensitivity at normal desktop distance.
 
 ### 4.2 Local Piper Neural TTS (`backend/voice/tts/piper_tts.py`)
-- High-speed, local neural speech engine running on ONNX Runtime.
+- High-speed, local neural speech engine running on ONNX Runtime with zero cloud dependency.
+- **Process-Wide Class Model Cache (`_VOICE_CACHE`)**: Loads the ~60MB ONNX model file once into host memory (`0.00007s` subsequent instance access), eliminating the ~1.5s-2.4s cold-disk penalty across proactive alerts and voice client instances.
+- **Eager Background Pre-Warming**: Background pre-warming task initialized at client handshake (`SERVER_HELLO`) and workstation startup so the ONNX session is warm before the first speech request arrives.
+- **Sentence-Level Streaming Pipeline**: Decouples audio synthesis from playback using an `asyncio.Queue` producer-consumer pipeline in `_play_tts_response()`. Sentence 1 synthesizes in ~80ms and begins immediate playback, while subsequent sentences synthesize in the background during audio output (sub-150ms perceived latency).
 - **Dynamic Multi-Voice Switching**: Supports on-the-fly voice assignment via `set_voice(name)`:
   - `alan` / `alan_medium`: Paced, crisp British butler (default Alfred persona).
   - `cori` / `cori_high`: Clear, high-fidelity female voice.
@@ -189,10 +192,43 @@ When drafting an email ("write an email to X"), the assistant stores the staged 
 - **Recipient Domain Guard**: Prevents premature dispatch if an email lacks a top-level domain, prompting the user for the full address.
 
 ### 5.2 Staged Action Disambiguation Queue
-For proactive tasks (battery replenishment reminders, calendar scheduling):
+For proactive tasks (battery replenishment reminders, calendar scheduling, bank debits/credits):
 - The agent stages an action in `ActionQueueManager` with a 15-second conversational confirmation window.
 - The user can say "yes do that" or "no dismiss" within 15 seconds to execute or cancel without re-invoking an LLM.
 - **Cross-Process Synchronization**: Staged actions are accessible and resolvable across processes via Gateway REST endpoints (`/sync/proactive/actions/active` and `/sync/proactive/actions/{id}/resolve`).
+- **Debounced Action Deduplication**: `stage_action()` cross-references active/unreviewed actions in `_queue`. Actions matching identical `domain`, `action`, verbatim text, or core parameter sets (e.g. identical transaction amount/category/type, OTP code, or task title) within 120 seconds are deduplicated, extending TTL without re-prompting or duplicate audio/HUD staging.
+
+### 5.3 Proactive Notification Triage & False-Positive Shields
+To prevent ghost transactions and erroneous 2FA OTP alarms:
+- **Banking Source Package Isolation**: Direct ledger transactions (`log_transaction`) are strictly restricted to official SMS packages with verified Indian DLT banking headers (`XX-HDFCBK`, `XX-SBIINB`, `XX-ICICIB`, etc.), official payment/UPI apps (`com.google.android.apps.nbu.paisa.user`, `com.phonepe.app`, `net.one97.paytm`, `com.cred.club`, `com.samsung.android.spay`, `in.org.npci.upiapp`), and official bank apps. General messaging apps (`com.whatsapp`, `org.telegram.messenger`), video streaming (`com.google.android.youtube`), and browsers are strictly denied from creating bank debits/credits.
+- **Word-Boundary Regex Guards**: Strict word boundaries (`\bemi\b`, `\bsip\b`, `\bdebited\b`, `\bcredited\b`) prevent conversational and video titles (e.g. "I Tested Premium TWS Under ₹8000") from falsely triggering EMI installments.
+- **Promotional Cashback & Marketing Shield**: Notifications advertising marketing rewards, referral incentives, or promotional cashbacks ("Earn flat ₹11 cashback", "Refer and earn up to ₹300", "Win up to ₹500") are detected and suppressed before financial extraction.
+- **Transaction Direction Normalization**: Phrases such as "X paid you ₹Y" and "received from X" are accurately triaged as credits (income), while "paid ₹Y to X" and "debited by" are triaged as debits (expenses).
+- **Hardened OTP & Security Extraction**: Pickup/transit PINs (`com.ubercab`, `com.olacabs`, `com.rapido.passenger`, food delivery PINs), postal pincodes (`400076`), and coupon codes are excluded from OTP classification. Ambient OTP display requires explicit authentication or 2FA credentials.
+- **Persistent Mobile Node Identity**: Mobile client ID (`vesper_mobile_client_id`) is persisted in `AsyncStorage` to avoid regenerating ephemeral IDs on app restart, preserving the Gateway's deduplication state during offline queue flushes.
+
+### 5.4 Autonomous Mobile Edge Architecture & Notification Stash
+To ensure the mobile companion remains fully functional, intelligent, and autonomous when disconnected from the workstation:
+- **Sequential 3-Gate Promo Filter (`mobile/src/services/promo-filter.ts`)**:
+  1. *Gate 1 (Origin Authenticity)*: Enforces strict whitelist of recognized banking SMS sender headers and financial app packages.
+  2. *Gate 2 (Promotional Keyword Rejection)*: Uses comprehensive regex boundaries to reject cashbacks, discounts, sales, coupons, referral rewards, pre-approved loans, credit card upgrades, and promo alerts.
+  3. *Gate 3 (Financial Settlement Anchor)*: Requires unambiguous settlement verbs (`debited`, `credited`, `sent to`, `paid to`, `transferred`, `withdrawn`, `spent`) associated with actual currency quantities.
+- **On-Device Financial Extractor (`mobile/src/services/transaction-extractor.ts`)**:
+  Parses transaction amounts, type (debit/credit), bank institution, and counterparty directly in native JavaScript on the phone. Correlates detected institutions against cached accounts from `offlineStore.getCachedAccounts()`.
+- **Pending Stash Buffer (`mobile/src/services/transaction-stash.ts`)**:
+  Uncategorized or unverified transactions are never written directly to the ledger. Instead, they are placed into an isolated buffer (`vesper_transaction_stash`).
+  - *Deterministic Idempotency Hash*: `generateId(account, amount, type, timestamp, reference)` hashes values into 5-minute time buckets (`Math.floor(ts / 300000) * 300000`), guaranteeing that SMS alerts and App push notifications for the same payment produce the exact same ID with zero duplicates.
+  - *Promotion & Discard*: Transactions can be promoted to the active offline queue and synced, or permanently discarded with 1-tap.
+- **Asynchronous Batch AI Enrichment (`mobile/src/services/gemini-batch.ts`)**:
+  Batches up to 10 stashed items and dispatches an asynchronous structured REST request to Google Gemini 2.5 Flash (free tier). The model returns structured counterparty names, spending nature (Food, Groceries, Shopping, Bills, etc.), and a confidence score. Items scoring `>= 0.85` confidence are automatically promoted into the ledger without user intervention.
+- **Direct Mobile Cloud Database Sync (`mobile/src/services/supabase.ts`)**:
+  A lightweight native fetch client performs direct HTTPS operations against Supabase (`/rest/v1/`) with `resolution=merge-duplicates` upserting, eliminating workstation proxy bottlenecks.
+- **Standalone Mobile Edge AI (`mobile/src/services/mobile-ai.ts`)**:
+  Enables mobile query execution when the workstation is offline. Resolves local queries (account balances, recent transactions, pending tasks, offline expense logging) in <10ms via zero-cloud fast paths, falling back directly to Gemini 2.5 Flash for conversational queries.
+- **Server Handshake Credential Sync (`backend/gateway/routes/ws.py`)**:
+  Upon WebSocket connection, the Gateway transmits `gemini_api_key`, `supabase_url`, and `supabase_key` within the `SERVER_HELLO` payload, securely hydrating the mobile companion with cloud credentials.
+- **Persistent Autonomous Edge Buffer UI & Simulation Controls (`LedgerView.tsx`, `ClusterSettingsModal.tsx`, `DirectivesView.tsx`)**:
+  A dedicated Autonomous Edge Buffer deck is permanently embedded directly above transaction lists in `LedgerView.tsx`. Even when empty (0 pending items), it exposes the active status of the 3 filter gates, the Gemini 2.5 Flash batch engine, and provides instant interactive controls (`+ SIMULATE ALERT` and `TEST PROMO FILTER`). In `DirectivesView.tsx`, a persistent `AUTONOMOUS EDGE ACTIVE` banner indicates when queries are routed to Gemini 2.5 Flash and local fast-paths away from the desktop gateway. Dedicated configuration and diagnostic controls are integrated into `ClusterSettingsModal.tsx`.
 
 ---
 

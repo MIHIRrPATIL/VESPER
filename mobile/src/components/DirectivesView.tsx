@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { theme } from "../styles/theme";
 import { workstationStore } from "../services/workstation-store";
+import { gatewayClient, ConnectionStatus } from "../services/gateway";
 import { ConversationMessage } from "../types/vesper";
 
 export const DirectivesView: React.FC = () => {
@@ -19,6 +20,7 @@ export const DirectivesView: React.FC = () => {
   const [expandedTranscripts, setExpandedTranscripts] = useState<Set<string>>(new Set());
   const [messages, setMessages] = useState<ConversationMessage[]>(workstationStore.messages);
   const [agentState, setAgentState] = useState(workstationStore.agentState);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(gatewayClient.getStatus());
   const scrollViewRef = useRef<ScrollView>(null);
 
   useEffect(() => {
@@ -26,7 +28,13 @@ export const DirectivesView: React.FC = () => {
       setMessages(workstationStore.messages);
       setAgentState(workstationStore.agentState);
     });
-    return () => unsub();
+    const unsubStatus = gatewayClient.subscribeStatus((newStatus) => {
+      setConnectionStatus(newStatus);
+    });
+    return () => {
+      unsub();
+      unsubStatus();
+    };
   }, []);
 
   // Auto-scroll to bottom when new messages arrive
@@ -66,11 +74,11 @@ export const DirectivesView: React.FC = () => {
 
   const quickDirectives = [
     "What is my bank balance?",
-    "How is the weather tomorrow in Mumbai?",
-    "Check my unread emails",
+    "How much did I spend today?",
     "What are my agenda tasks today?",
+    "Check my unread emails",
+    "How is the weather tomorrow in Mumbai?",
     "Play my groovy vibes playlist",
-    "Run optical presence scan",
   ];
 
   // Chronological top-to-bottom order (oldest to newest)
@@ -116,6 +124,16 @@ export const DirectivesView: React.FC = () => {
             <Text style={styles.stateText}>{agentState}</Text>
           </View>
         </View>
+
+        {/* Autonomous Edge Status Banner */}
+        {connectionStatus !== "connected" && (
+          <View style={styles.edgeBanner}>
+            <View style={styles.edgeBannerDot} />
+            <Text style={styles.edgeBannerText}>
+              AUTONOMOUS EDGE (Gemini 2.5 Flash &amp; Local Fast-Paths Active)
+            </Text>
+          </View>
+        )}
 
         {/* Message Feed (Chronological Top-to-Bottom) */}
         <ScrollView
@@ -391,6 +409,29 @@ const styles = StyleSheet.create({
     fontSize: 9,
     color: theme.colors.boneWhite,
     letterSpacing: 1,
+  },
+  edgeBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(16, 185, 129, 0.08)",
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(16, 185, 129, 0.2)",
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 6,
+    gap: 8,
+  },
+  edgeBannerDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: theme.colors.emerald,
+  },
+  edgeBannerText: {
+    fontFamily: theme.fonts.mono,
+    fontSize: 8.5,
+    color: theme.colors.emerald,
+    letterSpacing: 0.8,
+    fontWeight: "700",
   },
   feedScroll: {
     flex: 1,

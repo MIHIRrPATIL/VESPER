@@ -20,6 +20,10 @@ import { AgentState } from "../types/vesper";
 import { offlineStore } from "../services/offline-store";
 import { SubnetDiscoveryService, DiscoveredGateway } from "../services/discovery";
 import { workstationStore } from "../services/workstation-store";
+import { GeminiBatchEnricher } from "../services/gemini-batch";
+import { PromoFilter } from "../services/promo-filter";
+import { TransactionExtractor } from "../services/transaction-extractor";
+import { transactionStash } from "../services/transaction-stash";
 import * as Battery from "expo-battery";
 import * as Network from "expo-network";
 
@@ -49,6 +53,13 @@ export const ClusterSettingsModal: React.FC<ClusterSettingsModalProps> = ({
   const [isScanning, setIsScanning] = useState(false);
   const [sweepStatus, setSweepStatus] = useState<string | null>(null);
   const [isGesturesActive, setIsGesturesActive] = useState(workstationStore.isGesturesActive);
+
+  // Autonomous Edge AI & Cloud
+  const [geminiApiKey, setGeminiApiKey] = useState("");
+  const [hasApiKey, setHasApiKey] = useState(false);
+  const [isSavingKey, setIsSavingKey] = useState(false);
+  const [keySavedMessage, setKeySavedMessage] = useState<string | null>(null);
+  const [edgeSimMessage, setEdgeSimMessage] = useState<string | null>(null);
 
   // Telemetry
   const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
@@ -96,6 +107,12 @@ export const ClusterSettingsModal: React.FC<ClusterSettingsModalProps> = ({
     } catch {}
 
     try {
+      const k = await GeminiBatchEnricher.getApiKey();
+      setGeminiApiKey(k);
+      setHasApiKey(Boolean(k));
+    } catch {}
+
+    try {
       const level = await Battery.getBatteryLevelAsync();
       setBatteryLevel(level >= 0 ? Math.round(level * 100) : null);
       const state = await Battery.getBatteryStateAsync();
@@ -108,6 +125,15 @@ export const ClusterSettingsModal: React.FC<ClusterSettingsModalProps> = ({
     } catch {}
 
     checkNotificationPermission();
+  };
+
+  const handleSaveApiKey = async () => {
+    setIsSavingKey(true);
+    await GeminiBatchEnricher.setApiKey(geminiApiKey);
+    setHasApiKey(Boolean(geminiApiKey.trim()));
+    setIsSavingKey(false);
+    setKeySavedMessage("SAVED");
+    setTimeout(() => setKeySavedMessage(null), 3000);
   };
 
   const checkNotificationPermission = async () => {
@@ -438,6 +464,104 @@ export const ClusterSettingsModal: React.FC<ClusterSettingsModalProps> = ({
                   </TouchableOpacity>
                 </View>
               </View>
+            </View>
+
+            {/* Autonomous Edge & Cloud Intelligence */}
+            <View style={styles.card}>
+              <View style={styles.cardHeaderRow}>
+                <Text style={styles.cardSectionTitle}>AUTONOMOUS EDGE &amp; CLOUD</Text>
+                <View style={styles.statusBadge}>
+                  <View
+                    style={[
+                      styles.statusDot,
+                      {
+                        backgroundColor: hasApiKey
+                          ? theme.colors.emerald
+                          : theme.colors.amber,
+                      },
+                    ]}
+                  />
+                  <Text style={styles.statusBadgeText}>
+                    {hasApiKey ? "GEMINI ACTIVE" : "KEY REQUIRED"}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.actionSubtext}>
+                Enables on-device Standalone Intelligence (Directives chat away from home) and async Batch Financial Enrichment via Google Gemini 2.5 Flash.
+              </Text>
+
+              <View style={[styles.inputRow, { marginTop: 10 }]}>
+                <TextInput
+                  style={[styles.textInput, { flex: 1 }]}
+                  value={geminiApiKey}
+                  onChangeText={setGeminiApiKey}
+                  placeholder="Paste Google Gemini API Key"
+                  placeholderTextColor={theme.colors.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  secureTextEntry={true}
+                />
+                <TouchableOpacity
+                  style={[styles.connectBtn, isSavingKey && styles.btnDisabled]}
+                  onPress={handleSaveApiKey}
+                  disabled={isSavingKey}
+                >
+                  <Text style={styles.connectBtnText}>
+                    {keySavedMessage ? keySavedMessage : "SAVE"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.divider} />
+
+              {/* Edge Pipeline Testing */}
+              <View style={styles.actionRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.actionTitle}>Edge Stash &amp; Filter Testing</Text>
+                  <Text style={styles.actionSubtext}>
+                    Test the on-device 3-gate filter and transaction stash buffer
+                  </Text>
+                </View>
+                <View style={{ flexDirection: "row", gap: 6 }}>
+                  <TouchableOpacity
+                    style={styles.pillBtn}
+                    onPress={async () => {
+                      const sample = {
+                        pkg: "com.google.android.apps.nbu.paisa.user",
+                        title: "Google Pay",
+                        text: "Paid Rs 540.00 to Starbucks on 18-Oct using HDFC Bank A/c ending 4921. UPI Ref: 89127491",
+                      };
+                      const tx = await TransactionExtractor.extract(sample.pkg, sample.title, sample.text, Date.now());
+                      if (tx) {
+                        await transactionStash.addToStash(tx);
+                        setEdgeSimMessage("Alert Stashed!");
+                        setTimeout(() => setEdgeSimMessage(null), 3000);
+                      }
+                    }}
+                  >
+                    <Text style={styles.pillBtnText}>SIMULATE</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.pillBtn}
+                    onPress={() => {
+                      const promo = "Pre-approved Personal Loan of Rs 5,00,000 at zero interest! Apply now on Cred";
+                      const res = PromoFilter.evaluate("com.dreamplug.android", "Special Offer", promo);
+                      setEdgeSimMessage(res.isGenuineTransaction ? "Passed" : "Blocked (Gate 2)");
+                      setTimeout(() => setEdgeSimMessage(null), 3000);
+                    }}
+                  >
+                    <Text style={styles.pillBtnText}>TEST PROMO</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {edgeSimMessage && (
+                <Text style={[styles.sweepStatusText, { marginTop: 6 }]}>
+                  {edgeSimMessage}
+                </Text>
+              )}
             </View>
 
             {/* Vigilance & Permissions */}
