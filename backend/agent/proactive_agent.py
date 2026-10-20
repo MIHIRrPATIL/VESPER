@@ -353,9 +353,12 @@ class ProactiveAgent:
         if eval_res.handled:
             if eval_res.staged_action:
                 staged = eval_res.staged_action
+                if getattr(staged, "status", "") == "duplicate":
+                    logger.info(f"[ProactiveAgent] Suppressed broadcast for duplicate staged action '{staged.id}'")
+                    return
                 logger.info(
                     f"[ProactiveAgent] Staged action [{staged.domain}:{staged.action}] "
-                    f"for notification from {notif.app_name}"
+                    f"for notification from '{notif.title}' via {notif.app_name}"
                 )
                 await self._broadcast_staged_action_card(notif, staged)
             return
@@ -373,13 +376,14 @@ class ProactiveAgent:
                 return
 
             logger.info(
-                f"[ProactiveAgent] Performing VIP LLM triage for {notif.app_name}: "
-                f"'{notif.title}' - '{notif.text[:60]}'"
+                f"[ProactiveAgent] Performing VIP LLM triage for '{notif.title}' via {notif.app_name}: "
+                f"'{notif.text[:60]}'"
             )
             try:
                 suggestion = await self._triage_with_llm(notif)
                 if suggestion:
-                    action_id = f"act_task_vip_{int(time.time())}_{notif.id}"
+                    from backend.agent.proactive.advisory_idempotency import generate_task_advisory_id
+                    action_id = generate_task_advisory_id(suggestion, notif.title)
                     staged_task = action_queue.stage_action(
                         StagedAction(
                             id=action_id,
@@ -400,7 +404,8 @@ class ProactiveAgent:
                             },
                         )
                     )
-                    await self._broadcast_staged_action_card(notif, staged_task)
+                    if getattr(staged_task, "status", "") != "duplicate":
+                        await self._broadcast_staged_action_card(notif, staged_task)
             except Exception as e:
                 logger.warning(f"[ProactiveAgent] VIP LLM triage failed: {e}")
 
@@ -463,7 +468,7 @@ class ProactiveAgent:
                 from backend.shared.events import Channel, EventType, ServerEnvelope
 
                 envelope = ServerEnvelope(
-                    uuid=f"proactive_stage_{staged.id}_{int(time.time())}",
+                    uuid=f"proactive_stage_{staged.id}",
                     channel=Channel.NOTIFY,
                     type=EventType.NOTIFICATION_DIGEST,
                     payload={

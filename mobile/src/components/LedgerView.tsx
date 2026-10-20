@@ -77,8 +77,7 @@ export const LedgerView: React.FC = () => {
     if (cOv) setOverview(cOv);
     if (cAccs && cAccs.length > 0) setAccounts(cAccs);
     if (cTxs && Array.isArray(cTxs)) {
-      const cleaned = cTxs.filter((t: any) => Number(t.amount) !== 150);
-      setTransactions(cleaned);
+      setTransactions(cTxs);
     }
     if (cDebts) setDebts(cDebts);
     if (stashed) setStashedItems(stashed);
@@ -107,9 +106,8 @@ export const LedgerView: React.FC = () => {
         hasLive = true;
       }
       if (txnRes && Array.isArray(txnRes)) {
-        const cleaned = txnRes.filter((t: any) => Number(t.amount) !== 150);
-        setTransactions(cleaned);
-        offlineStore.saveCachedTransactions(cleaned);
+        setTransactions(txnRes);
+        offlineStore.saveCachedTransactions(txnRes);
         hasLive = true;
       }
       if (debtRes?.debts) {
@@ -146,12 +144,13 @@ export const LedgerView: React.FC = () => {
     };
   }, [loadData]);
 
-  const handleApproveStashItem = async (id: string) => {
-    await transactionStash.promoteToLedger(id);
+  const handleApproveStashItem = async (id: string, settleDebtId?: string) => {
+    await transactionStash.promoteToLedger(id, { settle_debt_id: settleDebtId });
     const updated = await transactionStash.getStash();
     setStashedItems(updated);
     const cTxs = await offlineStore.getCachedTransactions();
     setTransactions(cTxs);
+    loadData();
   };
 
   const handleDiscardStashItem = async (id: string) => {
@@ -166,6 +165,7 @@ export const LedgerView: React.FC = () => {
     setStashedItems(updated);
     const cTxs = await offlineStore.getCachedTransactions();
     setTransactions(cTxs);
+    loadData();
   };
 
   const handleBatchEnrichStash = async () => {
@@ -480,6 +480,14 @@ export const LedgerView: React.FC = () => {
 
             <TouchableOpacity
               style={styles.chipPill}
+              onPress={handleSimulateBankAlert}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.chipPillText}>+ SIMULATE</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.chipPill}
               onPress={loadData}
               activeOpacity={0.7}
             >
@@ -490,36 +498,17 @@ export const LedgerView: React.FC = () => {
       </View>
 
       {/* ── Section 2.5: Autonomous Edge & Pending Stash Buffer ── */}
-      <View style={styles.stashOuterBezel}>
-        <View style={styles.stashInnerCore}>
-          <View style={styles.bentoHeaderRow}>
-            <View style={styles.bentoTagWrap}>
-              <View
-                style={[
-                  styles.stashDot,
-                  { backgroundColor: stashedItems.length > 0 ? theme.colors.amber : theme.colors.emerald },
-                ]}
-              />
-              <Text
-                style={[
-                  styles.stashEyebrow,
-                  { color: stashedItems.length > 0 ? theme.colors.amber : theme.colors.emerald },
-                ]}
-              >
-                {stashedItems.length > 0
-                  ? `PENDING NOTIFICATION STASH (${stashedItems.length})`
-                  : "AUTONOMOUS EDGE BUFFER • ACTIVE"}
-              </Text>
-            </View>
-            <View style={styles.stashHeaderActions}>
-              <TouchableOpacity
-                style={styles.stashSimulateBtn}
-                onPress={handleSimulateBankAlert}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.stashSimulateBtnText}>+ SIMULATE ALERT</Text>
-              </TouchableOpacity>
-              {stashedItems.length > 0 && (
+      {stashedItems.length > 0 && (
+        <View style={styles.stashOuterBezel}>
+          <View style={styles.stashInnerCore}>
+            <View style={styles.bentoHeaderRow}>
+              <View style={styles.bentoTagWrap}>
+                <View style={[styles.stashDot, { backgroundColor: theme.colors.amber }]} />
+                <Text style={[styles.stashEyebrow, { color: theme.colors.amber }]}>
+                  {`PENDING NOTIFICATION STASH (${stashedItems.length})`}
+                </Text>
+              </View>
+              <View style={styles.stashHeaderActions}>
                 <TouchableOpacity
                   style={[styles.stashEnrichBtn, isEnrichingStash && styles.btnDisabled]}
                   onPress={handleBatchEnrichStash}
@@ -532,156 +521,145 @@ export const LedgerView: React.FC = () => {
                     <Text style={styles.stashEnrichBtnText}>AI BATCH ENRICH</Text>
                   )}
                 </TouchableOpacity>
-              )}
-              {stashedItems.some((s) => s.confidence >= 0.85) && (
-                <TouchableOpacity
-                  style={styles.stashApproveAllBtn}
-                  onPress={handleApproveAllHighConfidence}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.stashApproveAllText}>APPROVE HIGH MATCH</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          </View>
-
-          {stashedItems.length === 0 ? (
-            <View style={styles.stashEmptyContainer}>
-              <Text style={styles.stashSubtitle}>
-                3-Gate Promo Filter active on live notifications. Genuine bank alerts buffer here with Gemini 2.5 Flash batch enrichment before updating ledger balances.
-              </Text>
-              <View style={styles.gatePillsRow}>
-                <View style={styles.gatePill}>
-                  <Text style={styles.gatePillText}>GATE 1: WHITELIST</Text>
-                </View>
-                <View style={styles.gatePill}>
-                  <Text style={styles.gatePillText}>GATE 2: AD-KILL BLACKLIST</Text>
-                </View>
-                <View style={styles.gatePill}>
-                  <Text style={styles.gatePillText}>GATE 3: SETTLEMENT VERBS</Text>
-                </View>
-              </View>
-              <View style={styles.stashTestRow}>
-                <TouchableOpacity
-                  style={styles.stashTestBtn}
-                  onPress={handleTestPromoFilter}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.stashTestBtnText}>TEST PROMO FILTER</Text>
-                </TouchableOpacity>
-                {promoTestResult && (
-                  <View style={styles.promoTestResultPill}>
-                    <Text style={styles.promoTestResultText}>{promoTestResult}</Text>
-                  </View>
+                {stashedItems.some((s) => s.confidence >= 0.85) && (
+                  <TouchableOpacity
+                    style={styles.stashApproveAllBtn}
+                    onPress={handleApproveAllHighConfidence}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.stashApproveAllText}>APPROVE HIGH MATCH</Text>
+                  </TouchableOpacity>
                 )}
               </View>
             </View>
-          ) : (
-            <>
-              <Text style={styles.stashSubtitle}>
-                Detected from live phone notifications. Batch enriched with counterparty &amp; nature prior to ledger commit.
-              </Text>
 
-              {stashedItems.map((item) => {
-                const isExpense = item.type === "EXPENSE";
-                const highConf = item.confidence >= 0.85;
-                const dateStr = new Date(item.timestamp).toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                });
+            <Text style={styles.stashSubtitle}>
+              Detected from live phone notifications. Batch enriched with counterparty &amp; nature prior to ledger commit.
+            </Text>
 
-                return (
-                  <View key={item.id} style={styles.stashCardOuter}>
-                    <View style={styles.stashCardInner}>
-                      {/* Top row: Amount, Badges */}
-                      <View style={styles.stashCardTopRow}>
-                        <View style={styles.stashAmountGroup}>
+            {stashedItems.map((item) => {
+              const isExpense = item.type === "EXPENSE";
+              const highConf = item.confidence >= 0.85;
+              const dateStr = new Date(item.timestamp).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              });
+
+              // Check if stashed counterparty matches an active unsettled peer debt
+              const matchingDebt = debts.find((d) => {
+                if (d.settled) return false;
+                const pName = (d.person || "").trim().toLowerCase();
+                if (!pName || pName.length < 2) return false;
+                const merchant = (item.merchant || "").toLowerCase();
+                const desc = (item.description || "").toLowerCase();
+                const raw = (item.raw_text || "").toLowerCase();
+                return merchant.includes(pName) || desc.includes(pName) || raw.includes(pName);
+              });
+
+              return (
+                <View key={item.id} style={styles.stashCardOuter}>
+                  <View style={styles.stashCardInner}>
+                    {/* Top row: Amount, Badges */}
+                    <View style={styles.stashCardTopRow}>
+                      <View style={styles.stashAmountGroup}>
+                        <Text
+                          style={[
+                            styles.stashAmountText,
+                            { color: isExpense ? theme.colors.coral : theme.colors.emerald },
+                          ]}
+                        >
+                          {isExpense ? "-" : "+"}
+                          {formatCurrency(item.amount)}
+                        </Text>
+                        <View style={styles.stashAccountPill}>
+                          <Text style={styles.stashAccountPillText} numberOfLines={1}>
+                            {item.account_name.toUpperCase()}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <View style={styles.stashBadgeGroup}>
+                        {item.category && item.category !== "Uncategorized" && (
+                          <View style={styles.stashCategoryPill}>
+                            <Text style={styles.stashCategoryPillText}>
+                              {item.category.toUpperCase()}
+                            </Text>
+                          </View>
+                        )}
+                        <View
+                          style={[
+                            styles.stashConfidencePill,
+                            highConf ? styles.stashConfHigh : styles.stashConfLow,
+                          ]}
+                        >
                           <Text
                             style={[
-                              styles.stashAmountText,
-                              { color: isExpense ? theme.colors.coral : theme.colors.emerald },
+                              styles.stashConfidenceText,
+                              highConf ? { color: theme.colors.emerald } : { color: theme.colors.amber },
                             ]}
                           >
-                            {isExpense ? "-" : "+"}
-                            {formatCurrency(item.amount)}
+                            {highConf
+                              ? `${Math.round(item.confidence * 100)}% MATCH`
+                              : "NEEDS NOTE"}
                           </Text>
-                          <View style={styles.stashAccountPill}>
-                            <Text style={styles.stashAccountPillText} numberOfLines={1}>
-                              {item.account_name.toUpperCase()}
-                            </Text>
-                          </View>
                         </View>
-
-                        <View style={styles.stashBadgeGroup}>
-                          {item.category && item.category !== "Uncategorized" && (
-                            <View style={styles.stashCategoryPill}>
-                              <Text style={styles.stashCategoryPillText}>
-                                {item.category.toUpperCase()}
-                              </Text>
-                            </View>
-                          )}
-                          <View
-                            style={[
-                              styles.stashConfidencePill,
-                              highConf ? styles.stashConfHigh : styles.stashConfLow,
-                            ]}
-                          >
-                            <Text
-                              style={[
-                                styles.stashConfidenceText,
-                                highConf ? { color: theme.colors.emerald } : { color: theme.colors.amber },
-                              ]}
-                            >
-                              {highConf
-                                ? `${Math.round(item.confidence * 100)}% MATCH`
-                                : "NEEDS NOTE"}
-                            </Text>
-                          </View>
-                        </View>
-                      </View>
-
-                      {/* Middle row: Merchant & Description */}
-                      <View style={styles.stashCardBody}>
-                        <Text style={styles.stashMerchantText} numberOfLines={1}>
-                          {item.merchant || item.description || "Unidentified Counterparty"}
-                        </Text>
-                        <Text style={styles.stashRawSnippet} numberOfLines={2}>
-                          {item.raw_text}
-                        </Text>
-                        <Text style={styles.stashTimeMeta}>
-                          {dateStr} • {item.enrichment_source || "ON-DEVICE"}
-                        </Text>
-                      </View>
-
-                      {/* Bottom row: Inline 1-tap Actions */}
-                      <View style={styles.stashActionRow}>
-                        <TouchableOpacity
-                          style={styles.stashDiscardBtn}
-                          onPress={() => handleDiscardStashItem(item.id)}
-                          activeOpacity={0.8}
-                        >
-                          <Text style={styles.stashDiscardBtnText}>DISCARD</Text>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity
-                          style={[
-                            styles.stashApproveBtn,
-                            highConf && styles.stashApproveBtnHighConf,
-                          ]}
-                          onPress={() => handleApproveStashItem(item.id)}
-                          activeOpacity={0.8}
-                        >
-                          <Text style={styles.stashApproveBtnText}>APPROVE &amp; COMMIT</Text>
-                        </TouchableOpacity>
                       </View>
                     </View>
+
+                    {/* Middle row: Merchant & Description */}
+                    <View style={styles.stashCardBody}>
+                      <Text style={styles.stashMerchantText} numberOfLines={1}>
+                        {item.merchant || item.description || "Unidentified Counterparty"}
+                      </Text>
+                      <Text style={styles.stashRawSnippet} numberOfLines={2}>
+                        {item.raw_text}
+                      </Text>
+                      <Text style={styles.stashTimeMeta}>
+                        {dateStr} • {item.enrichment_source || "ON-DEVICE"}
+                      </Text>
+                    </View>
+
+                    {/* Peer Debt Settlement Action if counterparty matches */}
+                    {matchingDebt && (
+                      <TouchableOpacity
+                        style={styles.stashSettlePeerBtn}
+                        onPress={() => handleApproveStashItem(item.id, matchingDebt.id)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={styles.stashSettlePeerBtnText}>
+                          APPROVE &amp; SETTLE PEER TAB ({matchingDebt.person.toUpperCase()})
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+
+                    {/* Bottom row: Inline 1-tap Actions */}
+                    <View style={styles.stashActionRow}>
+                      <TouchableOpacity
+                        style={styles.stashDiscardBtn}
+                        onPress={() => handleDiscardStashItem(item.id)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={styles.stashDiscardBtnText}>DISCARD</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.stashApproveBtn,
+                          highConf && styles.stashApproveBtnHighConf,
+                        ]}
+                        onPress={() => handleApproveStashItem(item.id)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={styles.stashApproveBtnText}>APPROVE &amp; COMMIT</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
-                );
-              })}
-            </>
-          )}
+                </View>
+              );
+            })}
+          </View>
         </View>
-      </View>
+      )}
 
       {/* ── Section 3: Segmented Aerospace Subtabs Switcher ── */}
       <View style={styles.subTabsOuter}>
@@ -2885,6 +2863,8 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+    flexWrap: "wrap",
+    gap: 6,
   },
   stashAmountGroup: {
     flexDirection: "row",
@@ -2911,6 +2891,7 @@ const styles = StyleSheet.create({
   stashBadgeGroup: {
     flexDirection: "row",
     alignItems: "center",
+    flexWrap: "wrap",
     gap: 4,
   },
   stashCategoryPill: {
@@ -3009,5 +2990,24 @@ const styles = StyleSheet.create({
     color: theme.colors.boneWhite,
     fontWeight: "700",
     letterSpacing: 0.5,
+  },
+  stashSettlePeerBtn: {
+    backgroundColor: "rgba(16, 185, 129, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(16, 185, 129, 0.4)",
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    borderRadius: 7,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 6,
+    width: "100%",
+  },
+  stashSettlePeerBtnText: {
+    fontFamily: theme.fonts.mono,
+    fontSize: 9,
+    fontWeight: "700",
+    color: theme.colors.emerald,
+    letterSpacing: 0.8,
   },
 });

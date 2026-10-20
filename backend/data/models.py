@@ -8,7 +8,7 @@ from __future__ import annotations
 import datetime as dt
 from enum import Enum
 from typing import Any, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ── Domain Enums ─────────────────────────────────────────────────────────
@@ -116,7 +116,24 @@ class TransactionCreate(BaseDataModel):
     account_id: Optional[str] = None
     to_account_id: Optional[str] = None
     date: Optional[dt.date] = None
+    settle_debt_id: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_transaction_input(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # 1. Lowercase type string (e.g., "EXPENSE" -> "expense")
+            if "type" in data and isinstance(data["type"], str):
+                data["type"] = data["type"].lower()
+            # 2. Parse ISO date/datetime string into date
+            if "date" in data and isinstance(data["date"], str):
+                raw_date = data["date"].strip()
+                if "T" in raw_date:
+                    data["date"] = raw_date.split("T")[0]
+                elif " " in raw_date:
+                    data["date"] = raw_date.split(" ")[0]
+        return data
 
 
 class TransactionUpdate(BaseDataModel):

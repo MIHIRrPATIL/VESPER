@@ -8,9 +8,13 @@ in sub-10 milliseconds without invoking an LLM, reducing latency by 6x.
 from __future__ import annotations
 
 import datetime
+import logging
 import re
+import threading
 from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("vesper.agent.fast_path")
 
 
 def _get_time_of_day() -> str:
@@ -88,10 +92,6 @@ def _fast_store_user_name(name_raw: str) -> tuple[dict, str, dict]:
 
     _CACHED_USER_PROFILE["name"] = cleaned
     try:
-        import logging
-        import threading
-        logger = logging.getLogger("vesper.agent.fast_path")
-
         def _persist_sync():
             try:
                 from backend.data.repositories.memory import ShodhMemoryRepository
@@ -151,13 +151,10 @@ def _fast_recall_profile() -> tuple[dict, str, dict]:
 
 def _fast_store_generic_memory(fact: str) -> tuple[dict, str, dict]:
     """Commits a generic fact statement into memory immediately with background persistence (<1ms)."""
-    import logging
-    logger = logging.getLogger("vesper.agent.fast_path")
     clean_fact = fact.strip().strip(".,!?:;\"'")
     try:
         from backend.data.repositories.memory import ShodhMemoryRepository
         from backend.data.models import MemoryCreate
-        import threading
 
         def _persist_sync():
             try:
@@ -206,12 +203,12 @@ class FastPathEngine:
                 re.compile(
                     r"(?:"
                     # System prompt / instructions extraction
-                    r"\b(?:expose|reveal|show|print|display|tell\s+me|output|dump|leak|repeat|give\s+me)\s+(?:me\s+)?(?:your|the|all|raw|entire|internal|secret)?\s*(?:raw|entire|internal|secret)?\s*(?:system\s+)?(?:prompts?|instructions?|directives?|rules?|guidelines?|secret\s+prompt|core\s+prompt)\b|"
-                    r"\bwhat\s+(?:is|are)\s+your\s+(?:system\s+)?(?:prompts?|instructions?|directives?|rules?|guidelines?)\b|"
-                    # Fake authority / role hijacking
-                    r"\bi\s+am\s+your\s+(?:admin|administrator|owner|creator|developer|master|root|boss)\b|"
+                    r"\b(?:expose|reveal|show|print|display|tell\s+me|output|dump|leak|repeat|give\s+me)\s+(?:me\s+)?(?:your|the|all|raw|entire|internal|secret|hidden)?\s*(?:raw|entire|internal|secret|hidden)?\s*(?:system\s+prompts?|system\s+instructions?|core\s+prompts?|secret\s+prompts?|hidden\s+instructions?)\b|"
+                    r"\bwhat\s+(?:is|are)\s+(?:all\s+)?(?:your|the)\s+(?:raw\s+|entire\s+|internal\s+|secret\s+|hidden\s+)?(?:system\s+prompts?|system\s+instructions?|core\s+prompts?|secret\s+prompts?)\b|"
+                    # Fake authority / role hijacking with override
+                    r"\bi\s+am\s+your\s+(?:admin|administrator|owner|creator|developer|master|root|boss)(?:[\s\w,]*?)\b(?:override|bypass|give\s+me|expose|reveal|dump|disregard|ignore)\b|"
                     # Instruction overrides & jailbreaks
-                    r"\b(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?(?:previous|prior|system|above|safety)\s*(?:instructions?|directives?|prompts?|rules?|protocols?|filters?)\b|"
+                    r"\b(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?(?:previous|prior|above|system|safety)\s*(?:instructions?|directives?|prompts?|rules?|protocols?|filters?)\b|"
                     r"\b(?:you\s+are\s+now\s+in|enter|activate)\s+(?:dan|developer|jailbreak|unrestricted|god)\s+mode\b|"
                     r"\braw\s+system\s+prompt\b"
                     r")",

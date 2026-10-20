@@ -58,6 +58,8 @@ export class TransactionExtractor {
     // 3. Extract Bank / Account Name & Last Digits
     let bankName = '';
     const bankMatches: Record<string, RegExp> = {
+      'Saraswat Bank': /\b(?:saraswat(?:\s+bank)?|srcb|srcbbk)\b/i,
+      'Union Bank': /\b(?:union(?:\s+bank)?|unionbank|ubi)\b/i,
       'HDFC Bank': /\b(?:hdfc(?:\s+bank)?|hdfcbk)\b/i,
       'SBI': /\b(?:sbi|state\s+bank(?:\s+of\s+india)?)\b/i,
       'ICICI Bank': /\b(?:icici(?:\s+bank)?)\b/i,

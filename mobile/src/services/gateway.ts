@@ -474,17 +474,81 @@ class GatewayClient {
   private async flushOfflineQueue() {
     if (this.offlineQueue.length === 0) return;
 
-    console.log(`[GatewayClient] Flushing ${this.offlineQueue.length} offline notifications to Gateway...`);
+    const count = this.offlineQueue.length;
+    console.log(`[GatewayClient] Flushing ${count} offline notifications to Gateway...`);
     const queueToFlush = [...this.offlineQueue];
     this.offlineQueue = [];
     await this.saveOfflineQueue();
 
+    // If backlog is small (< 3 items), fire individual requests directly
+    if (queueToFlush.length < 3) {
+      console.log(`[GatewayClient] Backlog has ${queueToFlush.length} (< 3) items, firing individual requests directly...`);
+      for (const notif of queueToFlush) {
+        await this.postNotificationDirectly({
+          ...notif,
+          is_backlog: true,
+          is_offline_replay: true,
+        });
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.send({
+            channel: Channel.NOTIFY,
+            type: EventType.NOTIFICATION_RELAY,
+            payload: {
+              ...notif,
+              device_id: this.clientId,
+              device_name: this.deviceName,
+              post_time: notif.post_time || Date.now() / 1000.0,
+              is_backlog: true,
+              is_offline_replay: true,
+            },
+          });
+        }
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      return;
+    }
+
+    // Otherwise (queueToFlush.length >= 3), batch-post to prevent notification storms and LLM advisory spam
+    const baseUrl = this.getHttpUrl();
+    try {
+      const res = await fetch(`${baseUrl}/api/notifications/batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          device_id: this.clientId,
+          device_name: 'Mobile Companion',
+          notifications: queueToFlush,
+        }),
+      });
+      if (res.ok) {
+        console.log(`[GatewayClient] Successfully flushed ${queueToFlush.length} notifications via batch endpoint`);
+        return;
+      }
+    } catch (err) {
+      console.warn('[GatewayClient] Batch flush via HTTP failed, falling back to individual direct requests:', err);
+    }
+
+    // Fallback if batch endpoint fails: send individual requests directly
     for (const notif of queueToFlush) {
-      this.sendNotificationRelay({
+      await this.postNotificationDirectly({
         ...notif,
         is_backlog: true,
         is_offline_replay: true,
       });
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.send({
+          channel: Channel.NOTIFY,
+          type: EventType.NOTIFICATION_RELAY,
+          payload: {
+            ...notif,
+            device_id: this.clientId,
+            device_name: this.deviceName,
+            post_time: notif.post_time || Date.now() / 1000.0,
+            is_backlog: true,
+            is_offline_replay: true,
+          },
+        });
+      }
       await new Promise((r) => setTimeout(r, 40));
     }
   }
@@ -615,6 +679,7 @@ class GatewayClient {
           title: payload.title,
           text: payload.text,
           subtext: payload.subtext,
+          priority: payload.priority,
           post_time: payload.post_time || Date.now() / 1000.0,
           device_id: this.clientId,
           device_name: this.deviceName,

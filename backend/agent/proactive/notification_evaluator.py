@@ -18,6 +18,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from backend.agent.proactive.action_queue import StagedAction, action_queue
+from backend.agent.proactive.advisory_idempotency import (
+    generate_debt_advisory_id,
+    generate_financial_advisory_id,
+    generate_otp_advisory_id,
+    generate_task_advisory_id,
+)
 from backend.sync.notification_service import MobileNotification, NotificationPriority
 
 logger = logging.getLogger("vesper.agent.proactive.notif")
@@ -28,9 +34,10 @@ BANK_SENDER_PATTERNS = [
     r"[A-Z]{2}-AXISBK", r"[A-Z]{2}-KOTAKB", r"[A-Z]{2}-PNBSMS",
     r"[A-Z]{2}-PAYTM",  r"[A-Z]{2}-CRED",   r"[A-Z]{2}-GPAY",
     r"[A-Z]{2}-PHONEPE", r"[A-Z]{2}-BOB",   r"[A-Z]{2}-CANBNK",
+    r"[A-Z]{2}-SRCBBK", r"[A-Z]{2}-SRCBL",  r"[A-Z]{2}-UNIONB",
     r"hdfc", r"icici", r"sbi", r"axis", r"kotak", r"paytm", r"cred", r"gpay",
     r"phonepe", r"bank of baroda", r"punjab national bank", r"canara bank",
-    r"indusind", r"federal bank", r"idfc"
+    r"indusind", r"federal bank", r"idfc", r"saraswat", r"srcb", r"union bank"
 ]
 
 # Official packages verified to deliver legitimate bank transaction alerts or payments in India
@@ -63,6 +70,8 @@ FINANCIAL_ALLOWED_PACKAGES = {
     "com.rblbank.mobank",
     "com.fedmobile",
     "com.idfcfirstbank.optimus",
+    "com.saraswatbank.mobile",
+    "com.unionbank.online",
     # Bank email receipts
     "com.google.android.gm",
 }
@@ -120,12 +129,16 @@ class NotificationEvaluator:
         fin_action = self._try_parse_financial(notif)
         if fin_action:
             staged = action_queue.stage_action(fin_action)
+            if getattr(staged, "status", "") == "duplicate":
+                return EvaluationResult(handled=True, staged_action=staged, reason="duplicate_idempotent")
             return EvaluationResult(handled=True, staged_action=staged)
 
         # 4. Check for Peer Debt / Bill Split patterns
         debt_action = self._try_parse_peer_debt(notif)
         if debt_action:
             staged = action_queue.stage_action(debt_action)
+            if getattr(staged, "status", "") == "duplicate":
+                return EvaluationResult(handled=True, staged_action=staged, reason="duplicate_idempotent")
             return EvaluationResult(handled=True, staged_action=staged)
 
         # 5. Check for OTP / 2FA code (Instant Ambient HUD + Proactive TTS Speech)
@@ -133,9 +146,10 @@ class NotificationEvaluator:
         if otp_code:
             logger.info(f"[NotificationEvaluator] Extracted OTP: '{otp_code}' from {notif.title}")
             source = self._clean_source_name(notif)
+            raw_ts = getattr(notif, "post_time", getattr(notif, "timestamp", time.time()))
+            action_id = generate_otp_advisory_id(otp_code, source, raw_ts)
             spaced_digits = " ".join(list(otp_code))
             speech = f"Security code from {source}: {spaced_digits}."
-            action_id = f"act_otp_{int(time.time())}_{otp_code}"
             staged_otp = StagedAction(
                 id=action_id,
                 domain="security",
@@ -153,10 +167,12 @@ class NotificationEvaluator:
                     "otp": otp_code,
                     "source": source,
                     "raw_text": notif.text,
-                    "post_time": getattr(notif, "post_time", getattr(notif, "timestamp", time.time())),
+                    "post_time": raw_ts,
                 },
             )
             staged = action_queue.stage_action(staged_otp)
+            if getattr(staged, "status", "") == "duplicate":
+                return EvaluationResult(handled=True, staged_action=staged, reason="duplicate_idempotent")
             return EvaluationResult(handled=True, staged_action=staged)
 
         # 5b. Group message triage rule:
@@ -174,6 +190,8 @@ class NotificationEvaluator:
             task_action = await self._try_extract_vip_task(notif)
             if task_action:
                 staged = action_queue.stage_action(task_action)
+                if getattr(staged, "status", "") == "duplicate":
+                    return EvaluationResult(handled=True, staged_action=staged, reason="duplicate_idempotent")
                 return EvaluationResult(handled=True, staged_action=staged)
 
         return EvaluationResult(handled=False)
@@ -297,7 +315,7 @@ class NotificationEvaluator:
         title = (notif.title or "").strip()
         app = (notif.app_name or "").strip()
 
-        # Check Indian bank/service sender headers like VK-HDFCBK, AD-SBIINB, JM-PAYTM, etc.
+        # Check Indian bank/service sender headers like VK-HDFCBK, AD-SBIINB, JM-PAYTM, VK-SRCBBK, etc.
         m = re.search(r"^[A-Za-z]{2}-([A-Za-z0-9]+)", title)
         if m:
             code = m.group(1).upper()
@@ -312,6 +330,8 @@ class NotificationEvaluator:
             if "CRED" in code: return "CRED"
             if "GPAY" in code: return "Google Pay"
             if "PHONEPE" in code: return "PhonePe"
+            if "SRCB" in code or "SARASWAT" in code: return "Saraswat Bank"
+            if "UNION" in code or code.startswith("UBI"): return "Union Bank"
             if "AMZN" in code or "AMAZON" in code: return "Amazon"
             if "FLPKRT" in code: return "Flipkart"
             if "SWIGGY" in code: return "Swiggy"
@@ -319,10 +339,15 @@ class NotificationEvaluator:
             if "UBER" in code: return "Uber"
             return code
 
-        if app and app not in ("App", "unknown", "Phone"):
-            return app
-        if title:
+        # For direct personal communication, prioritize the human sender
+        is_generic_title = not title or title.lower() in ("app", "unknown", "notification", "messages", "new message", "null", "undefined")
+        if not is_generic_title:
+            if app and app not in ("App", "unknown", "Phone", "Android App", "Notification") and app.lower() != title.lower():
+                return f"{title} via {app}"
             return title
+
+        if app and app not in ("App", "unknown", "Phone", "Android App", "Notification"):
+            return app
         return "Secure Service"
 
     def _try_parse_financial(self, notif: MobileNotification) -> Optional[StagedAction]:
@@ -471,12 +496,19 @@ class NotificationEvaluator:
             elif any(e in m_lower for e in ["electricity", "bescom", "airtel", "jio", "vi", "broadband", "water"]):
                 category = "Utilities"
 
-        action_id = f"act_fin_{int(time.time())}_{int(amount)}"
+        raw_ts = getattr(notif, "post_time", getattr(notif, "timestamp", 0.0))
+        if raw_ts > 1e11:
+            raw_ts = raw_ts / 1000.0
+        now = time.time()
+        is_historical = bool(raw_ts > 0 and (now - raw_ts) > 900.0)
+
+        action_id = generate_financial_advisory_id(amount, tx_type, merchant, notif.text)
         verbatim_text = f"Record {tx_label} of INR {amount:,.2f} for {merchant} to Ledger"
-        speech_prompt = (
+        speech_prompt = None if is_historical else (
             f"Sir, a {tx_label} of exactly {amount:,.2f} rupees for {merchant} was detected. "
             f"Shall I log this to your ledger under {category}?"
         )
+        priority = "LOW" if is_historical else "HIGH"
 
         return StagedAction(
             id=action_id,
@@ -494,10 +526,10 @@ class NotificationEvaluator:
                 "source_package": notif.package_name,
                 "source_title": notif.title,
                 "raw_text": notif.text,
-                "post_time": getattr(notif, "post_time", getattr(notif, "timestamp", time.time())),
+                "post_time": raw_ts or now,
             },
             speech_prompt=speech_prompt,
-            priority="HIGH",
+            priority=priority,
         )
 
     def _try_parse_peer_debt(self, notif: MobileNotification) -> Optional[StagedAction]:
@@ -524,7 +556,7 @@ class NotificationEvaluator:
             return None
 
         peer_name = notif.title.strip()
-        action_id = f"act_debt_{int(time.time())}_{int(amount)}"
+        action_id = generate_debt_advisory_id(amount, peer_name, notif.text)
         verbatim_text = f"Debt of INR {amount:,.2f} to {peer_name}"
         speech_prompt = (
             f"Sir, {peer_name} indicated a share of {amount:,.2f} rupees. "
@@ -553,6 +585,15 @@ class NotificationEvaluator:
 
     def _try_extract_otp(self, notif: MobileNotification) -> Optional[str]:
         """Regex for OTP / verification codes to surface immediately on HUD."""
+        # Reject historical SMS / replayed notifications (> 10 minutes old)
+        raw_ts = getattr(notif, "post_time", getattr(notif, "timestamp", 0.0))
+        if raw_ts > 1e11:
+            raw_ts = raw_ts / 1000.0
+        now = time.time()
+        if raw_ts > 0 and (now - raw_ts) > 600.0:
+            logger.info(f"[NotificationEvaluator] Suppressed historical OTP extraction (age: {now - raw_ts:.1f}s > 600s)")
+            return None
+
         pkg = (notif.package_name or "").lower().strip()
         combined = f"{notif.title} {notif.text}".lower()
 
@@ -572,7 +613,7 @@ class NotificationEvaluator:
         cleaned = re.sub(r"(?:rs\.?|inr|₹|\$)\s*[\d,]+(?:\.\d+)?", "", f"{notif.title} {notif.text}", flags=re.I)
         match = re.search(r"\b(?:otp|one[- ]time\s+(?:password|pin|code)|verification\s+code|security\s+code|login\s+code|auth(?:entication)?\s+code|secret\s+code)\b[^\w\d]*(?:is\s+)?(\d{4,8})\b", cleaned, re.IGNORECASE)
         if not match:
-            match = re.search(r"\b(\d{4,8})\b[^\w\d]*(?:is your (?:otp|verification|security|login)\s+code|is the otp to|to verify your account)\b", cleaned, re.IGNORECASE)
+            match = re.search(r"\b(\d{4,8})\b[^\w\d]*(?:is your (?:otp|verification|security|login|one[- ]time\s+(?:password|pin|code))(?:\s+(?:code|for|to))?|is the otp to|to verify your account)\b", cleaned, re.IGNORECASE)
         if not match:
             match = re.search(r"\b(?:code|pin)\s+to\s+(?:verify|login|authenticate|sign\s+in)\b[^\w\d]*(?:is\s+)?(\d{4,8})\b", cleaned, re.IGNORECASE)
         if match:
@@ -620,8 +661,7 @@ class NotificationEvaluator:
             if not task_title or len(task_title) < 3:
                 return None
 
-
-            action_id = f"act_task_{int(time.time())}"
+            action_id = generate_task_advisory_id(task_title, notif.title)
             verbatim_text = f"Task: {task_title}"
             speech_prompt = (
                 f"Sir, an actionable message from {notif.title} was detected. "

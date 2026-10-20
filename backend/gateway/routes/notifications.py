@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from backend.shared.events import Channel, EventType, ServerEnvelope
-from backend.sync.notification_service import notification_service
+from backend.sync.notification_service import NotificationPriority, notification_service
 from backend.sync.sync_manager import sync_manager
 
 logger = logging.getLogger("vesper.gateway.routes.notifications")
@@ -205,3 +206,68 @@ async def trigger_executive_briefing(force: bool = Query(True)) -> Dict[str, Any
 
     await proactive_agent.deliver_startup_briefing(force=force)
     return {"status": "dispatched"}
+
+
+class BatchNotificationRequest(BaseModel):
+    device_id: str = "mobile_client"
+    device_name: str = "Mobile Companion"
+    notifications: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+@router.post("/batch")
+async def ingest_notification_batch(req: BatchNotificationRequest, request: Request) -> Dict[str, Any]:
+    """Processes a batch of notifications flushed on mobile companion reconnection."""
+    import time
+    from backend.agent.tools.notification_batch_tool import triage_notification_backlog_batch
+
+    # Ingest each into notification_service ring buffer
+    for item in req.notifications:
+        notification_service.ingest_notification(
+            payload=item,
+            source_device_id=req.device_id,
+            source_device_name=req.device_name,
+        )
+
+    # Execute batch triage engine
+    result = await triage_notification_backlog_batch(
+        notifications=req.notifications,
+        device_id=req.device_id,
+        device_name=req.device_name,
+    )
+
+    # Sync state count and preview
+    recent = [n.to_dict() for n in notification_service.get_recent_notifications(limit=5)]
+    await sync_manager.sync_notifications(
+        unread_count=notification_service.get_unread_count(),
+        recent=recent,
+    )
+
+    # Broadcast Catch-Up Briefing to Desk HUD if there are retained items
+    conn_mgr = getattr(request.app.state, "connection_manager", None)
+    if conn_mgr and result.get("retained_count", 0) > 0:
+        hud_envelope = ServerEnvelope(
+            uuid=f"batch_briefing_{int(time.time())}",
+            channel=Channel.NOTIFY,
+            type=EventType.NOTIFICATION_DIGEST,
+            payload={
+                "source_client": req.device_id,
+                "device_name": req.device_name,
+                "notification": {
+                    "app_name": "Alfred - Batch Triage",
+                    "title": "Companion Reconnect Briefing",
+                    "text": result.get("catch_up_briefing", ""),
+                    "priority": NotificationPriority.HIGH,
+                },
+                "batch_result": result,
+                "is_batch_briefing": True,
+            },
+        )
+        try:
+            await conn_mgr.broadcast(hud_envelope)
+        except Exception as e:
+            logger.warning(f"[NOTIF_BATCH] Desk HUD broadcast failed: {e}")
+
+    return {
+        "status": "ok",
+        "result": result,
+    }

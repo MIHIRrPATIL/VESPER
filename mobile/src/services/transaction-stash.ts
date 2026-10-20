@@ -22,6 +22,7 @@ export interface StashedTransaction {
   confidence: number; // 0.0 to 1.0
   status: 'STASHED' | 'ENRICHING' | 'PROMOTED' | 'DISCARDED';
   enrichment_source?: 'REGEX' | 'GEMINI_BATCH' | 'MANUAL';
+  settle_debt_id?: string;
 }
 
 const STASH_STORAGE_KEY = 'vesper_transaction_stash';
@@ -152,7 +153,10 @@ export class TransactionStash {
   /**
    * Promotes a single stashed transaction into the active ledger and offlinesync queue.
    */
-  public async promoteToLedger(id: string): Promise<boolean> {
+  public async promoteToLedger(
+    id: string,
+    options?: { settle_debt_id?: string; account_id?: string; category?: string }
+  ): Promise<boolean> {
     const current = await this.getStash();
     const item = current.find((t) => t.id === id);
     if (!item) return false;
@@ -162,14 +166,31 @@ export class TransactionStash {
     const remaining = current.filter((t) => t.id !== id);
     await this.saveStash(remaining);
 
-    // 2. Commit to active offline ledger queue
+    // 2. Commit to active offline ledger queue with normalized payload
+    const settleDebtId = options?.settle_debt_id || item.settle_debt_id;
+    const targetAccountId = options?.account_id || item.account_id;
+    const targetCategory = options?.category || item.category || 'General';
+    const normalizedType: 'EXPENSE' | 'INCOME' | 'TRANSFER' =
+      (item.type?.toUpperCase() === 'INCOME' || item.type?.toLowerCase() === 'credit')
+        ? 'INCOME'
+        : (item.type?.toUpperCase() === 'TRANSFER' ? 'TRANSFER' : 'EXPENSE');
+    const dateFormatted = new Date(item.timestamp).toISOString().split('T')[0];
+
     const payload = {
-      type: item.type,
+      type: normalizedType,
       amount: item.amount,
-      category: item.category || 'General',
+      category: targetCategory,
       description: item.description || item.merchant || 'Bank Transaction',
-      account_id: item.account_id,
-      date: new Date(item.timestamp).toISOString(),
+      account_id: targetAccountId,
+      date: dateFormatted,
+      settle_debt_id: settleDebtId,
+      metadata: {
+        raw_text: item.raw_text,
+        package_name: item.package_name,
+        merchant: item.merchant,
+        settle_debt_id: settleDebtId,
+        source: 'mobile_stash_approval',
+      },
     };
 
     // Enqueue for Gateway / Supabase syncing

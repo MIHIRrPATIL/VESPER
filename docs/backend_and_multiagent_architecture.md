@@ -160,6 +160,15 @@ graph TB
 * **Tools**: `detect_objects(image)`, `read_document_text(image)`, `inspect_scene_vlm(image, prompt)`.
 * **Behavior**: Executed on-demand when the user gestures or asks *"Read this document"* or *"What's on my desk?"*.
 
+### 7. `ConversationAgent` (The Dialogue & Memory Companion)
+* **Domain**: Casual conversation, remarks, philosophical banter, greetings, compliments, and dialogue history.
+* **Tools**: `chit_chat(query, topic_hint)`, `recall_conversations(query, time_range)`, `proactive_check_in()`.
+* **Persona**: Thoughtful, articulate, empathetic, and subtly witty British butler (Alfred persona).
+* **Behavior & Conversational Freedom**:
+  * Greets the user naturally, acknowledging time of day and past conversational topics without robotic boilerplate.
+  * Welcomes guests, acknowledges personal observations, compliments, and casual thoughts (e.g. *"the most memorable product I've ever seen"*, *"please welcome our guest"*).
+  * **Anti-Paranoia Security Boundary**: Security rejection (*"I am afraid I cannot comply..."*) is strictly confined to genuine prompt injection attacks (system prompt leaks, instruction overrides, or jailbreak triggers). Casual banter, user questions regarding guidelines/rules, and compliments are NEVER treated as security incidents.
+
 ---
 
 ## 6. Proactive Background Agents
@@ -241,4 +250,38 @@ To prevent double-creation and state bounce-back across distributed clients (Mob
    - Mobile and desktop clients assign temporary IDs (`local_task_<timestamp>`) for immediate 0ms UI rendering. When a user marks a task done before server ID resolution completes, `PATCH /api/tasks/{task_id}/toggle` automatically reconciles the optimistic ID against the most recently created task.
 4. **State Contract & Toggle Response**:
    - `toggle_task_done` returns `{ "status": "ok", "done": new_done, "task": {...} }`. Clients consume the explicit boolean state and update React state immutably with the permanent database UUID.
+
+---
+
+## 10. Proactive Advisory Engine, Mobile Batch Triage & Idempotency Pipeline
+
+To prevent notification storms, duplicate voice announcements, and phantom OTP alerts when mobile companions reconnect after offline intervals:
+
+### 1. Deterministic SHA256 Advisory Idempotency
+- **Deterministic Hashing**: Every proactive recommendation generates a canonical SHA256 hash formatted as `act_{domain}_{hash[:16]}` (e.g. `act_fin_...`, `act_otp_...`, `act_task_...`, `act_debt_...`).
+- **Persistent SQLite Registry**: `AdvisoryIdempotencyRegistry` (`~/.config/vesper/advisory_idempotency.db`) tracks dispatches across restarts.
+- **Duplicate Action Suppression**: In `ActionQueueManager`, duplicate IDs are marked with `status="duplicate"` and rejected from re-queueing or re-broadcasting over WebSocket/TTS channels.
+
+### 2. Time-To-Live (TTL) & Ambient vs. Spoken Advisory Rules
+- **OTP / 2FA Extraction**:
+  - Max 10-minute validity threshold. Historical SMS older than 600s are silently dropped.
+  - Strict exclusion of ride-sharing/delivery PINs (Uber, Ola, Rapido, Swiggy, Zomato, Blinkit) and postal PIN codes.
+- **Financial Transaction Speech Gating**:
+  - Transactions received >15 minutes after real-world occurrence are staged silently with `speech_prompt=None` and `priority="LOW"`.
+  - Only fresh transactions within 15 minutes trigger spoken audio confirmation questions to the desk.
+- **Human Attribution**:
+  - The notification evaluator derives human sender contact names (`title`) rather than raw package identifiers (e.g. "Hitanshu Gala via WhatsApp" instead of "WhatsApp" or "Messages").
+
+### 3. Mobile Reconnection Batch Triage Engine
+- **Adaptive Flush Threshold**:
+  - If `queueToFlush.length < 3`, the mobile companion fires individual direct HTTP requests (`POST /api/notifications/relay`) directly for immediate low-overhead delivery.
+  - If `queueToFlush.length >= 3`, the backlog is routed to `POST /api/notifications/batch` and processed via `NotificationBatchTool` (`triage_notification_backlog_batch`).
+- **Executive Catch-Up Briefing**: Generates a single high-level spoken summary (e.g., *"Sir, while your mobile device was offline, 3 transactions totaling INR 2,450 were recorded, and 1 important message from Hitanshu arrived."*) instead of firing individual speech alerts.
+- **Standalone CLI**: `python3 scripts/process_notification_backlog.py` provides standalone triage support for offline notification archives.
+
+### 4. Bank Account Attribution & Peer Tab Auto-Settlement
+- **Indian Bank Pattern Matching**: Deterministic regex extractors in both backend (`notification_evaluator.py`) and mobile companion (`transaction-extractor.ts`) recognize Saraswat Bank (`SRCBBK`), Union Bank of India (`UNIONB`), SBI, HDFC, ICICI, Kotak, Axis, etc.
+- **Atomic Balance Mutation**: When a transaction is logged to `repositories/finance.py`, the associated account balance is adjusted atomically (`balance - amount` for debit/expenses, `balance + amount` for credit/income).
+- **1-Tap Peer Tab Auto-Settlement**: If a transaction merchant/description or explicit `settle_debt_id` matches an active peer debt, the peer tab is automatically settled or deducted upon approval.
+
 

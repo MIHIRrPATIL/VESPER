@@ -324,6 +324,36 @@ class FinanceRepository:
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }).eq("id", txn.to_account_id).execute()
 
+        # Check and handle peer debt settlement
+        settle_debt_id = getattr(txn, "settle_debt_id", None) or txn.metadata.get("settle_debt_id")
+        if not settle_debt_id:
+            person = txn.metadata.get("person") or txn.metadata.get("counterparty")
+            if not person and txn.description:
+                try:
+                    unsettled = self.get_unsettled_debts(user_id=txn.user_id)
+                    for d in unsettled:
+                        if d.person.strip().lower() in txn.description.lower() and abs(d.amount - txn.amount) < 0.01:
+                            settle_debt_id = d.id
+                            break
+                except Exception:
+                    pass
+            elif person:
+                try:
+                    unsettled = self.get_unsettled_debts(user_id=txn.user_id)
+                    for d in unsettled:
+                        if d.person.strip().lower() == person.strip().lower() and abs(d.amount - txn.amount) < 0.01:
+                            settle_debt_id = d.id
+                            break
+                except Exception:
+                    pass
+
+        if settle_debt_id:
+            try:
+                self.settle_debt(debt_id=settle_debt_id, user_id=txn.user_id, create_transaction=False)
+                logger.info("Auto-settled peer debt %s via transaction %s", settle_debt_id, created_txn.id)
+            except Exception as e:
+                logger.warning("Failed to auto-settle debt %s: %s", settle_debt_id, e)
+
         return created_txn
 
     def get_transactions(

@@ -30,6 +30,38 @@ if (Platform.OS === 'android') {
       'com.sec.android.app.shealth',
     ]);
 
+    const PACKAGE_APP_NAME_MAP: Record<string, string> = {
+      'com.whatsapp': 'WhatsApp',
+      'com.whatsapp.w4b': 'WhatsApp Business',
+      'org.telegram.messenger': 'Telegram',
+      'com.slack': 'Slack',
+      'com.discord': 'Discord',
+      'com.google.android.apps.messaging': 'Messages',
+      'com.samsung.android.messaging': 'Messages',
+      'com.android.mms': 'Messages',
+      'com.android.messaging': 'Messages',
+      'org.thoughtcrime.securesms': 'Signal',
+      'com.google.android.gm': 'Gmail',
+      'com.google.android.apps.nbu.paisa.user': 'Google Pay',
+      'com.phonepe.app': 'PhonePe',
+      'net.one97.paytm': 'Paytm',
+      'com.cred.club': 'CRED',
+      'com.dreamplug.androidapp': 'CRED',
+      'com.snapwork.hdfc': 'HDFC Bank',
+      'com.hdfcbank.netbanking': 'HDFC Bank',
+      'com.csam.icici.bank.imobile': 'ICICI Bank',
+      'com.sbi.lotusintouch': 'SBI',
+      'com.msf.kbank.mobile': 'Kotak Bank',
+      'com.axis.mobile': 'Axis Bank',
+      'com.saraswatbank.mobile': 'Saraswat Bank',
+      'com.unionbank.online': 'Union Bank',
+      'com.ubercab': 'Uber',
+      'com.olacabs': 'Ola',
+      'in.swiggy.android': 'Swiggy',
+      'com.application.zomato': 'Zomato',
+      'com.blinkit.app': 'Blinkit',
+    };
+
     // Track recent notification state by app package + title (OS Notification Panel model)
     const recentNotifs = new Map<string, { text: string; time: number }>();
 
@@ -205,9 +237,11 @@ if (Platform.OS === 'android') {
         else if (isFinancial) category = 'FINANCIAL';
         else if (isTelephony) category = 'DIRECT';
 
+        const resolvedAppName = PACKAGE_APP_NAME_MAP[pkg] || (parsed.appName && typeof parsed.appName === 'string' ? parsed.appName : '') || 'Android App';
+
         const payload = {
           package_name: parsed.app || 'com.unknown.app',
-          app_name: parsed.app || 'Android App',
+          app_name: resolvedAppName,
           title: title || 'Notification',
           text: text,
           subtext: parsed.subText,

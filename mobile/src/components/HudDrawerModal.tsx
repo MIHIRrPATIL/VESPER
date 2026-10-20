@@ -494,8 +494,7 @@ const TransactionRenderer: React.FC<{ data: Record<string, any> }> = ({ data }) 
   if (isSummaryCard) {
     const netWorth = Number(data.total_net_worth || 0);
     const accounts: any[] = Array.isArray(data.accounts) ? data.accounts : [];
-    const recentTxns: any[] = (Array.isArray(data.recent_transactions) ? data.recent_transactions : [])
-      .filter((t: any) => Number(t?.amount) !== 150);
+    const recentTxns: any[] = Array.isArray(data.recent_transactions) ? data.recent_transactions : [];
 
     return (
       <View style={styles.cardDetailCol}>

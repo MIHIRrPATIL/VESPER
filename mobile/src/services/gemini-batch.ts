@@ -16,9 +16,16 @@ export class GeminiBatchEnricher {
   public static async getApiKey(): Promise<string> {
     try {
       const stored = await AsyncStorage.getItem(GEMINI_API_KEY_STORAGE);
-      return stored ? stored.trim() : '';
-    } catch {
+      if (stored && stored.trim().length > 0) {
+        return stored.trim();
+      }
+      const envKey = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
+      if (envKey && envKey.trim().length > 0) {
+        return envKey.trim();
+      }
       return '';
+    } catch {
+      return process.env.EXPO_PUBLIC_GEMINI_API_KEY?.trim() || '';
     }
   }
 
@@ -104,13 +111,19 @@ ${JSON.stringify(batchPayload, null, 2)}`;
 
       const data = await response.json();
       const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+      let cleanJson = rawText.trim();
+      if (cleanJson.startsWith('```json')) {
+        cleanJson = cleanJson.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+      } else if (cleanJson.startsWith('```')) {
+        cleanJson = cleanJson.replace(/^```\s*/, '').replace(/\s*```$/, '');
+      }
       const results: Array<{
         id: string;
         merchant?: string;
         nature?: string;
         description?: string;
         confidence?: number;
-      }> = JSON.parse(rawText);
+      }> = JSON.parse(cleanJson);
 
       let enrichedCount = 0;
       for (const res of results) {

@@ -60,8 +60,7 @@ export const LedgerTab: React.FC = () => {
     if (cAccs && cAccs.length > 0) setAccounts(cAccs);
     if (cDbs) setDebts(cDbs);
     if (cTxs && Array.isArray(cTxs)) {
-      const cleaned = cTxs.filter((t: any) => Number(t.amount) !== 150);
-      setTransactions(cleaned);
+      setTransactions(cTxs);
     }
     if (stashed) setStashedItems(stashed);
     setPendingCount(pCount);
@@ -93,9 +92,8 @@ export const LedgerTab: React.FC = () => {
         hadLiveSuccess = true;
       }
       if (Array.isArray(txs)) {
-        const cleaned = txs.filter((t: any) => Number(t.amount) !== 150);
-        setTransactions(cleaned);
-        offlineStore.saveCachedTransactions(cleaned);
+        setTransactions(txs);
+        offlineStore.saveCachedTransactions(txs);
         hadLiveSuccess = true;
       }
 
@@ -127,12 +125,13 @@ export const LedgerTab: React.FC = () => {
     };
   }, [loadLedgerData]);
 
-  const handleApproveStashItem = async (id: string) => {
-    await transactionStash.promoteToLedger(id);
+  const handleApproveStashItem = async (id: string, settleDebtId?: string) => {
+    await transactionStash.promoteToLedger(id, { settle_debt_id: settleDebtId });
     const updated = await transactionStash.getStash();
     setStashedItems(updated);
     const cTxs = await offlineStore.getCachedTransactions();
     setTransactions(cTxs);
+    loadLedgerData();
   };
 
   const handleDiscardStashItem = async (id: string) => {
@@ -147,6 +146,7 @@ export const LedgerTab: React.FC = () => {
     setStashedItems(updated);
     const cTxs = await offlineStore.getCachedTransactions();
     setTransactions(cTxs);
+    loadLedgerData();
   };
 
   const handleBatchEnrichStash = async () => {
@@ -680,6 +680,16 @@ export const LedgerTab: React.FC = () => {
                   minute: "2-digit",
                 });
 
+                const matchingDebt = debts.find((d) => {
+                  if (d.settled) return false;
+                  const pName = (d.person || "").trim().toLowerCase();
+                  if (!pName || pName.length < 2) return false;
+                  const merchant = (item.merchant || "").toLowerCase();
+                  const desc = (item.description || "").toLowerCase();
+                  const raw = (item.raw_text || "").toLowerCase();
+                  return merchant.includes(pName) || desc.includes(pName) || raw.includes(pName);
+                });
+
                 return (
                   <View key={item.id} style={styles.stashCardOuter}>
                     <View style={styles.stashCardInner}>
@@ -742,6 +752,19 @@ export const LedgerTab: React.FC = () => {
                           {dateStr} • {item.enrichment_source || "ON-DEVICE"}
                         </Text>
                       </View>
+
+                      {/* Peer Debt Settlement Action if counterparty matches */}
+                      {matchingDebt && (
+                        <TouchableOpacity
+                          style={styles.stashSettlePeerBtn}
+                          onPress={() => handleApproveStashItem(item.id, matchingDebt.id)}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={styles.stashSettlePeerBtnText}>
+                            APPROVE &amp; SETTLE PEER TAB ({matchingDebt.person.toUpperCase()})
+                          </Text>
+                        </TouchableOpacity>
+                      )}
 
                       {/* Bottom row: Inline 1-tap Actions */}
                       <View style={styles.stashActionRow}>
@@ -1859,6 +1882,8 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+    flexWrap: "wrap",
+    gap: 6,
   },
   stashAmountGroup: {
     flexDirection: "row",
@@ -1885,6 +1910,7 @@ const styles = StyleSheet.create({
   stashBadgeGroup: {
     flexDirection: "row",
     alignItems: "center",
+    flexWrap: "wrap",
     gap: 4,
   },
   stashCategoryPill: {
@@ -1983,5 +2009,24 @@ const styles = StyleSheet.create({
     color: theme.colors.boneWhite,
     fontWeight: "700",
     letterSpacing: 0.5,
+  },
+  stashSettlePeerBtn: {
+    backgroundColor: "rgba(16, 185, 129, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(16, 185, 129, 0.4)",
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    borderRadius: 7,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 6,
+    width: "100%",
+  },
+  stashSettlePeerBtnText: {
+    fontFamily: theme.fonts.mono,
+    fontSize: 9,
+    fontWeight: "700",
+    color: theme.colors.emerald,
+    letterSpacing: 0.8,
   },
 });

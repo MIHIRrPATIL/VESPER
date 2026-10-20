@@ -36,7 +36,7 @@ class StagedAction(BaseModel):
     params: Dict[str, Any]
     verbatim_text: str  # Exact text/figures to read back without paraphrasing
     raw_evidence: Dict[str, Any] = Field(default_factory=dict)
-    speech_prompt: str = ""
+    speech_prompt: Optional[str] = ""
     status: str = "staged"  # "staged", "confirmed", "rejected", "expired", "pending_return"
     priority: str = "HIGH"  # "URGENT", "HIGH", "MEDIUM"
     created_at: float = Field(default_factory=time.time)
@@ -70,6 +70,20 @@ class ActionQueueManager:
     def stage_action(self, action: StagedAction) -> StagedAction:
         """Adds a newly formulated recommendation to the staged queue with deduplication."""
         now = time.time()
+
+        from backend.agent.proactive.advisory_idempotency import advisory_registry
+
+        # 0. Check persistent/LRU idempotency registry
+        if advisory_registry.is_dispatched(action.id):
+            logger.info(
+                f"[ActionQueue] Suppressed previously dispatched action '{action.id}' "
+                f"[{action.domain}:{action.action}] verbatim: '{action.verbatim_text[:60]}'"
+            )
+            existing = self._queue.get(action.id)
+            if existing:
+                return existing
+            action.status = "duplicate"
+            return action
 
         # Check for duplicate action within debounce window (comparing active unconfirmed actions)
         for existing_id, existing in list(self._queue.items()):
@@ -105,6 +119,7 @@ class ActionQueueManager:
                     )
                     # Extend expiry if needed, but do not re-prompt or duplicate
                     existing.expires_at = max(existing.expires_at, now + 120.0)
+                    advisory_registry.record_dispatch(action.id, domain=action.domain)
                     return existing
 
         # Evict oldest items if queue exceeds capacity
@@ -115,6 +130,7 @@ class ActionQueueManager:
         self._queue[action.id] = action
         self._last_prompted_action_id = action.id
         self._last_prompt_time = time.time()
+        advisory_registry.record_dispatch(action.id, domain=action.domain)
 
         logger.info(
             f"[ActionQueue] Staged action '{action.id}' [{action.domain}:{action.action}] "

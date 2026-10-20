@@ -565,9 +565,17 @@ class WorkstationStore {
         };
         this.notify();
       }
-    } else if (type === 'PROACTIVE_ALERT' || type === 'NOTIFICATION_RELAY') {
+    } else if (type === 'PROACTIVE_ALERT') {
+      const alertId = envelope.uuid || payload?.staged_action_id || payload?.id;
+      if (!alertId) return;
+
+      // Prevent duplicate advisories
+      if (this.proactiveAdvisories.some((a) => a.id === alertId || (a.stagedActionId && a.stagedActionId === alertId))) {
+        return;
+      }
+
       const alert: ProactiveAlert = {
-        id: envelope.uuid || Math.random().toString(36),
+        id: alertId,
         title: payload?.title || 'Cluster Advisory',
         body: payload?.text || payload?.body || 'High-urgency notice from cluster',
         appName: payload?.app_name || payload?.package_name || 'VESPER',
@@ -578,7 +586,7 @@ class WorkstationStore {
         stagedAction: payload?.staged_action,
         dismissed: false,
       };
-      this.proactiveAdvisories = [alert, ...this.proactiveAdvisories.slice(0, 9)];
+      this.proactiveAdvisories = [alert, ...this.proactiveAdvisories.filter((a) => a.id !== alertId).slice(0, 9)];
       this.notify();
     } else if (type === 'PROACTIVE_RESOLVE') {
       const actionIds: string[] = payload?.action_ids || (payload?.action_id ? [payload.action_id] : []);

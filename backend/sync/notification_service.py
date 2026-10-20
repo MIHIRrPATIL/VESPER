@@ -26,7 +26,7 @@ class NotificationPriority:
 class MobileNotification(BaseModel):
     """Normalized mobile notification envelope."""
     id: str = Field(default_factory=lambda: f"notif_{uuid.uuid4().hex[:10]}")
-    device_id: str
+    device_id: str = "mobile_client"
     device_name: str = "Mobile Device"
     package_name: str = "unknown"
     app_name: str = "App"
@@ -462,8 +462,8 @@ class NotificationService:
                 self._active_notifications.pop(evicted_key, None)
 
         logger.info(
-            f"[NotificationService] Ingested alert [{prio}] from {app} ({source_device_name}): "
-            f"\"{title}\" - {text[:60]}"
+            f"[NotificationService] Ingested alert [{prio}] from '{title}' via {app} ({source_device_name}): "
+            f"\"{text[:60]}\""
         )
         return notif
 

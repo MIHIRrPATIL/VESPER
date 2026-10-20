@@ -31,8 +31,20 @@ export class SupabaseClient {
         this.cachedConfig = { url: url.trim(), key: key.trim() };
         return this.cachedConfig;
       }
+      const envUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+      const envKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || process.env.EXPO_PUBLIC_SUPABASE_KEY;
+      if (envUrl && envKey) {
+        this.cachedConfig = { url: envUrl.trim(), key: envKey.trim() };
+        return this.cachedConfig;
+      }
     } catch {
       // Ignore storage error
+    }
+    const envUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+    const envKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || process.env.EXPO_PUBLIC_SUPABASE_KEY;
+    if (envUrl && envKey) {
+      this.cachedConfig = { url: envUrl.trim(), key: envKey.trim() };
+      return this.cachedConfig;
     }
     return null;
   }
